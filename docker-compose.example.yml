@@ -1,0 +1,42 @@
+services:
+  cashflow:
+    build:
+      context: .
+      target: runtime
+    container_name: cashflow
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-3000}
+      DATA_DIR: /app/data
+      LOGS_DIR: /app/logs
+    volumes:
+      - cashflow-data:/app/data
+      - cashflow-logs:/app/logs
+    ports:
+      - "${CASHFLOW_HTTP_PORT:-3000}:${PORT:-3000}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  cashflow-test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      PORT: 3000
+      DATA_DIR: /app/data
+      LOGS_DIR: /app/logs
+    volumes:
+      - cashflow-test-data:/app/data
+      - cashflow-test-logs:/app/logs
+    command: ["npm", "test"]
+
+volumes:
+  cashflow-data:
+  cashflow-logs:
+  cashflow-test-data:
+  cashflow-test-logs:

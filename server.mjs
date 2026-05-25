@@ -1,9 +1,13 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import dotenv from "dotenv";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Load optional local .env defaults before resolving runtime paths; real environment variables still win.
+dotenv.config({ path: path.join(__dirname, ".env") });
 
 // Resolve runtime paths from env so Docker/Compose can mount data and logs outside the image.
 const port = Number(process.env.PORT || 3000);

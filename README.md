@@ -159,8 +159,8 @@ Build and run directly:
 docker build -t cashflow .
 docker run --rm \
   -p 3000:3000 \
-  -v ./data:/app/data \
-  -v ./logs:/app/logs \
+  -v cashflow-data:/app/data \
+  -v cashflow-logs:/app/logs \
   cashflow
 ```
 
@@ -180,7 +180,8 @@ With Compose, run the test target through the `test` profile:
 docker compose -f docker-compose.example.yml --profile test run --rm cashflow-test
 ```
 
-Or adapt `docker-compose.example.yml`:
+For the standard app service, start Compose directly. Copy `.env.example` to
+`.env` first only when you want to override the default host/container ports:
 
 ```sh
 docker compose -f docker-compose.example.yml up -d --build
@@ -188,8 +189,8 @@ docker compose -f docker-compose.example.yml up -d --build
 
 For production installs:
 
-- keep `data/` mounted persistently
-- keep `logs/` mounted persistently if you want file logs
+- keep `/app/data` mounted persistently
+- keep `/app/logs` mounted persistently if you want file logs
 - prefer `restart: unless-stopped`
 - put the app behind a reverse proxy with auth
 - do not bake runtime data into the image
@@ -201,12 +202,19 @@ Environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port |
-| `DATA_DIR` | `./data` | SQLite/runtime data directory |
-| `LOGS_DIR` | `./logs` | Log directory |
+| `CASHFLOW_HTTP_PORT` | `3000` | Host port used by the Compose example |
+| `DATA_DIR` | `./data` | SQLite/runtime data directory for non-container process managers |
+| `LOGS_DIR` | `./logs` | Log directory for non-container process managers |
 
-Use `.env.example` as a deployment reference. The app does not load `.env`
-itself; pass variables through your process manager, container runtime, or
-reverse-proxy deployment.
+Use `.env.example` as a deployment reference.
+
+For direct Node/process-manager installs, the app optionally loads `.env` from
+the app root at startup. Existing process environment variables still win, so
+systemd, Docker, TrueNAS, and other process managers can override file defaults.
+
+Docker Compose also reads a local `.env` file for variable substitution, such
+as `PORT` and `CASHFLOW_HTTP_PORT`. The Compose example only passes explicitly
+listed variables into the container.
 
 ## Runtime Data
 
