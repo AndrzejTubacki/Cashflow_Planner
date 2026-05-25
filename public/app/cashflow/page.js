@@ -13,6 +13,7 @@ import {
   renderGoalsTab
 } from "./target-tabs.js";
 import {
+  formatMessage,
   localeOf,
   renderProjectionWarnings,
   t
@@ -20,25 +21,29 @@ import {
 
 export { attachCashflowHandlers };
 
-function renderValidationResult(validationResult = null) {
+function renderValidationResult(locale, validationResult = null) {
   if (!validationResult) return "";
 
   const warnings = Array.isArray(validationResult.warnings) ? validationResult.warnings : [];
   const hasWarnings = warnings.length > 0;
   const title = hasWarnings
-    ? `Validation found ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`
-    : "Validation passed";
+    ? formatMessage(
+      locale,
+      warnings.length === 1 ? "Validation found {count} warning" : "Validation found {count} warnings",
+      { count: warnings.length }
+    )
+    : t(locale, "Validation passed");
 
   return `
-    <div class="cashflow-validation cashflow-validation--${hasWarnings ? "warning" : "ok"}">
+      <div class="cashflow-validation cashflow-validation--${hasWarnings ? "warning" : "ok"}">
       <strong>${escapeHtml(title)}</strong>
-      <span>${escapeHtml(hasWarnings ? "Review the warnings below before trusting the projection." : "No validation warnings were found.")}</span>
+      <span>${escapeHtml(hasWarnings ? t(locale, "Review the warnings below before trusting the projection.") : t(locale, "No validation warnings were found."))}</span>
       ${hasWarnings ? `
         <ul>
           ${warnings.slice(0, 8).map(warning => `
-            <li>${escapeHtml(warning?.message || warning?.type || "Validation warning")}</li>
+            <li>${escapeHtml(t(locale, warning?.message || warning?.type || "Validation warning"))}</li>
           `).join("")}
-          ${warnings.length > 8 ? `<li>${escapeHtml(`${warnings.length - 8} more warnings not shown`)}</li>` : ""}
+          ${warnings.length > 8 ? `<li>${escapeHtml(formatMessage(locale, "{count} more warnings not shown", { count: warnings.length - 8 }))}</li>` : ""}
         </ul>
       ` : ""}
     </div>
@@ -103,7 +108,7 @@ function renderFxTopBar(locale, cashflow = null, fx = null) {
 
   const ledgerChip = `
     <span class="cashflow-chip">
-      ${escapeHtml(t(locale, "Ledger", "Ledger"))}: <strong>PLN</strong>
+      ${escapeHtml(t(locale, "Ledger"))}: <strong>PLN</strong>
     </span>
   `;
 
@@ -124,7 +129,7 @@ function renderFxTopBar(locale, cashflow = null, fx = null) {
   return `
     <div class="cashflow-header__chips cashflow-header__chips--ticker">
       ${ledgerChip}
-      <div class="cashflow-fx-ticker" aria-label="${escapeHtml(t(locale, "FX rates", "FX rates"))}">
+      <div class="cashflow-fx-ticker" aria-label="${escapeHtml(t(locale, "FX rates"))}">
         <div class="cashflow-fx-ticker__track">
           ${tickerItems}
           ${tickerItems}
@@ -148,7 +153,7 @@ function renderCashflowPageContent({
     return `
       <div class="cashflow-page" data-cashflow-page>
         <div class="empty-state">
-          <h2>${escapeHtml(t(locale, "Error", "Error"))}</h2>
+          <h2>${escapeHtml(t(locale, "Error"))}</h2>
           <p>${escapeHtml(error)}</p>
         </div>
       </div>
@@ -156,14 +161,14 @@ function renderCashflowPageContent({
   }
 
   const tabs = [
-    { id: "ledger", label: t(locale, "Ledger", "Ledger") },
-    { id: "recurring", label: t(locale, "Recurring expenses", "Recurring expenses") },
-    { id: "income", label: t(locale, "Recurring income", "Recurring income") },
-    { id: "oneoff", label: t(locale, "One-off", "One-off") },
-    { id: "goals", label: t(locale, "Goals", "Goals") },
-    { id: "flex", label: t(locale, "Flex", "Flex") },
-    { id: "priority", label: t(locale, "Priorities", "Priorities") },
-    { id: "settings", label: t(locale, "Settings", "Settings") }
+    { id: "ledger", label: t(locale, "Ledger") },
+    { id: "recurring", label: t(locale, "Recurring expenses") },
+    { id: "income", label: t(locale, "Recurring income") },
+    { id: "oneoff", label: t(locale, "One-off") },
+    { id: "goals", label: t(locale, "Goals") },
+    { id: "flex", label: t(locale, "Flex") },
+    { id: "priority", label: t(locale, "Priorities") },
+    { id: "settings", label: t(locale, "Settings") }
   ];
 
   return `
@@ -172,12 +177,12 @@ function renderCashflowPageContent({
         <div class="cashflow-header__main">
           <div>
             <div class="cashflow-title-line">
-              <h2>${escapeHtml(t(locale, "Cashflow", "Cashflow"))}</h2>
+              <h2>${escapeHtml(t(locale, "Cashflow"))}</h2>
               ${cashflow?.app?.version ? `
                 <span class="cashflow-version">${escapeHtml(`v${cashflow.app.version}`)}</span>
               ` : ""}
             </div>
-            <p class="cashflow-eyebrow">${escapeHtml(t(locale, "Financial planner", "Financial planner"))}</p>
+            <p class="cashflow-eyebrow">${escapeHtml(t(locale, "Financial planner"))}</p>
           </div>
 
           ${renderFxTopBar(locale, cashflow, fx)}
@@ -185,19 +190,19 @@ function renderCashflowPageContent({
 
         <div class="cashflow-header__actions">
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
-            ${escapeHtml(t(locale, "Refresh FX", "Refresh FX"))}
+            ${escapeHtml(t(locale, "Refresh FX"))}
           </button>
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-validate>
-            ${escapeHtml(t(locale, "Validate", "Validate"))}
+            ${escapeHtml(t(locale, "Validate"))}
           </button>
           <button type="button" class="cashflow-action cashflow-action--primary" data-cashflow-run-jobs>
-            ${escapeHtml(t(locale, "Regenerate", "Regenerate"))}
+            ${escapeHtml(t(locale, "Regenerate"))}
           </button>
         </div>
       </div>
 
       ${message ? `<div class="detail-note">${escapeHtml(message)}</div>` : ""}
-      ${renderValidationResult(validationResult)}
+      ${renderValidationResult(locale, validationResult)}
       ${renderProjectionWarnings(locale, cashflow)}
 
       <div class="cashflow-tabs" data-cashflow-tabs>

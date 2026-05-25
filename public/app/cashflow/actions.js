@@ -1,3 +1,5 @@
+import { formatMessage, t } from "./shared.js";
+
 export function cashflowApiForEntity(entityType, id = null) {
   const routes = {
     "recurring-expense": "/api/recurring-expenses",
@@ -11,7 +13,7 @@ export function cashflowApiForEntity(entityType, id = null) {
   const base = routes[entityType];
 
   if (!base) {
-    throw new Error(`Unknown cashflow entity type: ${entityType}`);
+    throw new Error(formatMessage(null, "Unknown cashflow entity type: {entityType}", { entityType }));
   }
 
   return id ? `${base}/${encodeURIComponent(id)}` : base;
@@ -29,7 +31,7 @@ export async function postCashflowJson(url, body = {}) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(payload.error || `Request failed with status ${response.status}`);
+    throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
   }
 
   return payload;
@@ -39,7 +41,7 @@ export async function runCashflowAction(button, url, eventName, body = {}) {
   const oldText = button.textContent;
 
   button.disabled = true;
-  button.textContent = "Working...";
+  button.textContent = t(null, "Working...");
 
   try {
     const result = await postCashflowJson(url, body);
@@ -69,7 +71,7 @@ export async function validateCashflowAction(button) {
   const oldText = button.textContent;
 
   button.disabled = true;
-  button.textContent = "Validating...";
+  button.textContent = t(null, "Validating...");
 
   try {
     const result = await postCashflowJson("/api/validate");
@@ -92,11 +94,11 @@ export async function validateCashflowAction(button) {
 }
 
 export async function deleteCashflowEntity(button, entityType, id) {
-  if (!window.confirm("Delete this transaction?")) return;
+  if (!window.confirm(t(null, "Delete this transaction?"))) return;
 
   const oldText = button.textContent;
   button.disabled = true;
-  button.textContent = "Working...";
+  button.textContent = t(null, "Working...");
 
   try {
     const response = await fetch(cashflowApiForEntity(entityType, id), {
@@ -105,7 +107,7 @@ export async function deleteCashflowEntity(button, entityType, id) {
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(payload.error || `Request failed with status ${response.status}`);
+      throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
     }
 
     window.dispatchEvent(new CustomEvent("cashflow-deleted", {

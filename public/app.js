@@ -3,8 +3,10 @@ import {
   renderCashflowPage
 } from "./app/cashflow.js";
 import {
+  formatMessage,
   loadLocale,
-  localeOf
+  localeOf,
+  t
 } from "./app/cashflow/shared.js";
 
 const root = document.getElementById("cashflowRoot");
@@ -29,7 +31,7 @@ async function fetchJson(url, options = {}) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(payload.error || `Request failed with status ${response.status}`);
+    throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
   }
 
   return payload;
@@ -40,16 +42,19 @@ function render() {
   attachCashflowHandlers(root, { cashflow: state.cashflow });
 }
 
-async function loadCashflow(message = "") {
-  state.message = message;
+async function loadCashflow(messageKey = "") {
+  state.message = "";
   state.error = "";
   state.validationResult = null;
 
   try {
     state.cashflow = await fetchJson("/api", { cache: "no-store" });
-    await loadLocale(localeOf(state.cashflow));
+    const locale = localeOf(state.cashflow);
+    await loadLocale(locale);
+    document.documentElement.lang = locale;
+    state.message = messageKey ? t(locale, messageKey) : "";
   } catch (error) {
-    state.error = error.message || "Failed to load cashflow";
+    state.error = error.message || t(null, "Failed to load cashflow");
   }
 
   render();
@@ -69,11 +74,11 @@ window.addEventListener("cashflow-refresh", () => {
 });
 
 window.addEventListener("cashflow-saved", () => {
-  state.message = "Saved";
+  state.message = t(null, "Saved");
 });
 
 window.addEventListener("cashflow-error", (event) => {
-  state.error = event.detail?.message || "Cashflow request failed";
+  state.error = event.detail?.message || t(null, "Cashflow request failed");
   state.validationResult = null;
   render();
 });
@@ -84,8 +89,12 @@ window.addEventListener("cashflow-validated", (event) => {
 
   state.error = "";
   state.message = warnings.length
-    ? `Validation found ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`
-    : "Validation passed";
+    ? formatMessage(
+      null,
+      warnings.length === 1 ? "Validation found {count} warning" : "Validation found {count} warnings",
+      { count: warnings.length }
+    )
+    : t(null, "Validation passed");
   state.validationResult = result;
   render();
 });
@@ -99,7 +108,7 @@ window.addEventListener("cashflow-settings-update", async (event) => {
     });
     await loadCashflow("Settings saved");
   } catch (error) {
-    state.error = error.message || "Failed to save settings";
+    state.error = error.message || t(null, "Failed to save settings");
     render();
   }
 });

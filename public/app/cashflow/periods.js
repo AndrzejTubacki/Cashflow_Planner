@@ -21,16 +21,16 @@ export function renderBudgetPeriodStats(locale, cashflow) {
 
   const periodIncomeName = activePeriodIncome
     ? activePeriodIncome.name
-    : t(locale, "Miesiąc kalendarzowy", "Calendar month");
+    : t(locale, "Calendar month");
 
   return `
     <div class="metric-grid cashflow-budget-period">
-      ${renderStatCard(t(locale, "Początek okresu", "Period start"), periodStartDate)}
-      ${renderStatCard(t(locale, "Koniec okresu", "Period end"), periodEndDate)}
-      ${renderStatCard(t(locale, "Następny reset", "Next reset"), nextResetDate)}
-      ${renderStatCard(t(locale, "Zdefiniowany przez", "Defined by"), periodIncomeName)}
-      ${currentPeriod ? renderStatCard(t(locale, "Dochód okresu", "Period income"), formatMoney(currentPeriod.income, "PLN", locale)) : ""}
-      ${currentPeriod ? renderStatCard(t(locale, "Wydatki okresu", "Period expenses"), formatMoney(currentPeriod.expenses, "PLN", locale)) : ""}
+      ${renderStatCard(t(locale, "Period start"), periodStartDate)}
+      ${renderStatCard(t(locale, "Period end"), periodEndDate)}
+      ${renderStatCard(t(locale, "Next reset"), nextResetDate)}
+      ${renderStatCard(t(locale, "Defined by"), periodIncomeName)}
+      ${currentPeriod ? renderStatCard(t(locale, "Period income"), formatMoney(currentPeriod.income, "PLN", locale)) : ""}
+      ${currentPeriod ? renderStatCard(t(locale, "Period expenses"), formatMoney(currentPeriod.expenses, "PLN", locale)) : ""}
     </div>
   `;
 }

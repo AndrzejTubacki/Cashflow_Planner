@@ -38,9 +38,9 @@ export function renderGoalsTab(locale, cashflow) {
       running_balance: null,
 
       note: [
-        `${t(locale, "Priority", "Priority")}: ${g.priority ?? EMPTY_VALUE}`,
-        `${t(locale, "Target in PLN", "Target in PLN")}: ${targetLedger ? formatMoney(targetLedger, "PLN", locale) : EMPTY_VALUE}`,
-        `${t(locale, "Remaining", "Remaining")}: ${g.remaining_ledger === null ? EMPTY_VALUE : formatMoney(g.remaining_ledger, "PLN", locale)}`
+        `${t(locale, "Priority")}: ${g.priority ?? EMPTY_VALUE}`,
+        `${t(locale, "Target in PLN")}: ${targetLedger ? formatMoney(targetLedger, "PLN", locale) : EMPTY_VALUE}`,
+        `${t(locale, "Remaining")}: ${g.remaining_ledger === null ? EMPTY_VALUE : formatMoney(g.remaining_ledger, "PLN", locale)}`
       ].join(" / ")
     };
   });
@@ -49,9 +49,9 @@ export function renderGoalsTab(locale, cashflow) {
     <div class="cashflow-tab-content" data-cashflow-goals-tab>
       <div class="panel">
         <div class="cashflow-panel-heading">
-          <h3>${escapeHtml(t(locale, "Goals", "Goals"))}</h3>
+          <h3>${escapeHtml(t(locale, "Goals"))}</h3>
           <div class="cashflow-tab-actions">
-            <button class="btn-primary" data-cashflow-add-goal>${escapeHtml(t(locale, "Add goal", "Add goal"))}</button>
+            <button class="btn-primary" data-cashflow-add-goal>${escapeHtml(t(locale, "Add goal"))}</button>
           </div>
         </div>
         <div data-goals-list>
@@ -98,11 +98,11 @@ export function renderFlexTab(locale, cashflow) {
       running_balance: null,
 
       note: [
-        `${t(locale, "Priority", "Priority")}: ${f.priority ?? EMPTY_VALUE}`,
-        f.allow_split ? t(locale, "Splittable", "Splittable") : t(locale, "Full only", "Full only"),
-        f.funded_by_date ? `${t(locale, "Funded by", "Funded by")}: ${f.funded_by_date}` : t(locale, "No funding date", "No funding date"),
-        `${t(locale, "Target in PLN", "Target in PLN")}: ${targetLedger ? formatMoney(targetLedger, "PLN", locale) : EMPTY_VALUE}`,
-        `${t(locale, "Remaining", "Remaining")}: ${f.remaining_ledger === null ? EMPTY_VALUE : formatMoney(f.remaining_ledger, "PLN", locale)}`
+        `${t(locale, "Priority")}: ${f.priority ?? EMPTY_VALUE}`,
+        f.allow_split ? t(locale, "Splittable") : t(locale, "Full only"),
+        f.funded_by_date ? `${t(locale, "Funded by")}: ${f.funded_by_date}` : t(locale, "No funding date"),
+        `${t(locale, "Target in PLN")}: ${targetLedger ? formatMoney(targetLedger, "PLN", locale) : EMPTY_VALUE}`,
+        `${t(locale, "Remaining")}: ${f.remaining_ledger === null ? EMPTY_VALUE : formatMoney(f.remaining_ledger, "PLN", locale)}`
       ].join(" / ")
     };
   });
@@ -111,9 +111,9 @@ export function renderFlexTab(locale, cashflow) {
     <div class="cashflow-tab-content" data-cashflow-flex-tab>
       <div class="panel">
         <div class="cashflow-panel-heading">
-          <h3>${escapeHtml(t(locale, "Flex", "Flex"))}</h3>
+          <h3>${escapeHtml(t(locale, "Flex"))}</h3>
           <div class="cashflow-tab-actions">
-            <button class="btn-primary" data-cashflow-add-flex>${escapeHtml(t(locale, "Add flex", "Add flex"))}</button>
+            <button class="btn-primary" data-cashflow-add-flex>${escapeHtml(t(locale, "Add flex"))}</button>
           </div>
         </div>
         <div data-flex-list>

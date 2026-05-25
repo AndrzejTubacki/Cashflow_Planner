@@ -54,6 +54,14 @@ function t(locale, key, fallback = "") {
   return translated || normalizedKey;
 }
 
+function formatMessage(locale, key, params = {}, fallback = "") {
+  const template = t(locale, key, fallback || key);
+  return String(template).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => {
+    const value = params?.[name];
+    return value === undefined || value === null ? "" : String(value);
+  });
+}
+
 function localeOf(cashflow = null) {
   return normalizeLocaleId(cashflow?.settings?.locale || DEFAULT_LOCALE);
 }
@@ -94,12 +102,12 @@ function statusLabel(locale, status) {
   const s = String(status || "funded");
 
   const labels = {
-    confirmed: t(locale, "Confirmed", "Confirmed"),
-    funded: t(locale, "Funded", "Funded"),
-    pending: t(locale, "Pending", "Pending"),
-    partial: t(locale, "Partial", "Partial"),
-    underfunded: t(locale, "Underfunded", "Underfunded"),
-    disabled: t(locale, "Disabled", "Disabled")
+    confirmed: t(locale, "Confirmed"),
+    funded: t(locale, "Funded"),
+    pending: t(locale, "Pending"),
+    partial: t(locale, "Partial"),
+    underfunded: t(locale, "Underfunded"),
+    disabled: t(locale, "Disabled")
   };
 
   return labels[s] || s;
@@ -107,9 +115,9 @@ function statusLabel(locale, status) {
 
 function transactionTypeLabel(locale, type) {
   const labels = {
-    income: t(locale, "Income", "Income"),
-    expense: t(locale, "Expense", "Expense"),
-    goal_allocation: t(locale, "Goal allocation", "Goal allocation")
+    income: t(locale, "Income"),
+    expense: t(locale, "Expense"),
+    goal_allocation: t(locale, "Goal allocation")
   };
 
   return labels[type] || type || "-";
@@ -130,10 +138,10 @@ function renderProjectionWarnings(locale, cashflow) {
   if (missingFxRates.length) {
     warnings.push(`
       <div class="detail-note cashflow-warning" data-cashflow-missing-fx>
-        <strong>${escapeHtml(t(locale, "Missing FX rates", "Missing FX rates"))}</strong>
+        <strong>${escapeHtml(t(locale, "Missing FX rates"))}</strong>
         <span>${escapeHtml(missingFxRates.join(", "))}</span>
         <button type="button" class="btn-small" data-cashflow-refresh-fx>
-          ${escapeHtml(t(locale, "Fetch NBP rates", "Fetch NBP rates"))}
+          ${escapeHtml(t(locale, "Fetch NBP rates"))}
         </button>
       </div>
     `);
@@ -142,10 +150,10 @@ function renderProjectionWarnings(locale, cashflow) {
   if (projectionFailed) {
     warnings.push(`
       <div class="detail-note cashflow-warning" data-cashflow-projection-failed>
-        <strong>${escapeHtml(t(locale, "Last projection failed", "Last projection failed"))}</strong>
+        <strong>${escapeHtml(t(locale, "Last projection failed"))}</strong>
         <span>${escapeHtml(latestSnapshot.snapshot_timestamp || "")}</span>
         <button type="button" class="btn-small" data-cashflow-run-jobs>
-          ${escapeHtml(t(locale, "Regenerate", "Regenerate"))}
+          ${escapeHtml(t(locale, "Regenerate"))}
         </button>
       </div>
     `);
@@ -154,7 +162,7 @@ function renderProjectionWarnings(locale, cashflow) {
   if (cashflow?._projection && cashflow._projection.projection_ok === false) {
     warnings.push(`
       <div class="detail-note cashflow-warning" data-cashflow-mutation-projection-failed>
-        <strong>${escapeHtml(t(locale, "Saved, but projection failed", "Saved, but projection failed"))}</strong>
+        <strong>${escapeHtml(t(locale, "Saved, but projection failed"))}</strong>
         <span>${escapeHtml(cashflow._projection.projection_error || "")}</span>
       </div>
     `);
@@ -195,6 +203,7 @@ function renderDetailsPanel(title, content, { open = false, extra = "" } = {}) {
 
 export {
   asNumber,
+  formatMessage,
   formatMoney,
   formatPercent,
   groupBy,

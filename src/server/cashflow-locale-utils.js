@@ -1,4 +1,6 @@
 import fs from "fs";
+import path from "path";
+import { pathToFileURL } from "url";
 
 export const DEFAULT_LOCALE = "en";
 
@@ -12,6 +14,8 @@ function localeLabel(id) {
 }
 
 export function createCashflowLocaleService(localeDir) {
+  const loadedStrings = new Map();
+
   function listAvailableLocales() {
     const localeIds = new Set([DEFAULT_LOCALE]);
 
@@ -45,8 +49,44 @@ export function createCashflowLocaleService(localeDir) {
     return ids.has(requested) ? requested : DEFAULT_LOCALE;
   }
 
+  async function loadLocaleStrings(locale) {
+    const id = normalizeLocale(locale);
+
+    if (loadedStrings.has(id)) {
+      return loadedStrings.get(id);
+    }
+
+    const filePath = path.join(localeDir || "", `${id}.js`);
+
+    try {
+      const module = await import(pathToFileURL(filePath).href);
+      const strings = module.default?.strings || {};
+      loadedStrings.set(id, strings);
+      return strings;
+    } catch {
+      if (id !== DEFAULT_LOCALE) {
+        return loadLocaleStrings(DEFAULT_LOCALE);
+      }
+
+      loadedStrings.set(DEFAULT_LOCALE, {});
+      return {};
+    }
+  }
+
+  async function translateLocale(locale, key, params = {}) {
+    const normalizedKey = String(key || "");
+    const strings = await loadLocaleStrings(locale);
+    const template = strings[normalizedKey] || normalizedKey;
+
+    return String(template).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => {
+      const value = params?.[name];
+      return value === undefined || value === null ? "" : String(value);
+    });
+  }
+
   return {
     listAvailableLocales,
-    normalizeLocale
+    normalizeLocale,
+    translateLocale
   };
 }

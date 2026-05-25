@@ -47,7 +47,8 @@ function createCashflowModule({
 
   const {
     listAvailableLocales,
-    normalizeLocale
+    normalizeLocale,
+    translateLocale
   } = createCashflowLocaleService(localeDir);
 
   // Open and migrate SQLite databases, and expose ledger-year discovery.
@@ -321,6 +322,7 @@ function createCashflowModule({
       updateRecurringExpense,
       updateRecurringIncome,
       updateSettings,
+      translateLocale,
       validateCashflowData,
       withProjectionStatus
     });

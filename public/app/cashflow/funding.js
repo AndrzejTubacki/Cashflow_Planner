@@ -83,25 +83,25 @@ function renderFundingPie(locale, item, label) {
   const segments = [
     {
       key: "confirmed",
-      label: t(locale, "Confirmed", "Confirmed"),
+      label: t(locale, "Confirmed"),
       value: Math.max(0, parts.confirmed),
       className: "cashflow-donut__segment cashflow-donut__segment--confirmed"
     },
     {
       key: "pending",
-      label: t(locale, "Pending", "Pending"),
+      label: t(locale, "Pending"),
       value: Math.max(0, parts.pending),
       className: "cashflow-donut__segment cashflow-donut__segment--pending"
     },
     {
       key: "future",
-      label: t(locale, "Future", "Future"),
+      label: t(locale, "Future"),
       value: Math.max(0, parts.future),
       className: "cashflow-donut__segment cashflow-donut__segment--future"
     },
     {
       key: "missing",
-      label: t(locale, "Missing", "Missing"),
+      label: t(locale, "Missing"),
       value: Math.max(0, parts.remaining),
       className: "cashflow-donut__segment cashflow-donut__segment--missing"
     }
@@ -152,28 +152,28 @@ function renderFundingPie(locale, item, label) {
       <div class="cashflow-funding-card__body">
         <div class="cashflow-funding-card__header">
           <strong title="${escapeHtml(label)}">${escapeHtml(label)}</strong>
-          <span class="${escapeHtml(dateClass)}">${escapeHtml(fundedByDate || t(locale, "No date", "No date"))}</span>
+          <span class="${escapeHtml(dateClass)}">${escapeHtml(fundedByDate || t(locale, "No date"))}</span>
         </div>
 
         <div class="cashflow-funding-legend">
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--confirmed"></i>
-            <span>${escapeHtml(t(locale, "Confirmed", "Confirmed"))}</span>
+            <span>${escapeHtml(t(locale, "Confirmed"))}</span>
             <strong>${formatMoney(parts.confirmed, "PLN", locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--pending"></i>
-            <span>${escapeHtml(t(locale, "Pending", "Pending"))}</span>
+            <span>${escapeHtml(t(locale, "Pending"))}</span>
             <strong>${formatMoney(parts.pending, "PLN", locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--future"></i>
-            <span>${escapeHtml(t(locale, "Future", "Future"))}</span>
+            <span>${escapeHtml(t(locale, "Future"))}</span>
             <strong>${formatMoney(parts.future, "PLN", locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--missing"></i>
-            <span>${escapeHtml(t(locale, "Missing", "Missing"))}</span>
+            <span>${escapeHtml(t(locale, "Missing"))}</span>
             <strong>${formatMoney(parts.remaining, "PLN", locale)}</strong>
           </span>
         </div>
@@ -187,11 +187,11 @@ function renderFundingOverview(locale, cashflow) {
   const flex = cashflow?.flexTransactions || [];
 
   const goalCards = goals.map(goal =>
-    renderFundingPie(locale, goal, `${t(locale, "Goal", "Goal")}: ${goal.name || EMPTY_VALUE}`)
+    renderFundingPie(locale, goal, `${t(locale, "Goal")}: ${goal.name || EMPTY_VALUE}`)
   );
 
   const flexCards = flex.map(item =>
-    renderFundingPie(locale, item, `${t(locale, "Flex", "Flex")}: ${item.name || EMPTY_VALUE}`)
+    renderFundingPie(locale, item, `${t(locale, "Flex")}: ${item.name || EMPTY_VALUE}`)
   );
 
   if (!goalCards.length && !flexCards.length) return "";

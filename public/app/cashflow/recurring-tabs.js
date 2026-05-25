@@ -1,5 +1,5 @@
 import { escapeHtml } from "../utils.js";
-import { t } from "./shared.js";
+import { formatMessage, t } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
 export function renderRecurringExpensesTab(locale, cashflow) {
@@ -12,12 +12,12 @@ export function renderRecurringExpensesTab(locale, cashflow) {
 
     const occurrenceNote = total > 0
       ? [
-          `${funded}/${total} occurrences funded`,
-          partial ? `${partial} partial` : "",
-          underfunded ? `${underfunded} underfunded` : "",
-          skipped ? `${skipped} skipped` : ""
-        ].filter(Boolean).join(" · ")
-      : "No occurrences in projection window";
+          formatMessage(locale, "{funded}/{total} occurrences funded", { funded, total }),
+          partial ? formatMessage(locale, "{count} partial", { count: partial }) : "",
+          underfunded ? formatMessage(locale, "{count} underfunded", { count: underfunded }) : "",
+          skipped ? formatMessage(locale, "{count} skipped", { count: skipped }) : ""
+        ].filter(Boolean).join(" / ")
+      : t(locale, "No occurrences in projection window");
 
     const currentPrediction = Number(r.current_prediction_amount ?? r.amount) || 0;
     const currentPredictionLedger = r.current_prediction_ledger_amount ?? null;
@@ -27,7 +27,7 @@ export function renderRecurringExpensesTab(locale, cashflow) {
       entityType: "recurring-expense",
       date: r.anchor || r.period || r.anchor_type || "-",
       name: r.name,
-      type: r.necessary ? t(locale, "Niezbędny", "Necessary") : t(locale, "Opcjonalny", "Optional"),
+      type: r.necessary ? t(locale, "Necessary") : t(locale, "Optional"),
       status: r.active ? "pending" : "disabled",
       amount: Number(r.amount) || 0,
       currency: r.currency || "PLN",
@@ -36,9 +36,9 @@ export function renderRecurringExpensesTab(locale, cashflow) {
       ledger_amount_ledger_amount: currentPredictionLedger,
       ledger_currency: cashflow?.settings?.ledger_currency || "PLN",
       note: [
-        r.active ? t(locale, "Aktywne", "Active") : t(locale, "Wyłączone", "Disabled"),
+        r.active ? t(locale, "Active") : t(locale, "Disabled"),
         occurrenceNote
-      ].join(" · ")
+      ].join(" / ")
     };
   });
 
@@ -46,13 +46,13 @@ export function renderRecurringExpensesTab(locale, cashflow) {
     <div class="cashflow-tab-content" data-cashflow-recurring-tab>
       <div class="panel">
         <div class="cashflow-panel-heading">
-          <h3>${escapeHtml(t(locale, "Wydatki cykliczne", "Recurring expenses"))}</h3>
-          <button class="btn-primary" data-cashflow-add-recurring>${escapeHtml(t(locale, "Dodaj wydatek", "Add expense"))}</button>
+          <h3>${escapeHtml(t(locale, "Recurring expenses"))}</h3>
+          <button class="btn-primary" data-cashflow-add-recurring>${escapeHtml(t(locale, "Add expense"))}</button>
         </div>
         <div data-recurring-list>
           ${renderTransactionTable(items, locale, {
             entityType: "recurring-expense",
-            ledgerAmountLabel: t(locale, "Current prediction", "Current prediction"),
+            ledgerAmountLabel: t(locale, "Current prediction"),
             showRunningBalance: false
           })}
         </div>
@@ -70,24 +70,24 @@ export function renderRecurringIncomeTab(locale, cashflow) {
     status: r.active ? "funded" : "pending",
     amount: Number(r.amount) || 0,
     currency: r.currency || "PLN",
-    note: r.period_setting ? t(locale, "Definiuje okres budżetowy", "Defines budget period") : ""
+    note: r.period_setting ? t(locale, "Defines budget period") : ""
   }));
 
   return `
     <div class="cashflow-tab-content" data-cashflow-income-tab>
       <div class="panel">
         <div class="cashflow-panel-heading">
-          <h3>${escapeHtml(t(locale, "Dochody cykliczne", "Recurring income"))}</h3>
+          <h3>${escapeHtml(t(locale, "Recurring income"))}</h3>
           <div class="cashflow-tab-actions cashflow-panel-heading__actions">
-        <button class="btn-primary" data-cashflow-add-income>${escapeHtml(t(locale, "Dodaj dochód", "Add income"))}</button>
-      </div>
+            <button class="btn-primary" data-cashflow-add-income>${escapeHtml(t(locale, "Add income"))}</button>
+          </div>
         </div>
         <div data-income-list>
-        ${renderTransactionTable(items, locale, {
-          entityType: "recurring-income",
-          showLedgerAmount: false,
-          showRunningBalance: false
-        })}
+          ${renderTransactionTable(items, locale, {
+            entityType: "recurring-income",
+            showLedgerAmount: false,
+            showRunningBalance: false
+          })}
         </div>
       </div>
     </div>

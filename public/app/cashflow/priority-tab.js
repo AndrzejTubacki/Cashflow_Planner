@@ -8,21 +8,21 @@ export function renderPriorityTab(locale, cashflow) {
     ...item,
     entityType: "recurring-expense",
     priorityDomain: "operating",
-    label: t(locale, "Recurring expense", "Recurring expense")
+    label: t(locale, "Recurring expense")
   }));
 
   const flex = (cashflow?.flexTransactions || []).map(item => ({
     ...item,
     entityType: "flex",
     priorityDomain: "operating",
-    label: t(locale, "Flex", "Flex")
+    label: t(locale, "Flex")
   }));
 
   const goals = (cashflow?.goals || []).map(item => ({
     ...item,
     entityType: "goal",
     priorityDomain: "goal",
-    label: t(locale, "Goal", "Goal")
+    label: t(locale, "Goal")
   }));
 
   const operating = [...recurring, ...flex].sort((a, b) => asNumber(a.priority, 9999) - asNumber(b.priority, 9999));
@@ -35,10 +35,10 @@ export function renderPriorityTab(locale, cashflow) {
       <table class="cashflow-table">
         <thead>
           <tr>
-            <th>${escapeHtml(t(locale, "Priority", "Priority"))}</th>
-            <th>${escapeHtml(t(locale, "Type", "Type"))}</th>
-            <th>${escapeHtml(t(locale, "Name", "Name"))}</th>
-            <th>${escapeHtml(t(locale, "Amount", "Amount"))}</th>
+            <th>${escapeHtml(t(locale, "Priority"))}</th>
+            <th>${escapeHtml(t(locale, "Type"))}</th>
+            <th>${escapeHtml(t(locale, "Name"))}</th>
+            <th>${escapeHtml(t(locale, "Amount"))}</th>
             <th></th>
           </tr>
         </thead>
@@ -50,7 +50,7 @@ export function renderPriorityTab(locale, cashflow) {
               <td>${escapeHtml(item.name || EMPTY_VALUE)}</td>
               <td>${formatMoney(item.amount, item.currency || "PLN", locale)}</td>
               <td>
-                <button class="btn-small" data-edit-tx="${escapeHtml(item.id)}" data-edit-entity="${escapeHtml(item.entityType)}">${escapeHtml(t(locale, "Edit", "Edit"))}</button>
+                <button class="btn-small" data-edit-tx="${escapeHtml(item.id)}" data-edit-entity="${escapeHtml(item.entityType)}">${escapeHtml(t(locale, "Edit"))}</button>
               </td>
             </tr>
           `).join("")}
@@ -62,13 +62,13 @@ export function renderPriorityTab(locale, cashflow) {
   return `
     <div class="cashflow-tab-content" data-cashflow-priority-tab>
       <div class="panel">
-        <h3>${escapeHtml(t(locale, "Operating priority", "Operating priority"))}</h3>
-        ${renderPriorityList(operating, t(locale, "No operating priorities", "No operating priorities"))}
+        <h3>${escapeHtml(t(locale, "Operating priority"))}</h3>
+        ${renderPriorityList(operating, t(locale, "No operating priorities"))}
       </div>
 
       <div class="panel">
-        <h3>${escapeHtml(t(locale, "Goal priority", "Goal priority"))}</h3>
-        ${renderPriorityList(goalPriority, t(locale, "No goals", "No goals"))}
+        <h3>${escapeHtml(t(locale, "Goal priority"))}</h3>
+        ${renderPriorityList(goalPriority, t(locale, "No goals"))}
       </div>
     </div>
   `;

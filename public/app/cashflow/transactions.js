@@ -59,7 +59,7 @@ function renderAmountCell(tx, locale) {
         ${normalizeCurrencyCode(currency) !== normalizeCurrencyCode(ledgerCurrency) && hasMoneyValue(ledgerAmount)
           ? `<small>(${formatMoney(ledgerAmount, ledgerCurrency, locale)})</small>`
           : ""}
-        <small>${escapeHtml(t(locale, "of", "of"))} ${formatMoney(requested, currency, locale)}</small>
+        <small>${escapeHtml(t(locale, "of"))} ${formatMoney(requested, currency, locale)}</small>
       </div>
     `;
   }
@@ -100,10 +100,10 @@ function renderLedgerCell(tx, locale) {
   return `
     <div class="cashflow-ledger-cell">
       ${ledgerAmount !== undefined && ledgerAmount !== null
-        ? `<small>${escapeHtml(t(locale, "PLN", "PLN"))}: ${formatMoney(ledgerAmount, "PLN", locale)}</small>`
+        ? `<small>${escapeHtml(t(locale, "PLN"))}: ${formatMoney(ledgerAmount, "PLN", locale)}</small>`
         : ""}
       ${runningBalance !== undefined && runningBalance !== null
-        ? `<small>${escapeHtml(t(locale, "Balance", "Balance"))}: ${formatMoney(runningBalance, "PLN", locale)}</small>`
+        ? `<small>${escapeHtml(t(locale, "Balance"))}: ${formatMoney(runningBalance, "PLN", locale)}</small>`
         : ""}
     </div>
   `;
@@ -150,16 +150,16 @@ function renderTransactionRow(tx, locale, options = {}) {
         : ""}
       <td>
         ${canConfirmPending
-          ? `<button type="button" class="btn-small" data-cashflow-confirm-pending="${escapeHtml(tx.id)}" data-cashflow-confirm-pending-date="${escapeHtml(tx.date || "")}" data-cashflow-confirm-pending-amount="${escapeHtml(tx.funded_amount ?? tx.amount ?? "")}">${escapeHtml(t(locale, "Confirm", "Confirm"))}</button>`
+          ? `<button type="button" class="btn-small" data-cashflow-confirm-pending="${escapeHtml(tx.id)}" data-cashflow-confirm-pending-date="${escapeHtml(tx.date || "")}" data-cashflow-confirm-pending-amount="${escapeHtml(tx.funded_amount ?? tx.amount ?? "")}">${escapeHtml(t(locale, "Confirm"))}</button>`
           : ""}
         ${canMoveToPending
-          ? `<button type="button" class="btn-small" data-cashflow-move-future-to-pending="${escapeHtml(tx.id)}" data-cashflow-move-future-occurrence-key="${escapeHtml(tx.occurrence_key || "")}">${escapeHtml(t(locale, "To pending", "To pending"))}</button>`
+          ? `<button type="button" class="btn-small" data-cashflow-move-future-to-pending="${escapeHtml(tx.id)}" data-cashflow-move-future-occurrence-key="${escapeHtml(tx.occurrence_key || "")}">${escapeHtml(t(locale, "To pending"))}</button>`
           : ""}
         ${canEdit
-          ? `<button class="btn-small" data-edit-tx="${escapeHtml(tx.id)}" data-edit-entity="${escapeHtml(entityType)}">${escapeHtml(t(locale, "Edit", "Edit"))}</button>`
+          ? `<button class="btn-small" data-edit-tx="${escapeHtml(tx.id)}" data-edit-entity="${escapeHtml(entityType)}">${escapeHtml(t(locale, "Edit"))}</button>`
           : ""}
         ${canDelete
-          ? `<button type="button" class="btn-small" data-cashflow-delete-tx="${escapeHtml(tx.id)}" data-cashflow-delete-entity="${escapeHtml(deleteEntityType)}">${escapeHtml(t(locale, "Delete", "Delete"))}</button>`
+          ? `<button type="button" class="btn-small" data-cashflow-delete-tx="${escapeHtml(tx.id)}" data-cashflow-delete-entity="${escapeHtml(deleteEntityType)}">${escapeHtml(t(locale, "Delete"))}</button>`
           : ""}
       </td>
     </tr>
@@ -168,24 +168,24 @@ function renderTransactionRow(tx, locale, options = {}) {
 
 function renderTransactionTable(transactions, locale, options = {}) {
   if (!transactions.length) {
-    return `<p>${escapeHtml(t(locale, "None", "None"))}</p>`;
+    return `<p>${escapeHtml(t(locale, "None"))}</p>`;
   }
 
   const showLedgerAmount = options.showLedgerAmount !== false;
   const showRunningBalance = options.showRunningBalance !== false;
-  const ledgerAmountLabel = options.ledgerAmountLabel || t(locale, "Ledger amount", "Ledger amount");
+  const ledgerAmountLabel = options.ledgerAmountLabel || t(locale, "Ledger amount");
 
   return `
     <table class="cashflow-table">
       <thead>
         <tr>
-          <th>${escapeHtml(t(locale, "Date", "Date"))}</th>
-          <th>${escapeHtml(t(locale, "Name", "Name"))}</th>
-          <th>${escapeHtml(t(locale, "Type", "Type"))}</th>
-          <th>${escapeHtml(t(locale, "Status", "Status"))}</th>
-          <th>${escapeHtml(t(locale, "Amount", "Amount"))}</th>
+          <th>${escapeHtml(t(locale, "Date"))}</th>
+          <th>${escapeHtml(t(locale, "Name"))}</th>
+          <th>${escapeHtml(t(locale, "Type"))}</th>
+          <th>${escapeHtml(t(locale, "Status"))}</th>
+          <th>${escapeHtml(t(locale, "Amount"))}</th>
           ${showLedgerAmount ? `<th>${escapeHtml(ledgerAmountLabel)}</th>` : ""}
-          ${showRunningBalance ? `<th>${escapeHtml(t(locale, "Running balance", "Running balance"))}</th>` : ""}
+          ${showRunningBalance ? `<th>${escapeHtml(t(locale, "Running balance"))}</th>` : ""}
           <th></th>
         </tr>
       </thead>

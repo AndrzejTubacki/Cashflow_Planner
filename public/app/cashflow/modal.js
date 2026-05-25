@@ -1,7 +1,7 @@
 import { escapeHtml } from "../utils.js";
 import { cashflowApiForEntity } from "./actions.js";
 import { renderCashflowModalFields } from "./modal-fields.js";
-import { localeOf, t } from "./shared.js";
+import { formatMessage, localeOf, t } from "./shared.js";
 
 function findCashflowEntity(cashflow, entityType, id) {
   const lists = {
@@ -18,17 +18,17 @@ function findCashflowEntity(cashflow, entityType, id) {
 
 function cashflowModalTitle(locale, entityType, action) {
   const labels = {
-    "recurring-expense": t(locale, "wydatek cykliczny", "recurring expense"),
-    "recurring-income": t(locale, "dochód cykliczny", "recurring income"),
-    "one-off": t(locale, "transakcję jednorazową", "one-off transaction"),
-    "goal": t(locale, "cel", "goal"),
-    "flex": t(locale, "transakcję elastyczną", "flex transaction"),
-    "pending": t(locale, "transakcję oczekującą", "pending transaction")
+    "recurring-expense": t(locale, "recurring expense"),
+    "recurring-income": t(locale, "recurring income"),
+    "one-off": t(locale, "one-off transaction"),
+    "goal": t(locale, "goal"),
+    "flex": t(locale, "flex transaction"),
+    "pending": t(locale, "pending transaction")
   };
 
   const verb = action === "edit"
-    ? t(locale, "Edytuj", "Edit")
-    : t(locale, "Dodaj", "Add");
+    ? t(locale, "Edit")
+    : t(locale, "Add");
 
   return `${verb} ${labels[entityType] || entityType}`;
 }
@@ -154,7 +154,7 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
   if (action === "edit" && !item) {
     window.dispatchEvent(new CustomEvent("cashflow-error", {
       detail: {
-        message: `Could not find ${entityType} ${id}`
+        message: formatMessage(locale, "Could not find {entityType} {id}", { entityType, id })
       }
     }));
     return;
@@ -172,7 +172,7 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
     <div class="cashflow-modal" role="dialog" aria-modal="true">
       <div class="cashflow-modal__header">
         <h3>${escapeHtml(cashflowModalTitle(locale, entityType, action))}</h3>
-        <button type="button" class="btn-small" data-cashflow-modal-close>x</button>
+        <button type="button" class="btn-small" data-cashflow-modal-close aria-label="${escapeHtml(t(locale, "Cancel"))}">x</button>
       </div>
 
       <form class="cashflow-modal__form" data-cashflow-modal-form>
@@ -182,10 +182,10 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
 
         <div class="cashflow-modal__actions">
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-modal-close>
-            ${escapeHtml(t(locale, "Anuluj", "Cancel"))}
+            ${escapeHtml(t(locale, "Cancel"))}
           </button>
           <button type="submit" class="cashflow-action cashflow-action--primary">
-            ${escapeHtml(action === "edit" ? t(locale, "Zapisz", "Save") : t(locale, "Dodaj", "Add"))}
+            ${escapeHtml(action === "edit" ? t(locale, "Save") : t(locale, "Add"))}
           </button>
         </div>
       </form>
@@ -226,7 +226,7 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
       const body = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        throw new Error(body.error || `Request failed with status ${response.status}`);
+        throw new Error(body.error || formatMessage(locale, "Request failed with status {status}", { status: response.status }));
       }
 
       closeCashflowModal();
@@ -238,7 +238,7 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
       window.dispatchEvent(new CustomEvent("cashflow-refresh", {}));
     } catch (error) {
       errorBox.hidden = false;
-      errorBox.textContent = error.message || "Failed to save";
+      errorBox.textContent = error.message || t(locale, "Failed to save");
     } finally {
       submitButton.disabled = false;
     }

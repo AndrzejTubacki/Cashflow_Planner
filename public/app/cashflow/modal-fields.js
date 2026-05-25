@@ -19,7 +19,7 @@ function renderCurrencySelect(locale, item = {}) {
 
   return `
     <label>
-      <span>${escapeHtml(t(locale, "Waluta", "Currency"))}</span>
+      <span>${escapeHtml(t(locale, "Currency"))}</span>
       <select name="currency" required>
         ${currencies.map(currency => `
           <option value="${escapeHtml(currency)}"${selected === currency ? " selected" : ""}>
@@ -55,17 +55,17 @@ function renderHolidayCountrySelect(locale, item = {}) {
   const selected = String(item?.anchor_holiday_country || "PL").toUpperCase();
 
   const countries = [
-    { code: "PL", label: "Poland" },
-    { code: "DE", label: "Germany" }
+    { code: "PL", labelKey: "Poland" },
+    { code: "DE", labelKey: "Germany" }
   ];
 
   return `
     <label data-anchor-holiday-country-field>
-      <span>${escapeHtml(t(locale, "Kraj świąt", "Holiday country"))}</span>
+      <span>${escapeHtml(t(locale, "Holiday country"))}</span>
       <select name="anchor_holiday_country">
         ${countries.map(country => `
           <option value="${escapeHtml(country.code)}"${selected === country.code ? " selected" : ""}>
-            ${escapeHtml(country.code)} - ${escapeHtml(country.label)}
+            ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
           </option>
         `).join("")}
       </select>
@@ -84,59 +84,59 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
   const commonNameCurrencyAmount = `
     <label>
-      <span>${escapeHtml(t(locale, "Nazwa", "Name"))}</span>
+      <span>${escapeHtml(t(locale, "Name"))}</span>
       <input name="name" value="${escapeHtml(fieldValue(item, "name"))}" required>
     </label>
 
     ${renderCurrencySelect(locale, item)}
 
     <label>
-      <span>${escapeHtml(t(locale, "Kwota", "Amount"))}</span>
+      <span>${escapeHtml(t(locale, "Amount"))}</span>
       <input name="amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "amount", "0"))}" required>
     </label>
   `;
 
   const anchorFields = `
     <label>
-      <span>${escapeHtml(t(locale, "Kotwica", "Anchor"))}</span>
+      <span>${escapeHtml(t(locale, "Anchor"))}</span>
       <select name="anchor_type" data-cashflow-anchor-type>
         <option value="day_of_month"${fieldValue(item, "anchor_type", "month_end") === "day_of_month" ? " selected" : ""}>
-          ${escapeHtml(t(locale, "Dzień miesiąca", "Day of month"))}
+          ${escapeHtml(t(locale, "Day of month"))}
         </option>
         <option value="month_end"${fieldValue(item, "anchor_type", "month_end") === "month_end" ? " selected" : ""}>
-          ${escapeHtml(t(locale, "Koniec miesiąca", "Month end"))}
+          ${escapeHtml(t(locale, "Month end"))}
         </option>
       </select>
     </label>
 
     <label data-anchor-day-field>
-      <span>${escapeHtml(t(locale, "Dzień miesiąca", "Day of month"))}</span>
+      <span>${escapeHtml(t(locale, "Day of month"))}</span>
       <input name="anchor_day_of_month" type="number" min="1" max="31" value="${escapeHtml(fieldValue(item, "anchor_day_of_month", "1"))}">
     </label>
 
     <label data-anchor-month-end-field>
-      <span>${escapeHtml(t(locale, "Offset dni", "Offset days"))}</span>
+      <span>${escapeHtml(t(locale, "Offset days"))}</span>
       <input name="anchor_offset_days" type="number" step="1" value="${escapeHtml(fieldValue(item, "anchor_offset_days", "0"))}">
     </label>
 
     <label data-anchor-month-end-field>
-      <span>${escapeHtml(t(locale, "Korekta dnia roboczego", "Business day adjustment"))}</span>
+      <span>${escapeHtml(t(locale, "Business day adjustment"))}</span>
       <select name="anchor_business_day_adjustment">
-        <option value="none"${fieldValue(item, "anchor_business_day_adjustment", "none") === "none" ? " selected" : ""}>none</option>
-        <option value="previous"${fieldValue(item, "anchor_business_day_adjustment") === "previous" ? " selected" : ""}>previous</option>
-        <option value="next"${fieldValue(item, "anchor_business_day_adjustment") === "next" ? " selected" : ""}>next</option>
+        <option value="none"${fieldValue(item, "anchor_business_day_adjustment", "none") === "none" ? " selected" : ""}>${escapeHtml(t(locale, "None"))}</option>
+        <option value="previous"${fieldValue(item, "anchor_business_day_adjustment") === "previous" ? " selected" : ""}>${escapeHtml(t(locale, "Previous"))}</option>
+        <option value="next"${fieldValue(item, "anchor_business_day_adjustment") === "next" ? " selected" : ""}>${escapeHtml(t(locale, "Next"))}</option>
       </select>
     </label>
 
     ${renderHolidayCountrySelect(locale, item)}
 
     <label>
-      <span>${escapeHtml(t(locale, "Powtarzaj co X miesięcy", "Repeat every X months"))}</span>
+      <span>${escapeHtml(t(locale, "Repeat every X months"))}</span>
       <input name="repeat_every_months" type="number" min="1" max="12" step="1" value="${escapeHtml(fieldValue(item, "repeat_every_months", "1"))}" data-repeat-every-months>
     </label>
 
     <label data-start-month-year-field>
-      <span>${escapeHtml(t(locale, "Start YYYY-MM", "Start YYYY-MM"))}</span>
+      <span>${escapeHtml(t(locale, "Start YYYY-MM"))}</span>
       <input name="start_month_year" placeholder="2026-05" value="${escapeHtml(fieldValue(item, "start_month_year"))}">
     </label>
   `;
@@ -146,26 +146,26 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
       ${commonNameCurrencyAmount}
 
       <label>
-        <span>${escapeHtml(t(locale, "Strategia predykcji", "Prediction strategy"))}</span>
+        <span>${escapeHtml(t(locale, "Prediction strategy"))}</span>
         <select name="prediction_strategy">
-          <option value="fixed"${fieldValue(item, "prediction_strategy", "fixed") === "fixed" ? " selected" : ""}>fixed</option>
-          <option value="12month_max"${fieldValue(item, "prediction_strategy") === "12month_max" ? " selected" : ""}>12month_max</option>
+          <option value="fixed"${fieldValue(item, "prediction_strategy", "fixed") === "fixed" ? " selected" : ""}>${escapeHtml(t(locale, "Fixed"))}</option>
+          <option value="12month_max"${fieldValue(item, "prediction_strategy") === "12month_max" ? " selected" : ""}>${escapeHtml(t(locale, "12-month maximum"))}</option>
         </select>
       </label>
 
       <label>
-        <span>${escapeHtml(t(locale, "Priorytet", "Priority"))}</span>
+        <span>${escapeHtml(t(locale, "Priority"))}</span>
         <input name="priority" type="number" min="1" step="1" value="${escapeHtml(defaultPriority)}">
       </label>
 
       <label class="cashflow-checkbox">
         <input name="necessary" type="checkbox" value="1" ${checkedAttr(item.necessary)}>
-        <span>${escapeHtml(t(locale, "Niezbędne", "Necessary"))}</span>
+        <span>${escapeHtml(t(locale, "Necessary"))}</span>
       </label>
 
       <label class="cashflow-checkbox">
         <input name="active" type="checkbox" value="1" ${checkedAttr(item.active, true)}>
-        <span>${escapeHtml(t(locale, "Aktywne", "Active"))}</span>
+        <span>${escapeHtml(t(locale, "Active"))}</span>
       </label>
 
       ${anchorFields}
@@ -177,21 +177,21 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
       ${commonNameCurrencyAmount}
 
       <label>
-        <span>${escapeHtml(t(locale, "Strategia predykcji", "Prediction strategy"))}</span>
+        <span>${escapeHtml(t(locale, "Prediction strategy"))}</span>
         <select name="prediction_strategy">
-          <option value="fixed"${fieldValue(item, "prediction_strategy", "fixed") === "fixed" ? " selected" : ""}>fixed</option>
-          <option value="12month_min"${fieldValue(item, "prediction_strategy") === "12month_min" ? " selected" : ""}>12month_min</option>
+          <option value="fixed"${fieldValue(item, "prediction_strategy", "fixed") === "fixed" ? " selected" : ""}>${escapeHtml(t(locale, "Fixed"))}</option>
+          <option value="12month_min"${fieldValue(item, "prediction_strategy") === "12month_min" ? " selected" : ""}>${escapeHtml(t(locale, "12-month minimum"))}</option>
         </select>
       </label>
 
       <label class="cashflow-checkbox">
         <input name="period_setting" type="checkbox" value="1" ${checkedAttr(item.period_setting)}>
-        <span>${escapeHtml(t(locale, "Definiuje okres budżetowy", "Defines budget period"))}</span>
+        <span>${escapeHtml(t(locale, "Defines budget period"))}</span>
       </label>
 
       <label class="cashflow-checkbox">
         <input name="active" type="checkbox" value="1" ${checkedAttr(item.active, true)}>
-        <span>${escapeHtml(t(locale, "Aktywne", "Active"))}</span>
+        <span>${escapeHtml(t(locale, "Active"))}</span>
       </label>
 
       ${anchorFields}
@@ -203,15 +203,15 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
       ${commonNameCurrencyAmount}
 
       <label>
-        <span>${escapeHtml(t(locale, "Typ", "Type"))}</span>
+        <span>${escapeHtml(t(locale, "Type"))}</span>
         <select name="type">
-          <option value="expense"${fieldValue(item, "type", "expense") === "expense" ? " selected" : ""}>expense</option>
-          <option value="income"${fieldValue(item, "type") === "income" ? " selected" : ""}>income</option>
+          <option value="expense"${fieldValue(item, "type", "expense") === "expense" ? " selected" : ""}>${escapeHtml(t(locale, "Expense"))}</option>
+          <option value="income"${fieldValue(item, "type") === "income" ? " selected" : ""}>${escapeHtml(t(locale, "Income"))}</option>
         </select>
       </label>
 
       <label>
-        <span>${escapeHtml(t(locale, "Data", "Date"))}</span>
+        <span>${escapeHtml(t(locale, "Date"))}</span>
         <input name="date" type="date" value="${escapeHtml(fieldValue(item, "date", today))}" required>
       </label>
     `;
@@ -222,18 +222,18 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
       ${commonNameCurrencyAmount}
 
       <label>
-        <span>${escapeHtml(t(locale, "Priorytet", "Priority"))}</span>
+        <span>${escapeHtml(t(locale, "Priority"))}</span>
         <input name="priority" type="number" min="1" step="1" value="${escapeHtml(defaultPriority)}">
       </label>
 
       <label>
-        <span>${escapeHtml(t(locale, "Termin", "Due date"))}</span>
+        <span>${escapeHtml(t(locale, "Due date"))}</span>
         <input name="due_date" type="date" value="${escapeHtml(fieldValue(item, "due_date", today))}" required>
       </label>
 
       <label class="cashflow-checkbox">
         <input name="active" type="checkbox" value="1" ${checkedAttr(item.active, true)}>
-        <span>${escapeHtml(t(locale, "Aktywne", "Active"))}</span>
+        <span>${escapeHtml(t(locale, "Active"))}</span>
       </label>
     `;
   }
@@ -243,27 +243,27 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
       ${commonNameCurrencyAmount}
 
       <label>
-        <span>${escapeHtml(t(locale, "Priorytet", "Priority"))}</span>
+        <span>${escapeHtml(t(locale, "Priority"))}</span>
         <input name="priority" type="number" min="1" step="1" value="${escapeHtml(defaultPriority)}">
       </label>
 
       <label class="cashflow-checkbox">
         <input name="active" type="checkbox" value="1" ${checkedAttr(item.active, true)}>
-        <span>${escapeHtml(t(locale, "Aktywne", "Active"))}</span>
+        <span>${escapeHtml(t(locale, "Active"))}</span>
       </label>
 
       <label class="cashflow-checkbox">
         <input name="allow_split" type="checkbox" value="1" ${checkedAttr(item.allow_split)} data-allow-split>
-        <span>${escapeHtml(t(locale, "Można dzielić", "Allow split"))}</span>
+        <span>${escapeHtml(t(locale, "Allow split"))}</span>
       </label>
 
       <label data-flex-split-field>
-        <span>${escapeHtml(t(locale, "Minimum", "Minimum"))}</span>
+        <span>${escapeHtml(t(locale, "Minimum"))}</span>
         <input name="min_amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "min_amount"))}">
       </label>
 
       <label data-flex-split-field>
-        <span>${escapeHtml(t(locale, "Maximum", "Maximum"))}</span>
+        <span>${escapeHtml(t(locale, "Maximum"))}</span>
         <input name="max_amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "max_amount"))}">
       </label>
     `;
@@ -272,21 +272,21 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
   if (entityType === "pending") {
     return `
       <label>
-        <span>${escapeHtml(t(locale, "Nazwa", "Name"))}</span>
+        <span>${escapeHtml(t(locale, "Name"))}</span>
         <input name="name" value="${escapeHtml(fieldValue(item, "name"))}" required>
       </label>
 
       <label>
-        <span>${escapeHtml(t(locale, "Kwota", "Amount"))}</span>
+        <span>${escapeHtml(t(locale, "Amount"))}</span>
         <input name="amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "amount", "0"))}" required>
       </label>
 
       <label>
-        <span>${escapeHtml(t(locale, "Data", "Date"))}</span>
+        <span>${escapeHtml(t(locale, "Date"))}</span>
         <input name="date" type="date" value="${escapeHtml(fieldValue(item, "date", today))}" required>
       </label>
     `;
   }
 
-  return `<p>${escapeHtml(t(locale, "Nieznany typ formularza", "Unknown form type"))}</p>`;
+  return `<p>${escapeHtml(t(locale, "Unknown form type"))}</p>`;
 }

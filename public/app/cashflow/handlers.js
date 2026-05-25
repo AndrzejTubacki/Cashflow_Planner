@@ -3,7 +3,9 @@ import {
   runCashflowAction,
   validateCashflowAction
 } from "./actions.js";
+import { escapeHtml } from "../utils.js";
 import { openCashflowModal } from "./modal.js";
+import { localeOf, t } from "./shared.js";
 
 const FX_PROVIDER_NOTES = {
   disabled: "Only PLN transactions can project without supplied rates.",
@@ -35,14 +37,14 @@ function moveSelectedOptions(from, to) {
     .forEach(option => to.appendChild(option));
 }
 
-function syncManualFxRateRows(form) {
+function syncManualFxRateRows(form, locale) {
   const provider = form.querySelector("[data-fx-provider]")?.value || "nbp";
   const note = form.querySelector("[data-fx-provider-note]");
   const selected = form.querySelector("[data-fx-currency-selected]");
   const container = form.querySelector("[data-manual-fx-rates]");
 
   if (note) {
-    note.textContent = FX_PROVIDER_NOTES[provider] || FX_PROVIDER_NOTES.nbp;
+    note.textContent = t(locale, FX_PROVIDER_NOTES[provider] || FX_PROVIDER_NOTES.nbp);
   }
 
   if (!container) return;
@@ -59,7 +61,7 @@ function syncManualFxRateRows(form) {
   const currencies = selectedOptionValues(selected);
 
   if (!currencies.length) {
-    container.innerHTML = "<small>Select at least one used currency to enter manual rates.</small>";
+    container.innerHTML = `<small>${escapeHtml(t(locale, "Select at least one used currency to enter manual rates."))}</small>`;
     return;
   }
 
@@ -82,6 +84,7 @@ export function attachCashflowHandlers(root, props = {}) {
   if (!root) return;
 
   const cashflow = props.cashflow || null;
+  const locale = localeOf(cashflow);
 
   const tabButtons = root.querySelectorAll("[data-cashflow-tab]");
   if (tabButtons.length) {
@@ -212,19 +215,19 @@ export function attachCashflowHandlers(root, props = {}) {
 
     settingsForm.querySelector("[data-fx-currency-add]")?.addEventListener("click", () => {
       moveSelectedOptions(availableCurrencies, selectedCurrencies);
-      syncManualFxRateRows(settingsForm);
+      syncManualFxRateRows(settingsForm, locale);
     });
 
     settingsForm.querySelector("[data-fx-currency-remove]")?.addEventListener("click", () => {
       moveSelectedOptions(selectedCurrencies, availableCurrencies);
-      syncManualFxRateRows(settingsForm);
+      syncManualFxRateRows(settingsForm, locale);
     });
 
     settingsForm.querySelector("[data-fx-provider]")?.addEventListener("change", () => {
-      syncManualFxRateRows(settingsForm);
+      syncManualFxRateRows(settingsForm, locale);
     });
 
-    syncManualFxRateRows(settingsForm);
+    syncManualFxRateRows(settingsForm, locale);
 
     settingsForm.addEventListener("submit", (e) => {
       e.preventDefault();
