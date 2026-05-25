@@ -124,6 +124,9 @@ Install-decision constraints:
 - optional FX conversion through the existing FX cache flow
 - Docker support
 - local-only operational extension hook
+- backup and restore APIs for SQLite runtime data
+- automated tests for projection, ledger, routes, migrations, backup/restore,
+  localization, and frontend render output
 
 ## Requirements
 
@@ -159,6 +162,22 @@ docker run --rm \
   -v ./data:/app/data \
   -v ./logs:/app/logs \
   cashflow
+```
+
+Build the test-capable image target when the container needs to run
+`npm test` or the local `/api/local/tests/run` endpoint:
+
+```sh
+docker build --target test -t cashflow:test .
+```
+
+That target installs dev/test dependencies and Chromium for Playwright. The
+default runtime target keeps the production image lean.
+
+With Compose, run the test target through the `test` profile:
+
+```sh
+docker compose -f docker-compose.example.yml --profile test run --rm cashflow-test
 ```
 
 Or adapt `docker-compose.example.yml`:
@@ -243,6 +262,16 @@ Restore procedure:
 3. Start the app.
 4. Verify `/healthz`, `/api/system`, and `/api`.
 
+Cashflow also has app-level backup and restore endpoints:
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/backup` | Creates a SQLite backup for the selected user and records it in `backup_metadata` |
+| `POST` | `/api/restore/:backupId` | Restores a recorded backup by id, with a safety backup and validation-oriented import flow |
+
+These endpoints are intended for trusted/self-hosted operation. They are not a
+replacement for external volume backups, especially before upgrades.
+
 ## Upgrade
 
 Suggested safe upgrade flow:
@@ -263,6 +292,13 @@ These are the basic operational endpoints, not a complete API reference:
 | `GET` | `/healthz` | Liveness check |
 | `GET` | `/api/system` | Process status and app version |
 | `GET` | `/api` | Cashflow snapshot |
+| `GET` | `/api/locales` | Available UI locales |
+| `PUT` | `/api/settings` | Update user settings |
+| `POST` | `/api/run-jobs` | Refresh FX and regenerate projections |
+| `POST` | `/api/fx/refresh` | Refresh FX for the current user and regenerate projections |
+| `POST` | `/api/validate` | Validate current Cashflow data |
+| `POST` | `/api/backup` | Create a user-scoped backup |
+| `POST` | `/api/restore/:backupId` | Restore a user-scoped backup |
 
 The frontend sends `x-cashflow-user-id: local` by default. API clients can set
 that header to select another storage namespace, but this is not authentication.
@@ -277,6 +313,21 @@ Run unit tests:
 
 ```sh
 npm test
+```
+
+`npm test` runs both Node integration/unit tests and Playwright browser smoke
+checks.
+
+Run only the Node test suite:
+
+```sh
+npm run test:node
+```
+
+Run only browser smoke checks:
+
+```sh
+npm run test:browser
 ```
 
 Run a local smoke check:
@@ -296,6 +347,10 @@ The smoke script checks:
 - `GET /healthz`
 - `GET /api/system`
 - `GET /api`
+
+The browser smoke script checks that the app loads in Chromium, `Validate`
+renders a visible result, and every main tab renders its expected heading and
+core controls.
 
 ## Security
 
@@ -360,7 +415,8 @@ endpoints. Public builds do not include that implementation.
 - FX behavior is still coupled to the existing cache/provider flow.
 - Auth is deployment-level, not app-native.
 - First-run onboarding is minimal.
-- The projection engine needs broader automated coverage.
+- Automated coverage exists for the main financial invariants, but browser-level
+  workflow coverage is limited to smoke-level tab rendering.
 - The API accepts `x-cashflow-user-id`, but there is no authentication or
   user-management UI yet.
 
@@ -371,8 +427,6 @@ endpoints. Public builds do not include that implementation.
 - Add a first-run setup flow for currency, locale, opening balance, income, and
   projection horizon.
 - Make empty-database onboarding understandable for new users.
-- Expand projection-engine tests for funding order, partial funding, pending
-  transitions, and confirmed transaction handling.
 - Add import/export for full JSON backups and ledger CSV exports.
 - Add migration safety checks and pre-migration backups.
 - Add minimum reserve / safety buffer logic.
@@ -383,33 +437,20 @@ endpoints. Public builds do not include that implementation.
 - Remove hard assumptions around PLN and Europe/Warsaw.
 - Add configurable timezone.
 - Add configurable ledger currency.
-- Define an FX provider interface:
-  - disabled
-  - manual rates
-  - NBP
-  - ECB or another provider later
-- Make notification integrations optional and documented.
+- Document notification integrations and deployment expectations.
 - Separate product concepts from private deployment terminology.
 
 ### Deployment
 
 - Add a production-ready compose example with named volumes and healthcheck.
 - Add upgrade guide details for versioned releases.
-- Add backup/restore guide with SQLite-safe examples.
+- Expand the backup/restore guide with SQLite-safe operational examples.
 - Document reverse-proxy auth patterns.
 - Add optional app-native auth after the standalone app stabilizes.
 
 ### Testing
 
-- Expand tests for:
-  - projection order
-  - funding allocation
-  - partial funding
-  - FX conversion
-  - business-day scheduling
-  - date/timezone boundaries
-- Add API route tests against temporary SQLite data.
-- Add browser smoke checks for the main tabs.
+- Expand browser tests beyond smoke-level tab rendering into full workflows.
 
 ### Data Portability
 

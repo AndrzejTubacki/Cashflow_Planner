@@ -51,6 +51,23 @@ test("getBufferedFxForCurrency does not buffer PLN", () => {
   );
 });
 
+test("toLedgerAmount does not buffer ledger-currency transactions", () => {
+  assert.deepEqual(
+    toLedgerAmount(
+      100,
+      "PLN",
+      { ledger_currency: "PLN", fx_buffer_percent: 50 },
+      { pln: { rate: 1 } },
+      "expense"
+    ),
+    {
+      rawRate: 1,
+      effectiveRate: 1,
+      ledgerAmount: 100
+    }
+  );
+});
+
 test("toLedgerAmount uses buffered rate", () => {
   assert.deepEqual(
     toLedgerAmount(

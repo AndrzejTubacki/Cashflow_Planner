@@ -1,15 +1,21 @@
 {
   "name": "cashflow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test",
-    "smoke": "node scripts/smoke.mjs"
+    "test": "npm run test:node && npm run test:browser",
+    "test:node": "node --test",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:browser": "npm run test:browser"
   },
   "dependencies": {
     "better-sqlite3": "^10.1.0",
     "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
   }
 }

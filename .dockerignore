@@ -1,4 +1,6 @@
 node_modules
+AGENTS.md
+AGENTS.override.md
 data
 logs
 backups

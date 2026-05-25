@@ -96,13 +96,14 @@ export function isBusinessDay(date, country) {
   return !holidaySetForCountry(country, year).has(dateStringFromUTC(date));
 }
 
-export function todayWarsaw() {
+export function todayWarsaw(now = new Date()) {
+  // Accepting an injected Date keeps timezone-boundary tests deterministic while preserving runtime behavior.
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: CASHFLOW_TIMEZONE,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
-  }).formatToParts(new Date());
+  }).formatToParts(now);
 
   const value = (type) => parts.find(p => p.type === type)?.value;
   return `${value("year")}-${value("month")}-${value("day")}`;

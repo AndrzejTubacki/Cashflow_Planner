@@ -57,14 +57,14 @@ export function createCashflowProjectionEngineService({
         FROM recurring_expenses r
         JOIN planned_transactions pt ON pt.id = r.planned_transaction_id
         WHERE r.active = 1
-        ORDER BY pt.operating_priority ASC
+        ORDER BY pt.operating_priority ASC, r.created_at ASC, r.id ASC
       `).all();
 
       const recurringIncomes = db.prepare(`
         SELECT *
         FROM recurring_incomes
         WHERE active = 1
-        ORDER BY anchor_day_of_month ASC
+        ORDER BY anchor_day_of_month ASC, created_at ASC, id ASC
       `).all();
 
       const flexes = db.prepare(`
@@ -72,7 +72,7 @@ export function createCashflowProjectionEngineService({
         FROM flex_transactions f
         JOIN planned_transactions pt ON pt.id = f.planned_transaction_id
         WHERE f.active = 1
-        ORDER BY pt.operating_priority ASC
+        ORDER BY pt.operating_priority ASC, f.created_at ASC, f.id ASC
       `).all();
 
       const goals = db.prepare(`
@@ -80,13 +80,13 @@ export function createCashflowProjectionEngineService({
         FROM goals g
         JOIN planned_transactions pt ON pt.id = g.planned_transaction_id
         WHERE g.active = 1
-        ORDER BY pt.goal_priority ASC
+        ORDER BY pt.goal_priority ASC, g.created_at ASC, g.id ASC
       `).all();
 
       const oneOffs = db.prepare(`
         SELECT *
         FROM one_off_transactions
-        ORDER BY date ASC
+        ORDER BY date ASC, created_at ASC, id ASC
       `).all();
 
       const periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods);
@@ -604,7 +604,10 @@ export function createCashflowProjectionEngineService({
           const priorityCompare = normalizePriority(a.priority) - normalizePriority(b.priority);
           if (priorityCompare !== 0) return priorityCompare;
 
-          return String(a.item.created_at || "").localeCompare(String(b.item.created_at || ""));
+          const createdCompare = String(a.item.created_at || "").localeCompare(String(b.item.created_at || ""));
+          if (createdCompare !== 0) return createdCompare;
+
+          return String(a.item.id || "").localeCompare(String(b.item.id || ""));
         });
 
         for (const period of periods) {

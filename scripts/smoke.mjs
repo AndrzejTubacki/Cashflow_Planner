@@ -20,10 +20,16 @@ async function requestJson(url) {
   return JSON.parse(body);
 }
 
-async function waitForHealth(baseUrl, timeoutMs = 15000) {
+async function waitForHealth(baseUrl, timeoutMs = Number(process.env.SMOKE_START_TIMEOUT_MS || 180000)) {
+  // Windows/network-mounted workspaces can take a long time to import server dependencies cold.
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeoutMs) {
+    const failedChild = startedChildren.find(item => item.exited);
+    if (failedChild) {
+      throw new Error(`Server exited before health check passed: ${failedChild.exitCode ?? failedChild.signal}\n${failedChild.output()}`);
+    }
+
     try {
       const health = await requestJson(`${baseUrl}/healthz`);
       if (health?.ok === true) {
@@ -36,7 +42,8 @@ async function waitForHealth(baseUrl, timeoutMs = 15000) {
     await sleep(500);
   }
 
-  throw new Error(`Timed out waiting for ${baseUrl}/healthz`);
+  const output = startedChildren.map(item => item.output()).filter(Boolean).join("\n");
+  throw new Error(`Timed out waiting for ${baseUrl}/healthz${output ? `\nServer output:\n${output}` : ""}`);
 }
 
 async function startServer() {
@@ -63,7 +70,14 @@ async function startServer() {
     output += chunk.toString();
   });
 
-  startedChildren.push({ child, runtimeRoot, output: () => output });
+  const tracked = { child, runtimeRoot, output: () => output, exited: false, exitCode: null, signal: null };
+  child.on("exit", (exitCode, signal) => {
+    tracked.exited = true;
+    tracked.exitCode = exitCode;
+    tracked.signal = signal;
+  });
+
+  startedChildren.push(tracked);
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     child
