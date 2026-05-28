@@ -111,6 +111,9 @@ export function createCashflowProjectionStateService({
     const pending = pendingOccurrenceRow(db, occurrenceKey);
     if (!pending) return null;
 
+    const previousLedgerAmount = Number(pending.ledger_amount || 0);
+    const nextLedgerAmount = Number(converted.ledgerAmount || 0);
+
     db.prepare(`
       UPDATE pending_transactions
       SET
@@ -156,7 +159,8 @@ export function createCashflowProjectionStateService({
 
     return {
       ...pending,
-      ledger_amount: converted.ledgerAmount
+      ledger_amount: nextLedgerAmount,
+      ledger_amount_delta: nextLedgerAmount - previousLedgerAmount
     };
   }
 

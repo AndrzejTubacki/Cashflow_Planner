@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createCashflowModule } from "../../src/cashflow.js";
+import { setTodayWarsawOverrideForTests } from "../../src/server/cashflow-date-utils.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
@@ -41,6 +42,8 @@ async function createCashflowTestHarness(options = {}) {
   const localeDir = path.join(repoRoot, "public", "app", "cashflow", "locales");
   const userId = options.userId || "local";
   const fxSnapshot = options.fxSnapshot || defaultFxSnapshot();
+  const testToday = options.today || "2026-05-20";
+  const previousTestToday = setTodayWarsawOverrideForTests(testToday);
 
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
@@ -130,6 +133,7 @@ async function createCashflowTestHarness(options = {}) {
     }
 
     await rm(runtimeRoot, { recursive: true, force: true });
+    setTodayWarsawOverrideForTests(previousTestToday);
   }
 
   return {
@@ -145,6 +149,7 @@ async function createCashflowTestHarness(options = {}) {
     openPlanningDb,
     request,
     startServer,
+    today: testToday,
     userId
   };
 }

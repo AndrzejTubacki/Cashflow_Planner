@@ -83,6 +83,81 @@ test("moving future to pending removes future row and is idempotent by occurrenc
   assert.equal(secondMove.futureTransactions.filter(tx => tx.id === future.id).length, 0);
 }));
 
+test("editing a period-setting pending income date keeps the original source occurrence handled", async () => withHarness(async harness => {
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      future_periods: 2,
+      fx_provider: "manual",
+      fx_used_currencies: ["EUR"],
+      manual_fx_rates: { EUR: 4 },
+      fx_buffer_percent: 0
+    }
+  });
+
+  const income = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "BBMF",
+      currency: "EUR",
+      amount: 100,
+      prediction_strategy: "fixed",
+      active: 1,
+      repeat_every_months: 1,
+      anchor_type: "month_end",
+      anchor_offset_days: -2,
+      anchor_business_day_adjustment: "previous",
+      anchor_holiday_country: "DE",
+      period_setting: 1
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const future = snapshot.futureTransactions.find(tx =>
+    tx.source_recurring_income_id === income.id &&
+    tx.date === "2026-05-29"
+  );
+  assert.ok(future);
+
+  const moved = await harness.api(`/api/future/${encodeURIComponent(future.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: future.occurrence_key }
+  });
+  const pending = moved.pendingTransactions.find(tx => tx.occurrence_key === future.occurrence_key);
+  assert.ok(pending);
+
+  const edited = await harness.api(`/api/pending/${encodeURIComponent(pending.id)}`, {
+    method: "PUT",
+    body: {
+      date: "2026-05-28",
+      amount: 110
+    }
+  });
+  assert.equal(edited.date, "2026-05-28");
+  assert.equal(edited.occurrence_key, future.occurrence_key);
+
+  await harness.api(`/api/pending/${encodeURIComponent(pending.id)}/confirm`, {
+    method: "POST",
+    body: {
+      amount: 110,
+      confirmed_date: "2026-05-28"
+    }
+  });
+
+  await harness.api("/api/run-jobs", { method: "POST", body: {} });
+  snapshot = await harness.api("/api");
+
+  assert.equal(
+    snapshot.futureTransactions.some(tx => tx.occurrence_key === future.occurrence_key),
+    false
+  );
+
+  const confirmed = snapshot.confirmedTransactions.find(tx => tx.id === pending.id);
+  assert.ok(confirmed);
+  assert.equal(confirmed.date, "2026-05-28");
+  assert.equal(confirmed.occurrence_key, future.occurrence_key);
+}));
+
 test("confirming pending rows deletes pending rows and recalculates ledger balances across years", async () => withHarness(async harness => {
   await harness.api("/api");
 

@@ -358,9 +358,10 @@ export function createCashflowPlanMutationService({
       const fx = Number(pending.buffered_fx_rate || pending.fx_rate || 1);
       const ledgerAmount = nextAmount * fx;
 
-      const nextOccurrenceKey = makeOccurrenceKey({
+      // Keep the source occurrence stable when users edit real-world pending details such as date or amount.
+      const nextOccurrenceKey = pending.occurrence_key || makeOccurrenceKey({
         type: pending.type,
-        date: nextDate,
+        date: pending.date,
         sourceRecurringExpenseId: pending.source_recurring_expense_id || null,
         sourceRecurringIncomeId: pending.source_recurring_income_id || null,
         sourceOneOffId: pending.source_one_off_id || null,

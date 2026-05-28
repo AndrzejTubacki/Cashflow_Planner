@@ -371,7 +371,10 @@
 }
 
 .cashflow-table-wrap {
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .cashflow-section {
@@ -725,6 +728,7 @@
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  min-width: 0;
 }
 
 .tab-buttons {
@@ -763,14 +767,17 @@
 .tab-content {
   display: grid;
   gap: 1.2rem;
+  min-width: 0;
 }
 
 .cashflow-tab-content {
   display: grid;
   gap: 1rem;
+  min-width: 0;
 }
 
 .cashflow-tab-content .panel {
+  min-width: 0;
   border: 1px solid rgba(127, 144, 166, 0.2);
   border-radius: 0.8rem;
   background: rgba(20, 28, 42, 0.5);
@@ -1234,6 +1241,7 @@ fieldset legend {
 }
 
 .cashflow-details-panel {
+  min-width: 0;
   overflow: hidden;
   margin: 0.75rem 0;
   border: 1px solid rgba(148, 163, 184, 0.2);
@@ -1305,6 +1313,8 @@ fieldset legend {
 }
 
 .cashflow-details-panel__body {
+  min-width: 0;
+  max-width: 100%;
   padding: 0.85rem 0.95rem 1rem;
   border-top: 1px solid rgba(148, 163, 184, 0.14);
   background: rgba(2, 6, 23, 0.16);

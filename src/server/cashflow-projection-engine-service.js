@@ -250,7 +250,7 @@ export function createCashflowProjectionEngineService({
           return {
             inserted: false,
             updatedPending: true,
-            ledgerAmount: converted.ledgerAmount,
+            ledgerAmount: Number(refreshedPending.ledger_amount_delta || 0),
             fx: converted.fx,
             buffered: converted.buffered
           };
@@ -364,7 +364,7 @@ export function createCashflowProjectionEngineService({
           )
         `).run();
 
-        for (const period of periods) {
+        for (const [periodIndex, period] of periods.entries()) {
           period.blocked = false;
 
           for (const income of recurringIncomes) {
@@ -488,7 +488,7 @@ export function createCashflowProjectionEngineService({
               const status = fundedLedger < requestedLedger ? "partial" : "funded";
               const missingOriginal = Math.max(0, predictedExpenseAmount - fundedOriginal);
 
-              insertTx({
+              const inserted = insertTx({
                 name: expense.name,
                 currency: expense.currency,
                 requestedAmount: predictedExpenseAmount,
@@ -501,7 +501,7 @@ export function createCashflowProjectionEngineService({
                 note: status === "partial" ? "Necessary transaction partially funded" : null
               });
 
-              period.available -= fundedLedger;
+              period.available -= inserted.ledgerAmount;
 
               if (status === "partial") {
                 queueUnderfundedIfNeeded(expense, missingOriginal);
@@ -514,9 +514,11 @@ export function createCashflowProjectionEngineService({
               }
             }
           }
-        }
 
-        carryCurrentSurplusToNextPeriod();
+          if (periodIndex === 0) {
+            carryCurrentSurplusToNextPeriod();
+          }
+        }
 
         for (const goal of goals) {
           const targetLedger = Number(goalTargetLedger.get(goal.id) || 0);
@@ -542,7 +544,7 @@ export function createCashflowProjectionEngineService({
             const requestedOriginal = remainingLedger / converted.buffered;
             const allocationDate = goal.due_date < period.end ? goal.due_date : period.end;
 
-            insertTx({
+            const inserted = insertTx({
               name: `Goal: ${goal.name}`,
               currency: goal.currency,
               requestedAmount: requestedOriginal,
@@ -555,8 +557,8 @@ export function createCashflowProjectionEngineService({
               note: fundedLedger < remainingLedger ? "Partial goal allocation" : null
             });
 
-            period.available -= fundedLedger;
-            remainingLedger -= fundedLedger;
+            period.available -= inserted.ledgerAmount;
+            remainingLedger -= inserted.ledgerAmount;
           }
 
           if (remainingLedger > 0.0001) {
@@ -632,7 +634,7 @@ export function createCashflowProjectionEngineService({
                 const fundedOriginal = fundedLedger / converted.buffered;
                 const status = fundedLedger < requestedLedger ? "partial" : "funded";
 
-                insertTx({
+                const inserted = insertTx({
                   name: expense.name,
                   currency: expense.currency,
                   requestedAmount: predictedExpenseAmount,
@@ -645,7 +647,7 @@ export function createCashflowProjectionEngineService({
                   note: status === "partial" ? "Non-necessary transaction partially funded" : null
                 });
 
-                period.available -= fundedLedger;
+                period.available -= inserted.ledgerAmount;
               }
 
               continue;
@@ -688,7 +690,7 @@ export function createCashflowProjectionEngineService({
             const fundedOriginal = fundedLedger / converted.buffered;
             const requestedOriginal = remainingLedger / converted.buffered;
 
-            insertTx({
+            const inserted = insertTx({
               name: flex.name,
               currency: flex.currency,
               requestedAmount: requestedOriginal,
@@ -703,10 +705,10 @@ export function createCashflowProjectionEngineService({
 
             generatedFlexFunding.set(
               flex.id,
-              Number(generatedFlexFunding.get(flex.id) || 0) + fundedLedger
+              Number(generatedFlexFunding.get(flex.id) || 0) + inserted.ledgerAmount
             );
 
-            period.available -= fundedLedger;
+            period.available -= inserted.ledgerAmount;
           }
         }
 

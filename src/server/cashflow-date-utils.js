@@ -1,5 +1,14 @@
 import { CASHFLOW_TIMEZONE } from "./cashflow-constants.js";
 
+let testTodayOverride = null;
+
+export function setTodayWarsawOverrideForTests(dateString = null) {
+  // Integration tests pin the app calendar without monkey-patching Date or changing production defaults.
+  const previous = testTodayOverride;
+  testTodayOverride = /^\d{4}-\d{2}-\d{2}$/.test(dateString || "") ? dateString : null;
+  return previous;
+}
+
 export function shouldGenerateInMonth(item, year, month) {
   const repeatEveryMonths = Math.max(1, Math.min(12, Number(item.repeat_every_months) || 1));
 
@@ -97,6 +106,10 @@ export function isBusinessDay(date, country) {
 }
 
 export function todayWarsaw(now = new Date()) {
+  if (testTodayOverride) {
+    return testTodayOverride;
+  }
+
   // Accepting an injected Date keeps timezone-boundary tests deterministic while preserving runtime behavior.
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: CASHFLOW_TIMEZONE,

@@ -1,4 +1,6 @@
 node_modules/
+.stfolder/
+.stignore
 AGENTS.md
 AGENTS.override.md
 data/

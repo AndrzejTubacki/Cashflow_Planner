@@ -60,7 +60,7 @@ export function renderLedgerTab(locale, cashflow) {
           renderTransactionTable(txs, locale, {
             entityType: "future",
             canEdit: false,
-            canMoveToPending: period === (cashflow?.periodSummaries || [])[0]?.period
+            canMoveToPending: true
           }),
           { extra }
         );

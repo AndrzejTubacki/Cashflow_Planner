@@ -176,23 +176,25 @@ function renderTransactionTable(transactions, locale, options = {}) {
   const ledgerAmountLabel = options.ledgerAmountLabel || t(locale, "Ledger amount");
 
   return `
-    <table class="cashflow-table">
-      <thead>
-        <tr>
-          <th>${escapeHtml(t(locale, "Date"))}</th>
-          <th>${escapeHtml(t(locale, "Name"))}</th>
-          <th>${escapeHtml(t(locale, "Type"))}</th>
-          <th>${escapeHtml(t(locale, "Status"))}</th>
-          <th>${escapeHtml(t(locale, "Amount"))}</th>
-          ${showLedgerAmount ? `<th>${escapeHtml(ledgerAmountLabel)}</th>` : ""}
-          ${showRunningBalance ? `<th>${escapeHtml(t(locale, "Running balance"))}</th>` : ""}
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${transactions.map(tx => renderTransactionRow(tx, locale, options)).join("")}
-      </tbody>
-    </table>
+    <div class="cashflow-table-wrap">
+      <table class="cashflow-table">
+        <thead>
+          <tr>
+            <th>${escapeHtml(t(locale, "Date"))}</th>
+            <th>${escapeHtml(t(locale, "Name"))}</th>
+            <th>${escapeHtml(t(locale, "Type"))}</th>
+            <th>${escapeHtml(t(locale, "Status"))}</th>
+            <th>${escapeHtml(t(locale, "Amount"))}</th>
+            ${showLedgerAmount ? `<th>${escapeHtml(ledgerAmountLabel)}</th>` : ""}
+            ${showRunningBalance ? `<th>${escapeHtml(t(locale, "Running balance"))}</th>` : ""}
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${transactions.map(tx => renderTransactionRow(tx, locale, options)).join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 

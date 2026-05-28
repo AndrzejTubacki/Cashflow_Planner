@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.js";
+import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
 import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
 import { loadLocale } from "../public/app/cashflow/shared.js";
 import { renderTransactionTable } from "../public/app/cashflow/transactions.js";
@@ -83,10 +84,50 @@ test("transaction table renders localized labels and ledger-currency equivalents
     canEdit: false
   });
 
+  assert.match(html, /class="cashflow-table-wrap"/);
   assert.match(html, /Ledger amount/);
   assert.match(html, /Running balance/);
   assert.match(html, /10\.00 EUR/);
   assert.match(html, /\(44\.00 PLN\)/);
   assert.match(html, /956\.00 PLN/);
+  assertNoMojibake(html);
+});
+
+test("ledger future rows can move to pending from every generated period", async () => {
+  await loadLocale("en");
+
+  const html = renderLedgerTab("en", {
+    pendingTransactions: [],
+    confirmedTransactions: [],
+    periodSummaries: [
+      { period: "2026-06", start_date: "2026-06-01", end_date: "2026-06-30", income: 1000, expenses: 100 },
+      { period: "2026-07", start_date: "2026-07-01", end_date: "2026-07-31", income: 1000, expenses: 100 }
+    ],
+    futureTransactions: [
+      {
+        id: "future-current",
+        period: "2026-06",
+        date: "2026-06-10",
+        name: "Current period bill",
+        type: "expense",
+        status: "funded",
+        amount: 100,
+        currency: "PLN"
+      },
+      {
+        id: "future-later",
+        period: "2026-07",
+        date: "2026-07-10",
+        name: "Later period bill",
+        type: "expense",
+        status: "funded",
+        amount: 100,
+        currency: "PLN"
+      }
+    ]
+  });
+
+  assert.match(html, /data-cashflow-move-future-to-pending="future-current"/);
+  assert.match(html, /data-cashflow-move-future-to-pending="future-later"/);
   assertNoMojibake(html);
 });
