@@ -7,6 +7,7 @@ import { renderTransactionTable } from "./transactions.js";
 const EMPTY_VALUE = "-";
 
 export function renderLedgerTab(locale, cashflow) {
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
   const pending = (cashflow?.pendingTransactions || []).map(p => ({
     ...p,
     entityType: "pending",
@@ -48,7 +49,7 @@ export function renderLedgerTab(locale, cashflow) {
     ? [...futureByPeriod.entries()].map(([period, txs]) => {
         const summary = (cashflow?.periodSummaries || []).find(p => p.period === period);
         const extra = summary
-          ? `<small>${formatMoney(summary.income, "PLN", locale)} / ${formatMoney(summary.expenses, "PLN", locale)}</small>`
+          ? `<small>${formatMoney(summary.income, ledgerCurrency, locale)} / ${formatMoney(summary.expenses, ledgerCurrency, locale)}</small>`
           : "";
 
         const title = summary
@@ -73,7 +74,12 @@ export function renderLedgerTab(locale, cashflow) {
       ${renderFundingOverview(locale, cashflow)}
 
       <div class="panel">
-        <h3>${escapeHtml(t(locale, "Pending"))}</h3>
+        <div class="cashflow-panel-heading">
+          <h3>${escapeHtml(t(locale, "Pending"))}</h3>
+          <button type="button" class="btn-small" data-cashflow-recalculate-pending>
+            ${escapeHtml(t(locale, "Recalculate pending"))}
+          </button>
+        </div>
         <div data-pending-list>
           ${renderTransactionTable(pending, locale, { entityType: "pending", canConfirmPending: true })}
         </div>

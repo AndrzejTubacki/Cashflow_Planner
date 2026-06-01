@@ -9,6 +9,13 @@ import { spawn } from "node:child_process";
 import { chromium } from "playwright";
 
 const startedChildren = [];
+const SYSTEM_CHROME_CANDIDATES = [
+  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser"
+].filter(Boolean);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -125,7 +132,8 @@ async function assertTab(page, tabId, selector, expectedText) {
 }
 
 async function runBrowserSmoke(baseUrl) {
-  const browser = await chromium.launch();
+  const executablePath = SYSTEM_CHROME_CANDIDATES.find(candidate => existsSync(candidate));
+  const browser = await chromium.launch(executablePath ? { executablePath } : {});
   const page = await browser.newPage();
 
   try {

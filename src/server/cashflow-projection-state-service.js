@@ -129,6 +129,7 @@ export function createCashflowProjectionStateService({
         source_goal_id = ?,
         fx_rate = ?,
         buffered_fx_rate = ?,
+        ledger_currency = ?,
         status = ?,
         funded_amount = ?,
         requested_amount = ?,
@@ -149,6 +150,7 @@ export function createCashflowProjectionStateService({
       tx.sourceGoalId || null,
       converted.fx,
       converted.buffered,
+      converted.ledgerCurrency || "PLN",
       normalizePendingStatus(tx.status),
       tx.fundedAmount,
       tx.requestedAmount,
@@ -165,15 +167,19 @@ export function createCashflowProjectionStateService({
   }
 
   function recalculatePlanningRunningBalances(db, userId = null) {
+    const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
+    const ledgerCurrency = settings.ledger_currency || "PLN";
     const rows = [
       ...db.prepare(`
         SELECT id, type, ledger_amount, date, created_at, 'pending' AS bucket
         FROM pending_transactions
-      `).all(),
+        WHERE COALESCE(ledger_currency, 'PLN') = ?
+      `).all(ledgerCurrency),
       ...db.prepare(`
         SELECT id, type, ledger_amount, date, created_at, 'future' AS bucket
         FROM future_transactions
-      `).all()
+        WHERE COALESCE(ledger_currency, 'PLN') = ?
+      `).all(ledgerCurrency)
     ].sort((a, b) => {
       const dateCompare = String(a.date).localeCompare(String(b.date));
       if (dateCompare !== 0) return dateCompare;
@@ -186,6 +192,19 @@ export function createCashflowProjectionStateService({
 
       return String(a.id).localeCompare(String(b.id));
     });
+
+    const staleRows = [
+      ...db.prepare(`
+        SELECT id, 'pending' AS bucket
+        FROM pending_transactions
+        WHERE COALESCE(ledger_currency, 'PLN') != ?
+      `).all(ledgerCurrency),
+      ...db.prepare(`
+        SELECT id, 'future' AS bucket
+        FROM future_transactions
+        WHERE COALESCE(ledger_currency, 'PLN') != ?
+      `).all(ledgerCurrency)
+    ];
 
     let balance = userId ? latestConfirmedBalance(userId) : 0;
 
@@ -200,6 +219,14 @@ export function createCashflowProjectionStateService({
       SET running_balance = ?
       WHERE id = ?
     `);
+
+    for (const row of staleRows) {
+      if (row.bucket === "pending") {
+        updatePending.run(null, row.id);
+      } else {
+        updateFuture.run(null, row.id);
+      }
+    }
 
     for (const row of rows) {
       const ledgerAmount = Number(row.ledger_amount || 0);
@@ -219,6 +246,9 @@ export function createCashflowProjectionStateService({
   }
 
   function pendingNetBalance(db) {
+    const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
+    const ledgerCurrency = settings.ledger_currency || "PLN";
+
     return db.prepare(`
       SELECT COALESCE(SUM(
         CASE
@@ -227,7 +257,8 @@ export function createCashflowProjectionStateService({
         END
       ), 0) AS value
       FROM pending_transactions
-    `).get().value;
+      WHERE COALESCE(ledger_currency, 'PLN') = ?
+    `).get(ledgerCurrency).value;
   }
 
   function planningOpeningBalance(db, userId) {

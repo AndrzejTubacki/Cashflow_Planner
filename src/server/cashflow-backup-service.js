@@ -375,12 +375,6 @@ export function createCashflowBackupService({
         }
 
         liveDb.prepare(`
-          UPDATE settings
-          SET ledger_currency = 'PLN'
-          WHERE id = 1
-        `).run();
-
-        liveDb.prepare(`
           INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp)
           VALUES (?, 'restore_completed', 'cashflow', ?, ?, datetime('now'))
         `).run(

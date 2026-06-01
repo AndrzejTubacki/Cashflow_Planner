@@ -5,9 +5,11 @@ import {
 } from "./cashflow-constants.js";
 export function initializePlanningSchema(db) {
   db.exec(`
-    PRAGMA user_version = 9;
+    PRAGMA user_version = 12;
 
     CREATE TABLE fx_rates_cache (
+      base_currency TEXT NOT NULL,
+      quote_currency TEXT NOT NULL DEFAULT 'PLN',
       currency TEXT NOT NULL,
       rate_date TEXT NOT NULL,
       rate REAL NOT NULL CHECK (rate > 0),
@@ -15,15 +17,18 @@ export function initializePlanningSchema(db) {
       source TEXT NOT NULL DEFAULT 'nbp',
       raw_json TEXT,
       updated_at TEXT NOT NULL,
-      PRIMARY KEY (currency, rate_date)
+      PRIMARY KEY (base_currency, quote_currency, rate_date)
     );
 
     CREATE INDEX idx_fx_rates_cache_currency_date
       ON fx_rates_cache(currency, rate_date);
+    CREATE INDEX idx_fx_rates_cache_pair_date
+      ON fx_rates_cache(base_currency, quote_currency, rate_date);
 
     CREATE TABLE settings (
       id INTEGER PRIMARY KEY CHECK (id = 1),
-      ledger_currency TEXT NOT NULL DEFAULT 'PLN' CHECK (ledger_currency = 'PLN'),
+      ledger_currency TEXT NOT NULL DEFAULT 'PLN',
+      timezone TEXT NOT NULL DEFAULT 'Europe/Warsaw',
       locale TEXT NOT NULL DEFAULT 'en',
       future_periods INTEGER NOT NULL DEFAULT ${DEFAULT_FUTURE_PERIODS},
       budget_period_income_id TEXT,
@@ -57,6 +62,19 @@ export function initializePlanningSchema(db) {
       UNIQUE(id)
     );
 
+    CREATE TABLE ledger_currency_events (
+      id TEXT PRIMARY KEY,
+      old_currency TEXT NOT NULL,
+      new_currency TEXT NOT NULL,
+      old_balance REAL NOT NULL,
+      converted_opening_balance REAL NOT NULL,
+      fx_rate REAL NOT NULL,
+      rate_date TEXT NOT NULL,
+      source TEXT NOT NULL,
+      details TEXT,
+      created_at TEXT NOT NULL
+    );
+
     CREATE TABLE planned_transactions (
       id TEXT PRIMARY KEY,
       type TEXT NOT NULL CHECK (type IN ('recurring_expense', 'flex', 'goal')),
@@ -72,6 +90,18 @@ export function initializePlanningSchema(db) {
       currency TEXT NOT NULL,
       amount REAL NOT NULL CHECK (amount >= 0),
       prediction_strategy TEXT NOT NULL CHECK (prediction_strategy IN ('fixed', '12month_max')),
+      prediction_substitute_missing TEXT NOT NULL DEFAULT 'none'
+        CHECK (prediction_substitute_missing IN (
+          'none',
+          'starting_value',
+          'average_extreme_starting_value',
+          'median_recorded',
+          'last_confirmed',
+          'previous_year_same_month',
+          'require_min_recorded_months'
+        )),
+      prediction_min_recorded_months INTEGER NOT NULL DEFAULT 6
+        CHECK (prediction_min_recorded_months BETWEEN 1 AND 12),
       necessary INTEGER NOT NULL DEFAULT 0,
       active INTEGER NOT NULL DEFAULT 1,
       repeat_every_months INTEGER NOT NULL CHECK (repeat_every_months BETWEEN 1 AND 12),
@@ -97,6 +127,18 @@ export function initializePlanningSchema(db) {
       currency TEXT NOT NULL,
       amount REAL NOT NULL CHECK (amount >= 0),
       prediction_strategy TEXT NOT NULL CHECK (prediction_strategy IN ('fixed', '12month_min')),
+      prediction_substitute_missing TEXT NOT NULL DEFAULT 'none'
+        CHECK (prediction_substitute_missing IN (
+          'none',
+          'starting_value',
+          'average_extreme_starting_value',
+          'median_recorded',
+          'last_confirmed',
+          'previous_year_same_month',
+          'require_min_recorded_months'
+        )),
+      prediction_min_recorded_months INTEGER NOT NULL DEFAULT 6
+        CHECK (prediction_min_recorded_months BETWEEN 1 AND 12),
       active INTEGER NOT NULL DEFAULT 1,
       repeat_every_months INTEGER NOT NULL CHECK (repeat_every_months BETWEEN 1 AND 12),
       start_month_year TEXT,
@@ -167,6 +209,7 @@ export function initializePlanningSchema(db) {
       source_goal_id TEXT,
       fx_rate REAL,
       buffered_fx_rate REAL,
+      ledger_currency TEXT NOT NULL DEFAULT 'PLN',
       status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'partial', 'underfunded', 'funded')),
       funded_amount REAL,
@@ -199,6 +242,7 @@ export function initializePlanningSchema(db) {
       source_goal_id TEXT,
       fx_rate REAL,
       buffered_fx_rate REAL,
+      ledger_currency TEXT NOT NULL DEFAULT 'PLN',
       requested_amount REAL,
       funded_amount REAL,
       ledger_amount REAL,
@@ -232,6 +276,7 @@ export function initializePlanningSchema(db) {
       total_projected_expenses REAL NOT NULL,
       available_balance REAL NOT NULL,
       fx_rates_used TEXT NOT NULL,
+      ledger_currency TEXT NOT NULL DEFAULT 'PLN',
       generation_succeeded INTEGER NOT NULL,
       warning_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
@@ -278,7 +323,7 @@ export function initializePlanningSchema(db) {
 
 export function initializeLedgerSchema(db) {
   db.exec(`
-    PRAGMA user_version = 3;
+    PRAGMA user_version = 4;
 
     CREATE TABLE confirmed_transactions (
       id TEXT PRIMARY KEY,
@@ -290,6 +335,7 @@ export function initializeLedgerSchema(db) {
       confirmed_date TEXT NOT NULL,
       fx_rate REAL,
       buffered_fx_rate REAL,
+      ledger_currency TEXT NOT NULL DEFAULT 'PLN',
       running_balance_pln REAL NOT NULL,
       ledger_amount REAL,
       source_recurring_expense_id TEXT,

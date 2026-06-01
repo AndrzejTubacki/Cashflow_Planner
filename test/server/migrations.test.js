@@ -50,13 +50,61 @@ test("planning migration from version 8 adds locale and preserves valid settings
   const columns = db.prepare("PRAGMA table_info(settings)").all().map(column => column.name);
   const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
 
-  assert.equal(version, 9);
+  assert.equal(version, 12);
   assert.equal(columns.includes("locale"), true);
   assert.equal(settings.locale, "en");
   assert.equal(settings.fx_provider, "manual");
   assert.equal(settings.fx_used_currencies, '["EUR"]');
   assert.equal(settings.manual_fx_rates, '{"EUR":4.2}');
   assert.equal(settings.future_periods, 7);
+}));
+
+test("planning migration from version 9 adds prediction fallback fields", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 9;
+
+    CREATE TABLE recurring_expenses (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      currency TEXT NOT NULL,
+      amount REAL NOT NULL,
+      prediction_strategy TEXT NOT NULL
+    );
+
+    CREATE TABLE recurring_incomes (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      currency TEXT NOT NULL,
+      amount REAL NOT NULL,
+      prediction_strategy TEXT NOT NULL
+    );
+
+    INSERT INTO recurring_expenses (
+      id, name, currency, amount, prediction_strategy
+    ) VALUES ('exp-1', 'Expense', 'PLN', 500, '12month_max');
+
+    INSERT INTO recurring_incomes (
+      id, name, currency, amount, prediction_strategy
+    ) VALUES ('inc-1', 'Income', 'PLN', 500, '12month_min');
+  `);
+
+  applyPlanningMigrations(db);
+
+  const version = db.pragma("user_version", { simple: true });
+  const expenseColumns = db.prepare("PRAGMA table_info(recurring_expenses)").all().map(column => column.name);
+  const incomeColumns = db.prepare("PRAGMA table_info(recurring_incomes)").all().map(column => column.name);
+  const expense = db.prepare("SELECT * FROM recurring_expenses WHERE id = 'exp-1'").get();
+  const income = db.prepare("SELECT * FROM recurring_incomes WHERE id = 'inc-1'").get();
+
+  assert.equal(version, 12);
+  assert.equal(expenseColumns.includes("prediction_substitute_missing"), true);
+  assert.equal(incomeColumns.includes("prediction_substitute_missing"), true);
+  assert.equal(expenseColumns.includes("prediction_min_recorded_months"), true);
+  assert.equal(incomeColumns.includes("prediction_min_recorded_months"), true);
+  assert.equal(expense.prediction_substitute_missing, "none");
+  assert.equal(income.prediction_substitute_missing, "none");
+  assert.equal(expense.prediction_min_recorded_months, 6);
+  assert.equal(income.prediction_min_recorded_months, 6);
 }));
 
 test("ledger migration from version 2 adds occurrence keys and preserves ledger values", () => withTempDb(db => {
@@ -100,7 +148,7 @@ test("ledger migration from version 2 adds occurrence keys and preserves ledger 
   const columns = db.prepare("PRAGMA table_info(confirmed_transactions)").all().map(column => column.name);
   const row = db.prepare("SELECT * FROM confirmed_transactions WHERE id = 'conf-1'").get();
 
-  assert.equal(version, 3);
+  assert.equal(version, 4);
   assert.equal(columns.includes("occurrence_key"), true);
   assert.equal(row.ledger_amount, 25);
   assert.equal(row.running_balance_pln, 75);

@@ -1,5 +1,5 @@
-﻿import { DEFAULT_FUTURE_PERIODS } from "./cashflow-constants.js";
-import { recurringOccurrencesInPeriod, todayWarsaw } from "./cashflow-date-utils.js";
+﻿import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { recurringOccurrencesInPeriod, todayInTimezone } from "./cashflow-date-utils.js";
 import {
   getBufferedFxForCurrency,
   normalizeCurrency
@@ -7,6 +7,7 @@ import {
 import {
   normalizeFxCurrencyList,
   normalizeFxProvider,
+  normalizeManualFxPairs,
   normalizeManualFxRates
 } from "./cashflow-fx-provider-utils.js";
 
@@ -120,10 +121,11 @@ export function createCashflowSnapshotService({
 
     try {
       const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
+      const ledgerCurrency = settings?.ledger_currency || "PLN";
       const fxSnapshot = safeGetCurrentFxSnapshot(userId) || getCachedFxSnapshot(userId);
       const missingFxRates = new Set();
 
-      const today = todayWarsaw();
+      const today = todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
 
       const safeConvertToLedger = (amount, currency, type = "expense") => {
         try {
@@ -139,7 +141,7 @@ export function createCashflowSnapshotService({
         } catch (error) {
           const normalized = normalizeCurrency(currency);
 
-          if (normalized !== "PLN") {
+          if (normalized !== ledgerCurrency) {
             missingFxRates.add(normalized);
           }
 
@@ -167,7 +169,7 @@ export function createCashflowSnapshotService({
           amount_ledger_amount: amountLedger.ok ? amountLedger.value : null,
           amount_fx_missing: !amountLedger.ok,
           amount_warning: amountLedger.ok ? null : amountLedger.error,
-          ledger_currency: "PLN"
+          ledger_currency: ledgerCurrency
         };
       });
 
@@ -236,7 +238,7 @@ export function createCashflowSnapshotService({
           amount_ledger_amount: amountLedger.ok ? amountLedger.value : null,
           amount_fx_missing: !amountLedger.ok,
           amount_warning: amountLedger.ok ? null : amountLedger.error,
-          ledger_currency: "PLN"
+          ledger_currency: ledgerCurrency
         };
       });
 
@@ -258,7 +260,7 @@ export function createCashflowSnapshotService({
         .map(tx => ({
           ...tx,
           ledger_year: tx.ledger_year || String(tx.date || "").slice(0, 4),
-          ledger_currency: "PLN",
+          ledger_currency: tx.ledger_currency || ledgerCurrency,
           requested_amount: tx.requested_amount ?? tx.amount,
           funded_amount: tx.funded_amount ?? tx.amount,
           ledger_amount:
@@ -282,7 +284,7 @@ export function createCashflowSnapshotService({
 
       const goalSummaries = goals.map(goal => {
         const target = safeConvertToLedger(goal.amount, goal.currency, "expense");
-        const alreadyFundedLedger = sumConfirmedFunding(userId, "source_goal_id", goal.id, "PLN", settings);
+        const alreadyFundedLedger = sumConfirmedFunding(userId, "source_goal_id", goal.id, ledgerCurrency, settings);
 
         const futureAllocatedLedger = db.prepare(`
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
@@ -315,7 +317,7 @@ export function createCashflowSnapshotService({
         return {
           ...goal,
           target_ledger_amount: targetLedger,
-          ledger_currency: "PLN",
+          ledger_currency: ledgerCurrency,
           already_funded: alreadyFundedLedger,
           already_funded_ledger: alreadyFundedLedger,
           pending_allocated: pendingAllocatedLedger,
@@ -335,7 +337,7 @@ export function createCashflowSnapshotService({
 
       const flexSummaries = flexTransactions.map(flex => {
         const target = safeConvertToLedger(flex.amount, flex.currency, "expense");
-        const alreadyFundedLedger = sumConfirmedFunding(userId, "source_flex_id", flex.id, "PLN", settings);
+        const alreadyFundedLedger = sumConfirmedFunding(userId, "source_flex_id", flex.id, ledgerCurrency, settings);
 
         const futureAllocatedLedger = db.prepare(`
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
@@ -360,7 +362,7 @@ export function createCashflowSnapshotService({
         return {
           ...flex,
           target_ledger_amount: targetLedger,
-          ledger_currency: "PLN",
+          ledger_currency: ledgerCurrency,
           already_funded: alreadyFundedLedger,
           already_funded_ledger: alreadyFundedLedger,
           pending_allocated: pendingAllocatedLedger,
@@ -398,11 +400,14 @@ export function createCashflowSnapshotService({
       return {
         settings: {
           ...(settings || {}),
-          ledger_currency: "PLN",
+          ledger_currency: ledgerCurrency,
           locale: settings?.locale || "en",
           fx_provider: normalizeFxProvider(settings?.fx_provider),
-          fx_used_currencies: normalizeFxCurrencyList(settings?.fx_used_currencies),
-          manual_fx_rates: normalizeManualFxRates(settings?.manual_fx_rates)
+          fx_used_currencies: normalizeFxCurrencyList(settings?.fx_used_currencies, ledgerCurrency),
+          manual_fx_rates: {
+            ...normalizeManualFxRates(settings?.manual_fx_rates),
+            ...normalizeManualFxPairs(settings?.manual_fx_rates, ledgerCurrency)
+          }
         },
         recurringExpenses: recurringExpenses || [],
         recurringIncomes: recurringIncomes || [],

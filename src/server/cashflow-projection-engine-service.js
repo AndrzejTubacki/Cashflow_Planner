@@ -1,5 +1,5 @@
-import { DEFAULT_FUTURE_PERIODS } from "./cashflow-constants.js";
-import { recurringOccurrencesInPeriod, todayWarsaw } from "./cashflow-date-utils.js";
+import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { recurringOccurrencesInPeriod, todayInTimezone } from "./cashflow-date-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { getBufferedFxForCurrency } from "./cashflow-money-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
@@ -31,13 +31,10 @@ export function createCashflowProjectionEngineService({
     try {
       const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
 
-      if (settings?.ledger_currency && settings.ledger_currency !== "PLN") {
-        throw new Error("Only PLN ledger currency is supported");
-      }
-
+      const ledgerCurrency = settings?.ledger_currency || "PLN";
       const fxSnapshot = safeGetCurrentFxSnapshot(userId) || getCachedFxSnapshot(userId);
       const generationTimestamp = new Date().toISOString();
-      const today = todayWarsaw();
+      const today = todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
 
       const previousSnapshot = db.prepare(`
         SELECT *
@@ -102,24 +99,24 @@ export function createCashflowProjectionEngineService({
       for (const goal of goals) {
         confirmedGoalFunding.set(
           goal.id,
-          sumConfirmedFunding(userId, "source_goal_id", goal.id, "PLN", settings)
+          sumConfirmedFunding(userId, "source_goal_id", goal.id, ledgerCurrency, settings)
         );
 
         pendingGoalFunding.set(
           goal.id,
-          sumPendingFunding(userId, "source_goal_id", goal.id, "PLN", settings)
+          sumPendingFunding(userId, "source_goal_id", goal.id, ledgerCurrency, settings)
         );
       }
 
       for (const flex of flexes) {
         confirmedFlexFunding.set(
           flex.id,
-          sumConfirmedFunding(userId, "source_flex_id", flex.id, "PLN", settings)
+          sumConfirmedFunding(userId, "source_flex_id", flex.id, ledgerCurrency, settings)
         );
 
         pendingFlexFunding.set(
           flex.id,
-          sumPendingFunding(userId, "source_flex_id", flex.id, "PLN", settings)
+          sumPendingFunding(userId, "source_flex_id", flex.id, ledgerCurrency, settings)
         );
 
         generatedFlexFunding.set(flex.id, 0);
@@ -136,6 +133,7 @@ export function createCashflowProjectionEngineService({
         return {
           fx: rates.fx,
           buffered: rates.buffered,
+          ledgerCurrency,
           ledgerAmount: Number(amount || 0) * rates.buffered
         };
       }
@@ -175,9 +173,9 @@ export function createCashflowProjectionEngineService({
           id, name, currency, amount, type, date, period,
           source_recurring_expense_id, source_recurring_income_id, source_one_off_id,
           source_flex_id, source_goal_id,
-          fx_rate, buffered_fx_rate, requested_amount, funded_amount, ledger_amount,
+          fx_rate, buffered_fx_rate, ledger_currency, requested_amount, funded_amount, ledger_amount,
           status, note, occurrence_key, generation_timestamp, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
 
       function insertTx({
@@ -271,6 +269,7 @@ export function createCashflowProjectionEngineService({
           sourceGoalId,
           converted.fx,
           converted.buffered,
+          ledgerCurrency,
           requestedAmount,
           fundedAmount,
           converted.ledgerAmount,
@@ -369,7 +368,7 @@ export function createCashflowProjectionEngineService({
 
           for (const income of recurringIncomes) {
             for (const date of recurringOccurrencesInPeriod(income, period, today)) {
-              const predictedIncomeAmount = predictedAmountForRecurringIncome(userId, income, today);
+              const predictedIncomeAmount = predictedAmountForRecurringIncome(userId, income, today, date);
 
               const inserted = insertTx({
                 name: income.name,
@@ -454,7 +453,7 @@ export function createCashflowProjectionEngineService({
 
           for (const expense of recurringExpenses.filter(e => e.necessary)) {
             for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
-              const predictedExpenseAmount = predictedAmountForRecurringExpense(userId, expense, today);
+              const predictedExpenseAmount = predictedAmountForRecurringExpense(userId, expense, today, date);
               const converted = convert(predictedExpenseAmount, expense.currency, "expense");
               const requestedLedger = converted.ledgerAmount;
 
@@ -571,7 +570,7 @@ export function createCashflowProjectionEngineService({
               JSON.stringify({
                 goal: goal.name,
                 missing_ledger: remainingLedger,
-                ledger_currency: "PLN",
+                ledger_currency: ledgerCurrency,
                 due_date: goal.due_date
               })
             );
@@ -581,7 +580,7 @@ export function createCashflowProjectionEngineService({
                 db,
                 "goal_impossible",
                 "Goal cannot be fully funded",
-                `${goal.name} is missing ${remainingLedger.toFixed(2)} PLN`,
+                `${goal.name} is missing ${remainingLedger.toFixed(2)} ${ledgerCurrency}`,
                 notificationPriority(settings, "goal_impossible"),
                 goal.id,
                 `goal_impossible:${goal.id}`,
@@ -624,7 +623,7 @@ export function createCashflowProjectionEngineService({
               for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
                 if (period.available <= 0) break;
 
-                const predictedExpenseAmount = predictedAmountForRecurringExpense(userId, expense, today);
+                const predictedExpenseAmount = predictedAmountForRecurringExpense(userId, expense, today, date);
                 const converted = convert(predictedExpenseAmount, expense.currency, "expense");
                 const requestedLedger = converted.ledgerAmount;
                 const fundedLedger = Math.min(period.available, requestedLedger);
@@ -800,10 +799,11 @@ export function createCashflowProjectionEngineService({
             total_projected_expenses,
             available_balance,
             fx_rates_used,
+            ledger_currency,
             generation_succeeded,
             warning_count,
             created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, datetime('now'))
         `).run(
           generateId("snapshot"),
           generationTimestamp,
@@ -811,6 +811,7 @@ export function createCashflowProjectionEngineService({
           totalProjectedExpenses,
           availableBalance,
           currentFxJson,
+          ledgerCurrency,
           warningCount
         );
       })();

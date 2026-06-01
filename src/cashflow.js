@@ -157,8 +157,12 @@ function createCashflowModule({
     getSettings,
     updateSettings
   } = createCashflowSettingsService({
+    fetchProviderRate,
+    getCachedFxRate,
+    latestConfirmedBalance,
     normalizeLocale,
-    openPlanningDb
+    openPlanningDb,
+    recalculatePlanningRunningBalances
   });
 
   // Create, update, delete planned entities, then recalculate affected projection state.
@@ -300,6 +304,7 @@ function createCashflowModule({
       deleteRecurringExpense,
       deleteRecurringIncome,
       ensureFxCacheForMutation,
+      fetchProviderRate,
       fetchNbpFxSnapshot,
       fetchNbpRate,
       getCachedFxSnapshot,
@@ -410,6 +415,7 @@ function createCashflowModule({
     queueDailyPendingSummary,
     queueMissingIncomeNotifications,
     refreshNbpFxCacheForAllUsers,
+    refreshNbpFxCacheForUser,
     sendQueuedNotifications
   });
 

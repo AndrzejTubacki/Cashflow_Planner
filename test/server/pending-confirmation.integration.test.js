@@ -83,6 +83,49 @@ test("moving future to pending removes future row and is idempotent by occurrenc
   assert.equal(secondMove.futureTransactions.filter(tx => tx.id === future.id).length, 0);
 }));
 
+test("recalculating pending deletes pending rows and regenerates allocations", async () => withHarness(async harness => {
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      future_periods: 2,
+      fx_provider: "manual",
+      manual_fx_rates: {}
+    }
+  });
+
+  const oneOff = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Pending recalculation expense",
+      currency: "PLN",
+      amount: 100,
+      type: "expense",
+      date: "2026-06-01"
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const future = snapshot.futureTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+  assert.ok(future);
+
+  const moved = await harness.api(`/api/future/${encodeURIComponent(future.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: future.occurrence_key }
+  });
+
+  assert.equal(moved.pendingTransactions.some(tx => tx.occurrence_key === future.occurrence_key), true);
+  assert.equal(moved.futureTransactions.some(tx => tx.occurrence_key === future.occurrence_key), false);
+
+  const recalculated = await harness.api("/api/pending/recalculate", {
+    method: "POST",
+    body: {}
+  });
+
+  assert.equal(recalculated.deletedPendingCount, 1);
+  assert.equal(recalculated.pendingTransactions.some(tx => tx.occurrence_key === future.occurrence_key), false);
+  assert.equal(recalculated.futureTransactions.some(tx => tx.occurrence_key === future.occurrence_key), true);
+}));
+
 test("editing a period-setting pending income date keeps the original source occurrence handled", async () => withHarness(async harness => {
   await harness.api("/api/settings", {
     method: "PUT",
@@ -219,4 +262,125 @@ test("confirming pending rows deletes pending rows and recalculates ledger balan
     ledger2025.close();
     ledger2026.close();
   }
+}));
+
+test("changing ledger currency creates and confirms a visible pending conversion row", async () => withHarness(async harness => {
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      fx_provider: "manual",
+      fx_buffer_percent: 0,
+      manual_fx_rates: {}
+    }
+  });
+
+  const oneOff = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Starting PLN balance",
+      currency: "PLN",
+      amount: 100,
+      type: "income",
+      date: "2026-05-21"
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const future = snapshot.futureTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+  assert.ok(future);
+
+  const moved = await harness.api(`/api/future/${encodeURIComponent(future.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: future.occurrence_key }
+  });
+  const pendingIncome = moved.pendingTransactions.find(tx => tx.occurrence_key === future.occurrence_key);
+  assert.ok(pendingIncome);
+
+  await harness.api(`/api/pending/${encodeURIComponent(pendingIncome.id)}/confirm`, {
+    method: "POST",
+    body: {
+      amount: 100,
+      confirmed_date: "2026-05-21"
+    }
+  });
+
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      ledger_currency: "USD",
+      fx_provider: "manual",
+      fx_used_currencies: ["PLN"],
+      manual_fx_rates: { PLN: 0.25 },
+      fx_buffer_percent: 0
+    }
+  });
+
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.settings.ledger_currency, "USD");
+
+  const conversionRows = snapshot.pendingTransactions.filter(tx =>
+    String(tx.occurrence_key || "").startsWith("ledger_currency_conversion:")
+  );
+  assert.equal(conversionRows.length, 1);
+
+  const conversion = conversionRows[0];
+  assert.equal(conversion.name, "Opening balance conversion PLN to USD");
+  assert.equal(conversion.currency, "USD");
+  assert.equal(conversion.ledger_currency, "USD");
+  assert.equal(conversion.type, "income");
+  assert.equal(conversion.amount, 25);
+  assert.equal(conversion.ledger_amount, 25);
+  assert.equal(conversion.fx_rate, 1);
+  assert.equal(conversion.buffered_fx_rate, 1);
+
+  await harness.api(`/api/pending/${encodeURIComponent(conversion.id)}/confirm`, {
+    method: "POST",
+    body: {
+      amount: 25,
+      confirmed_date: "2026-05-21"
+    }
+  });
+
+  snapshot = await harness.api("/api");
+  const confirmedConversion = snapshot.confirmedTransactions.find(tx => tx.id === conversion.id);
+  const originalConfirmed = snapshot.confirmedTransactions.find(tx => tx.id === pendingIncome.id);
+
+  assert.ok(confirmedConversion);
+  assert.ok(originalConfirmed);
+  assert.equal(confirmedConversion.ledger_currency, "USD");
+  assert.equal(confirmedConversion.running_balance, 25);
+  assert.equal(originalConfirmed.ledger_currency, "PLN");
+}));
+
+test("changing ledger currency with a non-zero balance requires an FX rate", async () => withHarness(async harness => {
+  await harness.api("/api");
+
+  insertPending(harness, {
+    id: "pending-balance",
+    name: "Balance",
+    type: "income",
+    amount: 100,
+    date: "2026-05-21",
+    occurrenceKey: "test:balance"
+  });
+
+  await harness.api("/api/pending/pending-balance/confirm", {
+    method: "POST",
+    body: {
+      amount: 100,
+      confirmed_date: "2026-05-21"
+    }
+  });
+
+  const result = await harness.request("/api/settings", {
+    method: "PUT",
+    body: {
+      ledger_currency: "USD",
+      fx_provider: "manual",
+      manual_fx_rates: {}
+    }
+  });
+
+  assert.equal(result.response.status, 500);
+  assert.match(result.body.error, /Missing FX rate for PLN\/USD/);
 }));

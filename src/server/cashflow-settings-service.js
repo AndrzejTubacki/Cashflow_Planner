@@ -1,14 +1,22 @@
 ﻿import path from "path";
-import { DEFAULT_FUTURE_PERIODS } from "./cashflow-constants.js";
+import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
 import {
   normalizeFxCurrencyList,
   normalizeFxProvider,
-  normalizeManualFxRates
+  normalizeManualFxPairs,
+  normalizeManualFxRates,
+  normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
+import { generateId } from "./cashflow-id-utils.js";
 
 export function createCashflowSettingsService({
+  fetchProviderRate = null,
+  getCachedFxRate = null,
+  latestConfirmedBalance = null,
   normalizeLocale = value => String(value || "en"),
-  openPlanningDb
+  openPlanningDb,
+  recalculatePlanningRunningBalances = null
 }) {
   function getSettings(userId) {
     const db = openPlanningDb(userId);
@@ -20,10 +28,12 @@ export function createCashflowSettingsService({
     }
   }
 
-  function updateSettings(userId, updates) {
+  async function updateSettings(userId, updates) {
     const allowedKeys = new Set([
       "future_periods",
       "locale",
+      "ledger_currency",
+      "timezone",
       "budget_period_income_id",
       "fx_buffer_percent",
       "fx_provider",
@@ -89,6 +99,17 @@ export function createCashflowSettingsService({
         safeUpdates.locale = normalizeLocale(safeUpdates.locale);
       }
 
+      if (safeUpdates.ledger_currency !== undefined) {
+        safeUpdates.ledger_currency = normalizeSupportedCurrency(
+          safeUpdates.ledger_currency,
+          currentSettings?.ledger_currency || "PLN"
+        );
+      }
+
+      if (safeUpdates.timezone !== undefined) {
+        safeUpdates.timezone = normalizeTimezone(safeUpdates.timezone || DEFAULT_TIMEZONE);
+      }
+
       if (safeUpdates.fx_buffer_percent !== undefined) {
         safeUpdates.fx_buffer_percent = Math.max(0, Math.min(100, Number(safeUpdates.fx_buffer_percent) || 0));
       }
@@ -98,11 +119,19 @@ export function createCashflowSettingsService({
       }
 
       if (safeUpdates.fx_used_currencies !== undefined) {
-        safeUpdates.fx_used_currencies = JSON.stringify(normalizeFxCurrencyList(safeUpdates.fx_used_currencies));
+        const ledgerCurrency = safeUpdates.ledger_currency || currentSettings?.ledger_currency || "PLN";
+        safeUpdates.fx_used_currencies = JSON.stringify(normalizeFxCurrencyList(
+          safeUpdates.fx_used_currencies,
+          ledgerCurrency
+        ));
       }
 
       if (safeUpdates.manual_fx_rates !== undefined) {
-        safeUpdates.manual_fx_rates = JSON.stringify(normalizeManualFxRates(safeUpdates.manual_fx_rates));
+        const ledgerCurrency = safeUpdates.ledger_currency || currentSettings?.ledger_currency || "PLN";
+        safeUpdates.manual_fx_rates = JSON.stringify({
+          ...normalizeManualFxRates(safeUpdates.manual_fx_rates),
+          ...normalizeManualFxPairs(safeUpdates.manual_fx_rates, ledgerCurrency)
+        });
       }
 
       if (safeUpdates.necessary_underfunded_repeat_days !== undefined) {
@@ -125,13 +154,84 @@ export function createCashflowSettingsService({
         }
       }
 
-      db.transaction(() => {
-        db.prepare(`
-          UPDATE settings
-          SET ledger_currency = 'PLN', updated_at = datetime('now')
-          WHERE id = 1
-        `).run();
+      const previousLedgerCurrency = normalizeSupportedCurrency(currentSettings?.ledger_currency || "PLN");
+      const nextLedgerCurrency = safeUpdates.ledger_currency || previousLedgerCurrency;
+      const ledgerCurrencyChanged = nextLedgerCurrency !== previousLedgerCurrency;
+      let ledgerSwitch = null;
 
+      if (ledgerCurrencyChanged) {
+        const rateDate = todayInTimezone(currentSettings?.timezone || DEFAULT_TIMEZONE);
+        const pendingManualRates = safeUpdates.manual_fx_rates !== undefined
+          ? safeUpdates.manual_fx_rates
+          : currentSettings?.manual_fx_rates;
+        const manualPairs = normalizeManualFxPairs(pendingManualRates, nextLedgerCurrency);
+        const manualDirect = Number(manualPairs[`${previousLedgerCurrency}/${nextLedgerCurrency}`]);
+        const manualInverse = Number(manualPairs[`${nextLedgerCurrency}/${previousLedgerCurrency}`]);
+        let rate = Number.isFinite(manualDirect) && manualDirect > 0 ? manualDirect : null;
+        let source = rate ? "manual" : "cache";
+
+        if ((!Number.isFinite(rate) || rate <= 0) && Number.isFinite(manualInverse) && manualInverse > 0) {
+          rate = 1 / manualInverse;
+          source = "manual-inverse";
+        }
+
+        if ((!Number.isFinite(rate) || rate <= 0) && typeof getCachedFxRate === "function") {
+          rate = Number(getCachedFxRate(userId, previousLedgerCurrency, rateDate, nextLedgerCurrency));
+          source = "cache";
+        }
+
+        if ((!Number.isFinite(rate) || rate <= 0) && typeof getCachedFxRate === "function") {
+          const inverse = typeof getCachedFxRate === "function"
+            ? Number(getCachedFxRate(userId, nextLedgerCurrency, rateDate, previousLedgerCurrency))
+            : null;
+
+          if (Number.isFinite(inverse) && inverse > 0) {
+            rate = 1 / inverse;
+            source = "inverse-cache";
+          }
+        }
+
+        const oldBalance = typeof latestConfirmedBalance === "function"
+          ? Number(latestConfirmedBalance(userId) || 0)
+          : 0;
+
+        if ((!Number.isFinite(rate) || rate <= 0) && typeof fetchProviderRate === "function") {
+          const provider = normalizeFxProvider(safeUpdates.fx_provider || currentSettings?.fx_provider);
+
+          if (provider !== "disabled" && provider !== "manual") {
+            const rateInfo = await fetchProviderRate(
+              provider,
+              previousLedgerCurrency,
+              rateDate,
+              nextLedgerCurrency,
+              currentSettings?.timezone || DEFAULT_TIMEZONE
+            );
+            rate = Number(rateInfo?.rate);
+            source = rateInfo?.source || provider;
+          }
+        }
+
+        if (!Number.isFinite(rate) || rate <= 0) {
+          if (Math.abs(oldBalance) < 0.0001) {
+            rate = 1;
+            source = "zero-balance";
+          } else {
+            throw new Error(`Missing FX rate for ${previousLedgerCurrency}/${nextLedgerCurrency}. Refresh FX cache first.`);
+          }
+        }
+
+        ledgerSwitch = {
+          oldCurrency: previousLedgerCurrency,
+          newCurrency: nextLedgerCurrency,
+          oldBalance,
+          convertedOpeningBalance: oldBalance * rate,
+          rate,
+          rateDate,
+          source
+        };
+      }
+
+      db.transaction(() => {
         if (Object.keys(safeUpdates).length) {
           const setClauses = Object.keys(safeUpdates)
             .map(key => `${key} = ?`)
@@ -141,9 +241,66 @@ export function createCashflowSettingsService({
 
           db.prepare(`
             UPDATE settings
-            SET ${setClauses}, ledger_currency = 'PLN', updated_at = datetime('now')
+            SET ${setClauses}, updated_at = datetime('now')
             WHERE id = 1
           `).run(...values);
+        }
+
+        if (ledgerSwitch) {
+          const conversionId = generateId("pending-ledger-currency");
+          const convertedAmount = Math.abs(ledgerSwitch.convertedOpeningBalance);
+          const conversionType = ledgerSwitch.convertedOpeningBalance >= 0 ? "income" : "expense";
+          const note = JSON.stringify({
+            kind: "ledger_currency_conversion",
+            old_currency: ledgerSwitch.oldCurrency,
+            new_currency: ledgerSwitch.newCurrency,
+            old_balance: ledgerSwitch.oldBalance,
+            converted_balance: ledgerSwitch.convertedOpeningBalance,
+            fx_rate: ledgerSwitch.rate,
+            rate_date: ledgerSwitch.rateDate,
+            source: ledgerSwitch.source
+          });
+
+          db.prepare(`
+            INSERT INTO ledger_currency_events (
+              id, old_currency, new_currency, old_balance, converted_opening_balance,
+              fx_rate, rate_date, source, details, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          `).run(
+            generateId("ledger-currency"),
+            ledgerSwitch.oldCurrency,
+            ledgerSwitch.newCurrency,
+            ledgerSwitch.oldBalance,
+            ledgerSwitch.convertedOpeningBalance,
+            ledgerSwitch.rate,
+            ledgerSwitch.rateDate,
+            ledgerSwitch.source,
+            JSON.stringify({ reason: "settings-update" })
+          );
+
+          // The ledger-currency switch is intentionally represented as a visible pending row.
+          // Users can inspect and confirm the converted opening balance instead of inheriting hidden state.
+          db.prepare(`
+            INSERT INTO pending_transactions (
+              id, name, currency, amount, type, date,
+              fx_rate, buffered_fx_rate, ledger_currency, status,
+              funded_amount, requested_amount, ledger_amount, note,
+              occurrence_key, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+          `).run(
+            conversionId,
+            `Opening balance conversion ${ledgerSwitch.oldCurrency} to ${ledgerSwitch.newCurrency}`,
+            ledgerSwitch.newCurrency,
+            convertedAmount,
+            conversionType,
+            ledgerSwitch.rateDate,
+            ledgerSwitch.newCurrency,
+            convertedAmount,
+            convertedAmount,
+            convertedAmount,
+            note,
+            `ledger_currency_conversion:${conversionId}`
+          );
         }
 
         if (Object.prototype.hasOwnProperty.call(safeUpdates, "budget_period_income_id")) {
@@ -152,6 +309,10 @@ export function createCashflowSettingsService({
             SET period_setting = CASE WHEN id = ? THEN 1 ELSE 0 END,
                 updated_at = datetime('now')
           `).run(safeUpdates.budget_period_income_id || "__none__");
+        }
+
+        if (ledgerSwitch && typeof recalculatePlanningRunningBalances === "function") {
+          recalculatePlanningRunningBalances(db, userId);
         }
       })();
 

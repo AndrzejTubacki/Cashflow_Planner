@@ -1,8 +1,8 @@
-import { CASHFLOW_TIMEZONE } from "./cashflow-constants.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 
 let testTodayOverride = null;
 
-export function setTodayWarsawOverrideForTests(dateString = null) {
+export function setTodayOverrideForTests(dateString = null) {
   // Integration tests pin the app calendar without monkey-patching Date or changing production defaults.
   const previous = testTodayOverride;
   testTodayOverride = /^\d{4}-\d{2}-\d{2}$/.test(dateString || "") ? dateString : null;
@@ -32,6 +32,17 @@ export function shouldGenerateInMonth(item, year, month) {
 
 export function dateStringFromUTC(date) {
   return date.toISOString().slice(0, 10);
+}
+
+export function normalizeTimezone(timezone) {
+  const value = String(timezone || DEFAULT_TIMEZONE).trim() || DEFAULT_TIMEZONE;
+
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date());
+    return value;
+  } catch {
+    return DEFAULT_TIMEZONE;
+  }
 }
 
 export function easterSundayUtc(year) {
@@ -105,14 +116,14 @@ export function isBusinessDay(date, country) {
   return !holidaySetForCountry(country, year).has(dateStringFromUTC(date));
 }
 
-export function todayWarsaw(now = new Date()) {
+export function todayInTimezone(timezone = DEFAULT_TIMEZONE, now = new Date()) {
   if (testTodayOverride) {
     return testTodayOverride;
   }
 
   // Accepting an injected Date keeps timezone-boundary tests deterministic while preserving runtime behavior.
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: CASHFLOW_TIMEZONE,
+    timeZone: normalizeTimezone(timezone),
     year: "numeric",
     month: "2-digit",
     day: "2-digit"

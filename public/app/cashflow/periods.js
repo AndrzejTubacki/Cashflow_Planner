@@ -4,6 +4,7 @@ export function renderBudgetPeriodStats(locale, cashflow) {
   if (!cashflow) return "";
 
   const settings = cashflow.settings || {};
+  const ledgerCurrency = settings.ledger_currency || "PLN";
   const recurringIncomes = cashflow.recurringIncomes || [];
   const activePeriodIncomeId = settings.budget_period_income_id;
   const activePeriodIncome = recurringIncomes.find(r => r.id === activePeriodIncomeId);
@@ -29,8 +30,8 @@ export function renderBudgetPeriodStats(locale, cashflow) {
       ${renderStatCard(t(locale, "Period end"), periodEndDate)}
       ${renderStatCard(t(locale, "Next reset"), nextResetDate)}
       ${renderStatCard(t(locale, "Defined by"), periodIncomeName)}
-      ${currentPeriod ? renderStatCard(t(locale, "Period income"), formatMoney(currentPeriod.income, "PLN", locale)) : ""}
-      ${currentPeriod ? renderStatCard(t(locale, "Period expenses"), formatMoney(currentPeriod.expenses, "PLN", locale)) : ""}
+      ${currentPeriod ? renderStatCard(t(locale, "Period income"), formatMoney(currentPeriod.income, ledgerCurrency, locale)) : ""}
+      ${currentPeriod ? renderStatCard(t(locale, "Period expenses"), formatMoney(currentPeriod.expenses, ledgerCurrency, locale)) : ""}
     </div>
   `;
 }

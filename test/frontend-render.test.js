@@ -5,6 +5,7 @@ import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.j
 import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
 import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
 import { loadLocale } from "../public/app/cashflow/shared.js";
+import { renderGoalsTab } from "../public/app/cashflow/target-tabs.js";
 import { renderTransactionTable } from "../public/app/cashflow/transactions.js";
 
 function assertNoMojibake(html) {
@@ -34,10 +35,42 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
   assert.match(html, />Ustawienia</);
   assert.match(html, new RegExp(">J\\u0119zyk<"));
   assert.match(html, />Waluta i kurs</);
+  assert.match(html, />Strefa czasowa</);
   assert.match(html, new RegExp(">\\s*Kursy r\\u0119czne\\s*<"));
   assert.match(html, new RegExp(">U\\u017cywane waluty<"));
   assertNoMojibake(html);
 });
+
+test("settings render supports non-PLN ledger manual pair rates", async () => {
+  await loadLocale("en");
+
+  const html = renderSettingsTab("en", {
+    settings: {
+      locale: "en",
+      ledger_currency: "USD",
+      future_periods: 11,
+      fx_provider: "manual",
+      fx_used_currencies: ["PLN", "EUR"],
+      manual_fx_rates: {
+        "PLN/USD": 0.25,
+        "EUR/USD": 1.1
+      },
+      notification_delivery_time: "08:00"
+    },
+    availableLocales: [
+      { id: "en", label: "English" }
+    ],
+    recurringIncomes: []
+  });
+
+  assert.match(html, /PLN \/ USD/);
+  assert.match(html, /EUR \/ USD/);
+  assert.match(html, /name="timezone"/);
+  assert.match(html, /value="0\.25"/);
+  assert.match(html, /value="1\.1"/);
+  assertNoMojibake(html);
+});
+
 
 test("modal select labels are localized while submitted enum values stay raw", async () => {
   await loadLocale("pl");
@@ -51,6 +84,14 @@ test("modal select labels are localized while submitted enum values stay raw", a
 
   assert.match(recurringHtml, new RegExp('value="fixed"[^>]*>Sta\\u0142a<'));
   assert.match(recurringHtml, new RegExp('value="12month_max"[^>]*>Maksimum z 12 miesi\\u0119cy<'));
+  assert.match(recurringHtml, new RegExp(">Zast\\u0105p brakuj\\u0105ce przez<"));
+  assert.match(recurringHtml, new RegExp('value="starting_value"[^>]*>Warto\\u015b\\u0107 pocz\\u0105tkowa<'));
+  assert.match(recurringHtml, new RegExp('value="average_extreme_starting_value"[^>]*>\\u015arednia z warto\\u015bci skrajnej i pocz\\u0105tkowej<'));
+  assert.match(recurringHtml, new RegExp('value="median_recorded"[^>]*>Mediana zapisanych warto\\u015bci<'));
+  assert.match(recurringHtml, new RegExp('value="last_confirmed"[^>]*>Ostatnio potwierdzona<'));
+  assert.match(recurringHtml, new RegExp('value="previous_year_same_month"[^>]*>Ten sam miesi\\u0105c poprzedniego roku<'));
+  assert.match(recurringHtml, new RegExp('value="require_min_recorded_months"[^>]*>Wymagaj minimalnej liczby zapisanych miesi\\u0119cy<'));
+  assert.match(recurringHtml, new RegExp(">Minimalna liczba zapisanych miesi\\u0119cy<"));
   assert.match(recurringHtml, /value="previous"[^>]*>Poprzedni</);
   assert.match(recurringHtml, new RegExp('value="next"[^>]*>Nast\\u0119pny<'));
   assert.match(recurringHtml, />\s*PL - Polska\s*</);
@@ -129,5 +170,63 @@ test("ledger future rows can move to pending from every generated period", async
 
   assert.match(html, /data-cashflow-move-future-to-pending="future-current"/);
   assert.match(html, /data-cashflow-move-future-to-pending="future-later"/);
+  assert.match(html, /data-cashflow-recalculate-pending/);
   assertNoMojibake(html);
+});
+
+test("ledger summaries and targets render the active ledger currency", async () => {
+  await loadLocale("en");
+
+  const ledgerHtml = renderLedgerTab("en", {
+    settings: {
+      ledger_currency: "USD"
+    },
+    pendingTransactions: [],
+    confirmedTransactions: [],
+    periodSummaries: [
+      { period: "2026-06", start_date: "2026-06-01", end_date: "2026-06-30", income: 1000, expenses: 100 }
+    ],
+    futureTransactions: [
+      {
+        id: "future-usd",
+        period: "2026-06",
+        date: "2026-06-10",
+        name: "USD bill",
+        type: "expense",
+        status: "funded",
+        amount: 100,
+        currency: "USD",
+        ledger_currency: "USD"
+      }
+    ]
+  });
+
+  const goalsHtml = renderGoalsTab("en", {
+    settings: {
+      ledger_currency: "USD"
+    },
+    goals: [
+      {
+        id: "goal-usd",
+        name: "Goal",
+        amount: 100,
+        currency: "EUR",
+        priority: 1,
+        due_date: "2026-06-30",
+        target_ledger_amount: 120,
+        remaining_ledger: 40,
+        already_funded_ledger: 80,
+        pending_allocated_ledger: 0,
+        future_allocated_ledger: 0
+      }
+    ]
+  });
+
+  assert.match(ledgerHtml, /1,000\.00 USD/);
+  assert.match(ledgerHtml, /100\.00 USD/);
+  assert.match(goalsHtml, /Target in ledger currency/);
+  assert.match(goalsHtml, /120\.00 USD/);
+  assert.doesNotMatch(goalsHtml, /Target in PLN/);
+  assertNoMojibake(ledgerHtml);
+  assertNoMojibake(goalsHtml);
 });

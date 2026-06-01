@@ -2,7 +2,7 @@ import { escapeHtml } from "../utils.js";
 import { t } from "./shared.js";
 
 const FX_PROVIDER_OPTIONS = [
-  { id: "disabled", labelKey: "Disabled", noteKey: "Only PLN transactions can project without supplied rates." },
+  { id: "disabled", labelKey: "Disabled", noteKey: "Only ledger-currency transactions can project without supplied rates." },
   { id: "manual", labelKey: "Manual rates", noteKey: "Use the rates entered below." },
   { id: "nbp", labelKey: "NBP", noteKey: "Polish central bank rates." },
   { id: "frankfurter", labelKey: "Frankfurter", noteKey: "ECB-backed rates for major currencies." }
@@ -11,8 +11,9 @@ const FX_PROVIDER_OPTIONS = [
 const SUPPORTED_FX_CURRENCIES = [
   "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "EUR", "GBP",
   "HKD", "HUF", "IDR", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "MYR",
-  "NOK", "NZD", "PHP", "RON", "SEK", "SGD", "THB", "TRY", "USD", "ZAR"
+  "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TRY", "USD", "ZAR"
 ];
+const DEFAULT_TIMEZONE = "Europe/Warsaw";
 
 function parseArraySetting(value) {
   if (Array.isArray(value)) return value;
@@ -38,7 +39,7 @@ function parseObjectSetting(value) {
   }
 }
 
-function observedForeignCurrencies(cashflow) {
+function observedForeignCurrencies(cashflow, ledgerCurrency = "PLN") {
   const rows = [
     ...(cashflow?.recurringExpenses || []),
     ...(cashflow?.recurringIncomes || []),
@@ -50,13 +51,13 @@ function observedForeignCurrencies(cashflow) {
 
   return [...new Set(rows
     .map(row => String(row.currency || "").toUpperCase())
-    .filter(currency => currency && currency !== "PLN" && SUPPORTED_FX_CURRENCIES.includes(currency))
+    .filter(currency => currency && currency !== ledgerCurrency && SUPPORTED_FX_CURRENCIES.includes(currency))
   )].sort();
 }
 
-function renderFxCurrencySelector(locale, selectedCurrencies) {
+function renderFxCurrencySelector(locale, selectedCurrencies, ledgerCurrency = "PLN") {
   const selected = new Set(selectedCurrencies);
-  const availableCurrencies = SUPPORTED_FX_CURRENCIES.filter(currency => !selected.has(currency));
+  const availableCurrencies = SUPPORTED_FX_CURRENCIES.filter(currency => currency !== ledgerCurrency && !selected.has(currency));
 
   const options = (currencies) => currencies.map(currency => `
     <option value="${escapeHtml(currency)}">${escapeHtml(currency)}</option>
@@ -86,17 +87,17 @@ function renderFxCurrencySelector(locale, selectedCurrencies) {
   `;
 }
 
-function renderManualFxRates(locale, selectedCurrencies, manualRates) {
+function renderManualFxRates(locale, selectedCurrencies, manualRates, ledgerCurrency = "PLN") {
   return `
     <div class="cashflow-manual-rates" data-manual-fx-rates>
       ${selectedCurrencies.length ? selectedCurrencies.map(currency => `
         <label data-manual-fx-rate-row="${escapeHtml(currency)}">
-          <span>${escapeHtml(currency)} / PLN</span>
+          <span>${escapeHtml(currency)} / ${escapeHtml(ledgerCurrency)}</span>
           <input
             type="number"
             min="0.000001"
             step="0.000001"
-            value="${escapeHtml(String(manualRates[currency] ?? ""))}"
+            value="${escapeHtml(String(manualRates[`${currency}/${ledgerCurrency}`] ?? manualRates[currency] ?? ""))}"
             data-manual-fx-rate="${escapeHtml(currency)}"
             placeholder="1.000000"
           >
@@ -135,10 +136,11 @@ export function renderSettingsTab(locale, cashflow) {
   const selectedLocale = String(settings.locale || "en");
   const recurringIncomes = cashflow?.budgetPeriodIncomeOptions || cashflow?.recurringIncomes || [];
   const fxProvider = String(settings.fx_provider || "nbp");
+  const ledgerCurrency = String(settings.ledger_currency || "PLN").toUpperCase();
   const storedFxCurrencies = parseArraySetting(settings.fx_used_currencies);
   const selectedFxCurrencies = storedFxCurrencies.length
-    ? storedFxCurrencies
-    : observedForeignCurrencies(cashflow);
+    ? storedFxCurrencies.filter(currency => currency !== ledgerCurrency)
+    : observedForeignCurrencies(cashflow, ledgerCurrency);
   const manualFxRates = parseObjectSetting(settings.manual_fx_rates);
 
   const priorityLabels = {
@@ -192,8 +194,23 @@ export function renderSettingsTab(locale, cashflow) {
   const currencyExchange = `
     <label>
       <span>${escapeHtml(t(locale, "Ledger currency"))}</span>
-      <strong>PLN</strong>
-      <small>${escapeHtml(t(locale, "Fixed ledger currency - backend does not allow changing it."))}</small>
+      <select name="ledger_currency" data-ledger-currency>
+        ${SUPPORTED_FX_CURRENCIES.map(currency => `
+          <option value="${escapeHtml(currency)}"${currency === ledgerCurrency ? " selected" : ""}>
+            ${escapeHtml(currency)}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+
+    <label>
+      <span>${escapeHtml(t(locale, "Timezone"))}</span>
+      <input name="timezone" value="${escapeHtml(settings.timezone || DEFAULT_TIMEZONE)}" list="cashflow-timezones">
+      <datalist id="cashflow-timezones">
+        ${[DEFAULT_TIMEZONE, "UTC", "Europe/London", "Europe/Berlin", "America/New_York", "America/Los_Angeles", "Asia/Tokyo"].map(timezone => `
+          <option value="${escapeHtml(timezone)}"></option>
+        `).join("")}
+      </datalist>
     </label>
 
     <label>
@@ -215,8 +232,8 @@ export function renderSettingsTab(locale, cashflow) {
       </small>
     </label>
 
-    ${renderFxCurrencySelector(locale, selectedFxCurrencies)}
-    ${renderManualFxRates(locale, selectedFxCurrencies, manualFxRates)}
+    ${renderFxCurrencySelector(locale, selectedFxCurrencies, ledgerCurrency)}
+    ${renderManualFxRates(locale, selectedFxCurrencies, manualFxRates, ledgerCurrency)}
 
     <div class="cashflow-tab-actions">
       <button type="button" class="btn-small" data-cashflow-refresh-fx>

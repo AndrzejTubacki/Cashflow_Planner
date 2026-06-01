@@ -1,8 +1,5 @@
-﻿import {
-  CASHFLOW_TIMEZONE,
-  NOTIFICATION_DELIVERY_TIME
-} from "./cashflow-constants.js";
-import { todayWarsaw } from "./cashflow-date-utils.js";
+﻿import { DEFAULT_TIMEZONE, NOTIFICATION_DELIVERY_TIME } from "./cashflow-constants.js";
+import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
 
 export function createCashflowBackgroundJobs({
   getSettings,
@@ -14,148 +11,103 @@ export function createCashflowBackgroundJobs({
   queueDailyPendingSummary,
   queueMissingIncomeNotifications,
   refreshNbpFxCacheForAllUsers,
+  refreshNbpFxCacheForUser,
   sendQueuedNotifications
 }) {
+  const lastRunKeys = new Set();
+
   function startBackgroundJobs() {
-    scheduleJob("0 0 * * *", CASHFLOW_TIMEZONE, async () => {
-      try {
-        const userIds = listCashflowUserIds();
-
-        for (const userId of userIds) {
-          try {
-            const today = todayWarsaw();
-            const created = moveDueFutureTransactionsToPending(userId, today);
-            const pendingSummaryCount = queueDailyPendingSummary(userId);
-            const missingIncomeCount = queueMissingIncomeNotifications(userId);
-
-            logServerEvent("cashflow_midnight_job_completed", {
-              userId,
-              transactionsCreated: created,
-              pendingSummaryCount,
-              missingIncomeCount
-            });
-          } catch (err) {
-            logError("cashflow_midnight_job_user_failed", {
-              userId,
-              error: err.message
-            });
-          }
-        }
-      } catch (err) {
-        logError("cashflow_midnight_job_failed", err);
-      }
-    });
-
-    scheduleJob("0 8 * * *", CASHFLOW_TIMEZONE, async () => {
-      try {
-        const results = await refreshNbpFxCacheForAllUsers();
-
-        logServerEvent("cashflow_fx_refresh_completed", {
-          users: results.length,
-          results
-        });
-      } catch (err) {
-        logError("cashflow_fx_refresh_failed", err);
-      }
-    });
-
-    scheduleJob("* * * * *", CASHFLOW_TIMEZONE, async () => {
-      try {
-        const userIds = listCashflowUserIds();
-
-        for (const userId of userIds) {
-          try {
-            const settings = getSettings(userId);
-            const deliveryTime = settings?.notification_delivery_time || NOTIFICATION_DELIVERY_TIME;
-
-            const parts = new Intl.DateTimeFormat("en-US", {
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: false,
-              timeZone: CASHFLOW_TIMEZONE
-            }).formatToParts(new Date());
-
-            const hour = parts.find(p => p.type === "hour")?.value;
-            const minute = parts.find(p => p.type === "minute")?.value;
-
-            if (`${hour}:${minute}` === deliveryTime) {
-              const sent = await sendQueuedNotifications(userId);
-              if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
-            }
-          } catch (err) {
-            logError("cashflow_notification_delivery_user_failed", {
-              userId,
-              error: err.message
-            });
-          }
-        }
-      } catch (err) {
-        logError("cashflow_notification_delivery_failed", err);
-      }
-    });
-
-    scheduleJob("30 3 * * *", CASHFLOW_TIMEZONE, async () => {
-      try {
-        const userIds = listCashflowUserIds();
-
-        for (const userId of userIds) {
-          try {
-            const result = maybeRunAutomaticBackup(userId);
-            if (result) {
-              logServerEvent("cashflow_auto_backup_completed", { userId, ...result });
-            }
-          } catch (err) {
-            logError("cashflow_auto_backup_user_failed", {
-              userId,
-              error: err.message
-            });
-          }
-        }
-      } catch (err) {
-        logError("cashflow_auto_backup_failed", err);
-      }
-    });
-  }
-
-  function scheduleJob(cronExpression, timezone, handler) {
-    const minuteMs = 60_000;
-    let lastRunKey = null;
-
     setInterval(() => {
-      const now = new Date();
-
-      const parts = new Intl.DateTimeFormat("en-US", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-        timeZone: timezone
-      }).formatToParts(now);
-
-      const value = (type) => parts.find(p => p.type === type)?.value;
-
-      const year = value("year");
-      const month = value("month");
-      const day = value("day");
-      const hour = value("hour");
-      const minute = value("minute");
-
-      const [cronMin, cronHour] = cronExpression.split(" ");
-
-      const matches =
-        (cronMin === "*" || Number(cronMin) === Number(minute)) &&
-        (cronHour === "*" || Number(cronHour) === Number(hour));
-
-      const runKey = `${cronExpression}:${timezone}:${year}-${month}-${day}T${hour}:${minute}`;
-
-      if (matches && runKey !== lastRunKey) {
-        lastRunKey = runKey;
-        handler().catch(err => logError("scheduled_job_error", err));
-      }
-    }, minuteMs);
+      tickPerUserJobs().catch(err => logError("cashflow_background_tick_failed", err));
+    }, 60_000);
   }
+
+  function localParts(timezone) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: normalizeTimezone(timezone)
+    }).formatToParts(new Date());
+
+    const value = (type) => parts.find(p => p.type === type)?.value;
+
+    return {
+      date: `${value("year")}-${value("month")}-${value("day")}`,
+      time: `${value("hour")}:${value("minute")}`
+    };
+  }
+
+  function shouldRun(key) {
+    if (lastRunKeys.has(key)) return false;
+
+    lastRunKeys.add(key);
+    if (lastRunKeys.size > 10_000) {
+      for (const existing of [...lastRunKeys].slice(0, 2_000)) {
+        lastRunKeys.delete(existing);
+      }
+    }
+
+    return true;
+  }
+
+  async function tickPerUserJobs() {
+    const userIds = listCashflowUserIds();
+
+    for (const userId of userIds) {
+      try {
+        const settings = getSettings(userId) || {};
+        const timezone = settings.timezone || DEFAULT_TIMEZONE;
+        const local = localParts(timezone);
+        const today = todayInTimezone(timezone);
+
+        if (local.time === "00:00" && shouldRun(`midnight:${userId}:${local.date}`)) {
+          const created = moveDueFutureTransactionsToPending(userId, today);
+          const pendingSummaryCount = queueDailyPendingSummary(userId);
+          const missingIncomeCount = queueMissingIncomeNotifications(userId);
+
+          logServerEvent("cashflow_midnight_job_completed", {
+            userId,
+            transactionsCreated: created,
+            pendingSummaryCount,
+            missingIncomeCount
+          });
+        }
+
+        if (local.time === "08:00" && shouldRun(`fx:${userId}:${local.date}`)) {
+          const result = typeof refreshNbpFxCacheForUser === "function"
+            ? await refreshNbpFxCacheForUser(userId, today)
+            : { users: await refreshNbpFxCacheForAllUsers(today) };
+          logServerEvent("cashflow_fx_refresh_completed", {
+            userId,
+            result
+          });
+        }
+
+        const deliveryTime = settings.notification_delivery_time || NOTIFICATION_DELIVERY_TIME;
+        if (local.time === deliveryTime && shouldRun(`notify:${userId}:${local.date}:${deliveryTime}`)) {
+          const sent = await sendQueuedNotifications(userId);
+          if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
+        }
+
+        if (local.time === "03:30" && shouldRun(`backup:${userId}:${local.date}`)) {
+          const result = maybeRunAutomaticBackup(userId);
+          if (result) {
+            logServerEvent("cashflow_auto_backup_completed", { userId, ...result });
+          }
+        }
+      } catch (err) {
+        logError("cashflow_background_user_failed", {
+          userId,
+          error: err.message
+        });
+      }
+    }
+  }
+
   return {
     startBackgroundJobs
   };

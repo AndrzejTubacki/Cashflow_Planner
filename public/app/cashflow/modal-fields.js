@@ -73,6 +73,44 @@ function renderHolidayCountrySelect(locale, item = {}) {
   `;
 }
 
+function renderPredictionSubstituteSelect(locale, item = {}) {
+  const selected = fieldValue(item, "prediction_substitute_missing", "none");
+  const options = [
+    { value: "none", label: "None" },
+    { value: "starting_value", label: "Starting value" },
+    { value: "average_extreme_starting_value", label: "Average of recorded extreme and starting value" },
+    { value: "median_recorded", label: "Median recorded" },
+    { value: "last_confirmed", label: "Last confirmed" },
+    { value: "previous_year_same_month", label: "Previous year same month" },
+    { value: "require_min_recorded_months", label: "Require minimum recorded months" }
+  ];
+
+  return `
+    <label data-prediction-substitute-field>
+      <span>${escapeHtml(t(locale, "Substitute missing with"))}</span>
+      <select name="prediction_substitute_missing">
+        ${options.map(option => `<option value="${escapeHtml(option.value)}"${selected === option.value ? " selected" : ""}>${escapeHtml(t(locale, option.label))}</option>`).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderPredictionMinRecordedMonthsField(locale, item = {}) {
+  return `
+    <label data-prediction-min-recorded-months-field>
+      <span>${escapeHtml(t(locale, "Minimum recorded months"))}</span>
+      <input
+        name="prediction_min_recorded_months"
+        type="number"
+        min="1"
+        max="12"
+        step="1"
+        value="${escapeHtml(fieldValue(item, "prediction_min_recorded_months", "6"))}"
+      >
+    </label>
+  `;
+}
+
 export function renderCashflowModalFields(locale, entityType, item = {}, cashflow = null) {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -147,11 +185,14 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
       <label>
         <span>${escapeHtml(t(locale, "Prediction strategy"))}</span>
-        <select name="prediction_strategy">
+        <select name="prediction_strategy" data-prediction-strategy>
           <option value="fixed"${fieldValue(item, "prediction_strategy", "fixed") === "fixed" ? " selected" : ""}>${escapeHtml(t(locale, "Fixed"))}</option>
           <option value="12month_max"${fieldValue(item, "prediction_strategy") === "12month_max" ? " selected" : ""}>${escapeHtml(t(locale, "12-month maximum"))}</option>
         </select>
       </label>
+
+      ${renderPredictionSubstituteSelect(locale, item)}
+      ${renderPredictionMinRecordedMonthsField(locale, item)}
 
       <label>
         <span>${escapeHtml(t(locale, "Priority"))}</span>
@@ -178,11 +219,14 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
       <label>
         <span>${escapeHtml(t(locale, "Prediction strategy"))}</span>
-        <select name="prediction_strategy">
+        <select name="prediction_strategy" data-prediction-strategy>
           <option value="fixed"${fieldValue(item, "prediction_strategy", "fixed") === "fixed" ? " selected" : ""}>${escapeHtml(t(locale, "Fixed"))}</option>
           <option value="12month_min"${fieldValue(item, "prediction_strategy") === "12month_min" ? " selected" : ""}>${escapeHtml(t(locale, "12-month minimum"))}</option>
         </select>
       </label>
+
+      ${renderPredictionSubstituteSelect(locale, item)}
+      ${renderPredictionMinRecordedMonthsField(locale, item)}
 
       <label class="cashflow-checkbox">
         <input name="period_setting" type="checkbox" value="1" ${checkedAttr(item.period_setting)}>

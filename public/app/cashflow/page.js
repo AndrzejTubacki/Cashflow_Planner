@@ -50,7 +50,8 @@ function renderValidationResult(locale, validationResult = null) {
   `;
 }
 
-function normalizeCurrencyList(value) {
+function normalizeCurrencyList(value, ledgerCurrency = "PLN") {
+  const activeLedgerCurrency = String(ledgerCurrency || "PLN").trim().toUpperCase();
   const raw = Array.isArray(value)
     ? value
     : (() => {
@@ -64,7 +65,7 @@ function normalizeCurrencyList(value) {
   return [...new Set(
     raw
       .map(currency => String(currency || "").trim().toUpperCase())
-      .filter(currency => currency && currency !== "PLN")
+      .filter(currency => currency && currency !== activeLedgerCurrency)
   )].sort();
 }
 
@@ -83,37 +84,54 @@ function parseFxRates(cashflow = null, fx = null) {
   }
 }
 
-function renderFxRateChip(currency, rates) {
-  const key = String(currency || "").toLowerCase();
-  const rate = Number(rates?.[key]?.rate || rates?.[currency]?.rate || 0);
+function renderFxRateChip(currency, rates, ledgerCurrency = "PLN") {
+  const normalizedCurrency = String(currency || "").trim().toUpperCase();
+  const normalizedLedgerCurrency = String(ledgerCurrency || "PLN").trim().toUpperCase();
+  const pairKey = `${normalizedCurrency}/${normalizedLedgerCurrency}`.toLowerCase();
+  const legacyKey = normalizedCurrency.toLowerCase();
+  const rate = Number(
+    rates?.[pairKey]?.rate ||
+    rates?.[`${normalizedCurrency}/${normalizedLedgerCurrency}`]?.rate ||
+    rates?.[legacyKey]?.rate ||
+    rates?.[normalizedCurrency]?.rate ||
+    0
+  );
 
   if (!rate) return "";
 
   return `
     <span class="cashflow-chip cashflow-chip--fx">
-      ${escapeHtml(currency)}/PLN <strong>${escapeHtml(rate.toFixed(4))}</strong>
+      ${escapeHtml(normalizedCurrency)}/${escapeHtml(normalizedLedgerCurrency)} <strong>${escapeHtml(rate.toFixed(4))}</strong>
     </span>
   `;
 }
 
 function renderFxTopBar(locale, cashflow = null, fx = null) {
   const rates = parseFxRates(cashflow, fx);
-  const configuredCurrencies = normalizeCurrencyList(cashflow?.settings?.fx_used_currencies);
+  const ledgerCurrency = String(cashflow?.settings?.ledger_currency || "PLN").trim().toUpperCase();
+  const configuredCurrencies = normalizeCurrencyList(cashflow?.settings?.fx_used_currencies, ledgerCurrency);
   const rateCurrencies = Object.keys(rates || {})
-    .map(currency => String(currency || "").toUpperCase())
-    .filter(currency => currency && currency !== "PLN");
+    .map(currency => {
+      const normalized = String(currency || "").toUpperCase();
+      if (normalized.includes("/")) {
+        const [base, quote] = normalized.split("/");
+        return quote === ledgerCurrency ? base : "";
+      }
+      return normalized === ledgerCurrency ? "" : normalized;
+    })
+    .filter(Boolean);
   const currencies = configuredCurrencies.length
     ? configuredCurrencies
     : [...new Set(rateCurrencies)].sort();
 
   const ledgerChip = `
     <span class="cashflow-chip">
-      ${escapeHtml(t(locale, "Ledger"))}: <strong>PLN</strong>
+      ${escapeHtml(t(locale, "Ledger"))}: <strong>${escapeHtml(ledgerCurrency)}</strong>
     </span>
   `;
 
   const fxChips = currencies
-    .map(currency => renderFxRateChip(currency, rates))
+    .map(currency => renderFxRateChip(currency, rates, ledgerCurrency))
     .filter(Boolean);
 
   if (!fxChips.length) {

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   applyFxBuffer,
   getBufferedFxForCurrency,
+  getFxRateForPair,
   getFxRateForCurrency,
   normalizeCurrency,
   nullablePositiveAmount,
@@ -20,10 +21,22 @@ test("getFxRateForCurrency returns 1 for PLN", () => {
   assert.equal(getFxRateForCurrency("PLN", { ledger_currency: "PLN" }, null), 1);
 });
 
-test("getFxRateForCurrency rejects unsupported ledger currencies", () => {
-  assert.throws(
-    () => getFxRateForCurrency("EUR", { ledger_currency: "EUR" }, { eur: { rate: 4.2 } }),
-    /Only PLN ledger currency is supported/
+test("getFxRateForCurrency supports non-PLN ledger currencies", () => {
+  assert.equal(
+    getFxRateForCurrency("PLN", { ledger_currency: "EUR" }, {
+      "pln/eur": { rate: 0.25 }
+    }),
+    0.25
+  );
+});
+
+test("getFxRateForPair derives rates through PLN legs", () => {
+  assert.equal(
+    getFxRateForPair("EUR", "USD", {
+      eur: { rate: 4 },
+      usd: { rate: 5 }
+    }),
+    0.8
   );
 });
 

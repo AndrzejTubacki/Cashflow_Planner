@@ -1,4 +1,5 @@
-﻿import { calculateNextDate, todayWarsaw } from "./cashflow-date-utils.js";
+﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
 
 export function createCashflowNotificationService({
   generateId,
@@ -8,11 +9,11 @@ export function createCashflowNotificationService({
 }) {
   function notificationDedupeSuffix(settings, type) {
     if (type !== "necessary_underfunded") {
-      return todayWarsaw();
+      return todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
     }
 
     const repeatDays = Math.max(1, Number(settings?.necessary_underfunded_repeat_days || 1));
-    const today = new Date(`${todayWarsaw()}T00:00:00Z`);
+    const today = new Date(`${todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE)}T00:00:00Z`);
     const epochDay = Math.floor(today.getTime() / 86_400_000);
     const bucket = Math.floor(epochDay / repeatDays);
 
@@ -106,7 +107,7 @@ export function createCashflowNotificationService({
       const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
       if (!notificationEnabled(settings, "income_missing")) return 0;
 
-      const today = todayWarsaw();
+      const today = todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
       const year = Number(today.slice(0, 4));
       const month = Number(today.slice(5, 7));
 
@@ -178,7 +179,7 @@ export function createCashflowNotificationService({
   }
 
   function queueNotification(db, type, title, message, priority, entityId, dedupeKey, settings = null) {
-    const suffix = settings ? notificationDedupeSuffix(settings, type) : todayWarsaw();
+    const suffix = settings ? notificationDedupeSuffix(settings, type) : todayInTimezone();
     const finalDedupeKey = `${dedupeKey}:${suffix}`;
 
     db.prepare(`

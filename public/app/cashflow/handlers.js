@@ -8,7 +8,7 @@ import { openCashflowModal } from "./modal.js";
 import { localeOf, t } from "./shared.js";
 
 const FX_PROVIDER_NOTES = {
-  disabled: "Only PLN transactions can project without supplied rates.",
+  disabled: "Only ledger-currency transactions can project without supplied rates.",
   manual: "Use the rates entered below.",
   nbp: "Polish central bank rates.",
   frankfurter: "ECB-backed rates for major currencies."
@@ -39,6 +39,7 @@ function moveSelectedOptions(from, to) {
 
 function syncManualFxRateRows(form, locale) {
   const provider = form.querySelector("[data-fx-provider]")?.value || "nbp";
+  const ledgerCurrency = String(form.querySelector("[data-ledger-currency]")?.value || "PLN").toUpperCase();
   const note = form.querySelector("[data-fx-provider-note]");
   const selected = form.querySelector("[data-fx-currency-selected]");
   const container = form.querySelector("[data-manual-fx-rates]");
@@ -67,7 +68,7 @@ function syncManualFxRateRows(form, locale) {
 
   container.innerHTML = currencies.map(currency => `
     <label data-manual-fx-rate-row="${currency}">
-      <span>${currency} / PLN</span>
+      <span>${currency} / ${ledgerCurrency}</span>
       <input
         type="number"
         min="0.000001"
@@ -189,6 +190,18 @@ export function attachCashflowHandlers(root, props = {}) {
     });
   });
 
+  root.querySelectorAll("[data-cashflow-recalculate-pending]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (!window.confirm(t(locale, "Delete pending and recalculate?"))) return;
+
+      runCashflowAction(
+        btn,
+        "/api/pending/recalculate",
+        "cashflow-pending-recalculated"
+      );
+    });
+  });
+
   root.querySelectorAll("[data-cashflow-confirm-pending]").forEach(btn => {
     btn.addEventListener("click", () => {
       const txId = btn.getAttribute("data-cashflow-confirm-pending");
@@ -224,6 +237,10 @@ export function attachCashflowHandlers(root, props = {}) {
     });
 
     settingsForm.querySelector("[data-fx-provider]")?.addEventListener("change", () => {
+      syncManualFxRateRows(settingsForm, locale);
+    });
+
+    settingsForm.querySelector("[data-ledger-currency]")?.addEventListener("change", () => {
       syncManualFxRateRows(settingsForm, locale);
     });
 

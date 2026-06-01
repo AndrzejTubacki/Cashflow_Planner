@@ -3,6 +3,32 @@
   openLedgerDb,
   openPlanningDb
 }) {
+  function currentLedgerSettings(userId) {
+    const db = openPlanningDb(userId);
+
+    try {
+      const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
+
+      return {
+        ledgerCurrency: settings.ledger_currency || "PLN"
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  function rowsForCurrentLedger(userId) {
+    const { ledgerCurrency } = currentLedgerSettings(userId);
+    const rows = loadAllConfirmedTransactions(userId)
+      .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
+
+    return {
+      ledgerCurrency,
+      openingBalance: 0,
+      rows
+    };
+  }
+
   function loadAllConfirmedTransactions(userId) {
     const rows = [];
 
@@ -34,6 +60,7 @@
 
   function sumConfirmedFunding(userId, sourceColumn, sourceId, targetCurrency = "PLN", settings = null) {
     let totalLedger = 0;
+    const ledgerCurrency = settings?.ledger_currency || currentLedgerSettings(userId).ledgerCurrency;
 
     for (const year of listLedgerYears(userId)) {
       const ledgerDb = openLedgerDb(userId, year);
@@ -44,7 +71,8 @@
           FROM confirmed_transactions
           WHERE ${sourceColumn} = ?
             AND type = 'expense'
-        `).all(sourceId);
+            AND COALESCE(ledger_currency, 'PLN') = ?
+        `).all(sourceId, ledgerCurrency);
 
         for (const row of rows) {
           if (row.ledger_amount !== null && row.ledger_amount !== undefined) {
@@ -64,6 +92,7 @@
   function sumPendingFunding(userId, sourceColumn, sourceId, targetCurrency = "PLN", settings = null) {
     const db = openPlanningDb(userId);
     let totalLedger = 0;
+    const ledgerCurrency = settings?.ledger_currency || currentLedgerSettings(userId).ledgerCurrency;
 
     try {
       const rows = db.prepare(`
@@ -71,7 +100,8 @@
         FROM pending_transactions
         WHERE ${sourceColumn} = ?
           AND type != 'income'
-      `).all(sourceId);
+          AND COALESCE(ledger_currency, 'PLN') = ?
+      `).all(sourceId, ledgerCurrency);
 
       for (const row of rows) {
         if (row.ledger_amount !== null && row.ledger_amount !== undefined) {
@@ -132,8 +162,8 @@
   }
 
   function recalculateLedgerRunningBalance(userId) {
-    const rows = loadAllConfirmedTransactions(userId);
-    let balance = 0;
+    const { rows, openingBalance } = rowsForCurrentLedger(userId);
+    let balance = openingBalance;
 
     const dbByYear = new Map();
 
@@ -166,7 +196,7 @@
   }
 
   function wouldLedgerGoNegativeAfterInsert(userId, candidate) {
-    const rows = loadAllConfirmedTransactions(userId);
+    const { rows, openingBalance, ledgerCurrency } = rowsForCurrentLedger(userId);
 
     rows.push({
       id: candidate.id,
@@ -175,7 +205,8 @@
       date: candidate.date,
       created_at: candidate.created_at,
       fx_rate: candidate.fx_rate,
-      buffered_fx_rate: candidate.buffered_fx_rate
+      buffered_fx_rate: candidate.buffered_fx_rate,
+      ledger_currency: candidate.ledger_currency || ledgerCurrency
     });
 
     rows.sort((a, b) => {
@@ -188,7 +219,7 @@
       return String(a.id).localeCompare(String(b.id));
     });
 
-    let balance = 0;
+    let balance = openingBalance;
 
     for (const row of rows) {
       const effectiveRate = Number(row.buffered_fx_rate || row.fx_rate || 1);
@@ -207,9 +238,9 @@
   }
 
   function latestConfirmedBalance(userId) {
-    const rows = loadAllConfirmedTransactions(userId);
+    const { rows, openingBalance } = rowsForCurrentLedger(userId);
 
-    if (!rows.length) return 0;
+    if (!rows.length) return openingBalance;
 
     const last = rows[rows.length - 1];
 
@@ -217,7 +248,7 @@
       return Number(last.running_balance_pln || 0);
     }
 
-    let balance = 0;
+    let balance = openingBalance;
 
     for (const row of rows) {
       const effectiveRate = Number(row.buffered_fx_rate || row.fx_rate || 1);

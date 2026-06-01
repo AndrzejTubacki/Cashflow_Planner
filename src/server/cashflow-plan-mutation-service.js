@@ -1,4 +1,5 @@
-import { todayWarsaw } from "./cashflow-date-utils.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { todayInTimezone } from "./cashflow-date-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { normalizeCurrency, nullablePositiveAmount } from "./cashflow-money-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
@@ -13,6 +14,32 @@ export function createCashflowPlanMutationService({
   requireStartMonthYearIfNeeded,
   withProjectionStatus
 }) {
+  function todayForUser(db) {
+    const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
+    return todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
+  }
+
+  function normalizePredictionSubstituteMissing(strategy, value) {
+    if (strategy !== "12month_min" && strategy !== "12month_max") return "none";
+
+    return [
+      "none",
+      "starting_value",
+      "average_extreme_starting_value",
+      "median_recorded",
+      "last_confirmed",
+      "previous_year_same_month",
+      "require_min_recorded_months"
+    ].includes(value) ? value : "none";
+  }
+
+  function normalizePredictionMinRecordedMonths(value) {
+    const parsed = Math.trunc(Number(value));
+
+    if (!Number.isFinite(parsed)) return 6;
+    return Math.max(1, Math.min(12, parsed));
+  }
+
   function insertPlannedTransaction(db, type, requestedPriority = 1) {
     const plannedTxId = generateId("planned");
     const domain = type === "goal" ? "goal" : "operating";
@@ -40,17 +67,20 @@ export function createCashflowPlanMutationService({
 
         db.prepare(`
           INSERT INTO recurring_expenses (
-            id, name, currency, amount, prediction_strategy, necessary, active,
+            id, name, currency, amount, prediction_strategy, prediction_substitute_missing,
+            prediction_min_recorded_months, necessary, active,
             repeat_every_months, start_month_year, anchor_type, anchor_day_of_month,
             anchor_offset_days, anchor_business_day_adjustment, anchor_holiday_country,
             planned_transaction_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         `).run(
           id,
           input.name || "Unnamed",
           input.currency || "PLN",
           Math.max(0, Number(input.amount) || 0),
           ["fixed", "12month_max"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
+          normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
+          normalizePredictionMinRecordedMonths(input.prediction_min_recorded_months),
           input.necessary ? 1 : 0,
           input.active !== false ? 1 : 0,
           repeatEveryMonths,
@@ -104,6 +134,8 @@ export function createCashflowPlanMutationService({
             currency = ?,
             amount = ?,
             prediction_strategy = ?,
+            prediction_substitute_missing = ?,
+            prediction_min_recorded_months = ?,
             necessary = ?,
             active = ?,
             repeat_every_months = ?,
@@ -120,6 +152,8 @@ export function createCashflowPlanMutationService({
           String(merged.currency || "PLN").toUpperCase(),
           Math.max(0, Number(merged.amount) || 0),
           ["fixed", "12month_max"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
+          normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
+          normalizePredictionMinRecordedMonths(merged.prediction_min_recorded_months),
           merged.necessary ? 1 : 0,
           merged.active === false || Number(merged.active) === 0 ? 0 : 1,
           merged.repeat_every_months,
@@ -181,17 +215,20 @@ export function createCashflowPlanMutationService({
 
         db.prepare(`
           INSERT INTO recurring_incomes (
-            id, name, currency, amount, prediction_strategy, active,
+            id, name, currency, amount, prediction_strategy, prediction_substitute_missing,
+            prediction_min_recorded_months, active,
             repeat_every_months, start_month_year, anchor_type, anchor_day_of_month,
             anchor_offset_days, anchor_business_day_adjustment, anchor_holiday_country,
             period_setting, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         `).run(
           id,
           input.name || "Unnamed",
           String(input.currency || "PLN").toUpperCase(),
           Math.max(0, Number(input.amount) || 0),
           ["fixed", "12month_min"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
+          normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
+          normalizePredictionMinRecordedMonths(input.prediction_min_recorded_months),
           input.active !== false ? 1 : 0,
           repeatEveryMonths,
           input.start_month_year || null,
@@ -249,6 +286,8 @@ export function createCashflowPlanMutationService({
             currency = ?,
             amount = ?,
             prediction_strategy = ?,
+            prediction_substitute_missing = ?,
+            prediction_min_recorded_months = ?,
             active = ?,
             repeat_every_months = ?,
             start_month_year = ?,
@@ -265,6 +304,8 @@ export function createCashflowPlanMutationService({
           String(merged.currency || "PLN").toUpperCase(),
           Math.max(0, Number(merged.amount) || 0),
           ["fixed", "12month_min"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
+          normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
+          normalizePredictionMinRecordedMonths(merged.prediction_min_recorded_months),
           merged.active === false || Number(merged.active) === 0 ? 0 : 1,
           merged.repeat_every_months,
           merged.start_month_year || null,
@@ -436,7 +477,7 @@ export function createCashflowPlanMutationService({
           input.currency || "PLN",
           amount,
           input.active !== false ? 1 : 0,
-          String(input.due_date || todayWarsaw()),
+          String(input.due_date || todayForUser(db)),
           plannedTxId
         );
 
@@ -492,7 +533,7 @@ export function createCashflowPlanMutationService({
           String(merged.currency || "PLN").toUpperCase(),
           Math.max(0.01, Number(merged.amount) || 0),
           merged.active === false || Number(merged.active) === 0 ? 0 : 1,
-          String(merged.due_date || todayWarsaw()),
+          String(merged.due_date || todayForUser(db)),
           id
         );
 
@@ -733,7 +774,7 @@ export function createCashflowPlanMutationService({
           input.currency || "PLN",
           Math.abs(Number(input.amount) || 0),
           ["income", "expense"].includes(input.type) ? input.type : "expense",
-          String(input.date || todayWarsaw())
+          String(input.date || todayForUser(db))
         );
 
         return db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
@@ -769,7 +810,7 @@ export function createCashflowPlanMutationService({
           input.currency || existing.currency || "PLN",
           Math.abs(Number(input.amount ?? existing.amount) || 0),
           ["income", "expense"].includes(input.type) ? input.type : existing.type,
-          String(input.date || existing.date || todayWarsaw()),
+          String(input.date || existing.date || todayForUser(db)),
           id
         );
 

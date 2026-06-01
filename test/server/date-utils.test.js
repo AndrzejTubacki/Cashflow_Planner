@@ -4,9 +4,10 @@ import assert from "node:assert/strict";
 import {
   calculateNextDate,
   holidaySetForCountry,
+  normalizeTimezone,
   recurringOccurrencesInPeriod,
   shouldGenerateInMonth,
-  todayWarsaw
+  todayInTimezone
 } from "../../src/server/cashflow-date-utils.js";
 
 test("monthly schedules generate every month by default", () => {
@@ -125,11 +126,18 @@ test("DE holiday calendar includes fixed and Easter-derived holidays", () => {
   assert.equal(holidays.has("2026-05-14"), true);
 });
 
-test("todayWarsaw uses Warsaw calendar date at UTC rollover and DST boundaries", () => {
-  assert.equal(todayWarsaw(new Date("2026-05-20T21:59:00Z")), "2026-05-20");
-  assert.equal(todayWarsaw(new Date("2026-05-20T22:01:00Z")), "2026-05-21");
-  assert.equal(todayWarsaw(new Date("2026-03-29T00:30:00Z")), "2026-03-29");
-  assert.equal(todayWarsaw(new Date("2026-10-25T00:30:00Z")), "2026-10-25");
+test("todayInTimezone uses the configured calendar date at UTC rollover and DST boundaries", () => {
+  assert.equal(todayInTimezone("Europe/Warsaw", new Date("2026-05-20T21:59:00Z")), "2026-05-20");
+  assert.equal(todayInTimezone("Europe/Warsaw", new Date("2026-05-20T22:01:00Z")), "2026-05-21");
+  assert.equal(todayInTimezone("America/New_York", new Date("2026-05-20T02:59:00Z")), "2026-05-19");
+  assert.equal(todayInTimezone("America/New_York", new Date("2026-05-20T04:01:00Z")), "2026-05-20");
+  assert.equal(todayInTimezone("Europe/Warsaw", new Date("2026-03-29T00:30:00Z")), "2026-03-29");
+  assert.equal(todayInTimezone("Europe/Warsaw", new Date("2026-10-25T00:30:00Z")), "2026-10-25");
+});
+
+test("normalizeTimezone accepts IANA timezone names and falls back for invalid values", () => {
+  assert.equal(normalizeTimezone("America/New_York"), "America/New_York");
+  assert.equal(normalizeTimezone("bad/timezone"), "Europe/Warsaw");
 });
 
 test("recurringOccurrencesInPeriod filters past dates and period bounds", () => {

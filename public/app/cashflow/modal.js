@@ -35,6 +35,8 @@ function cashflowModalTitle(locale, entityType, action) {
 
 function syncCashflowAnchorFields(modal) {
   const anchorSelect = modal.querySelector("[data-cashflow-anchor-type]");
+  const predictionSelect = modal.querySelector("[data-prediction-strategy]");
+  const predictionSubstituteSelect = modal.querySelector('select[name="prediction_substitute_missing"]');
   const repeatInput = modal.querySelector("[data-repeat-every-months]");
   const allowSplitInput = modal.querySelector("[data-allow-split]");
 
@@ -84,7 +86,21 @@ function syncCashflowAnchorFields(modal) {
     setHidden("[data-flex-split-field]", !allowSplit);
   };
 
+  const applyPredictionVisibility = () => {
+    if (!predictionSelect) return;
+
+    const usesTwelveMonthPrediction = predictionSelect.value === "12month_min" ||
+      predictionSelect.value === "12month_max";
+    const usesMinimumRecordedMonths = usesTwelveMonthPrediction &&
+      predictionSubstituteSelect?.value === "require_min_recorded_months";
+
+    setHidden("[data-prediction-substitute-field]", !usesTwelveMonthPrediction);
+    setHidden("[data-prediction-min-recorded-months-field]", !usesMinimumRecordedMonths);
+  };
+
   anchorSelect?.addEventListener("change", applyAnchorVisibility);
+  predictionSelect?.addEventListener("change", applyPredictionVisibility);
+  predictionSubstituteSelect?.addEventListener("change", applyPredictionVisibility);
   repeatInput?.addEventListener("input", applyRepeatVisibility);
   repeatInput?.addEventListener("change", applyRepeatVisibility);
   allowSplitInput?.addEventListener("change", applyFlexVisibility);
@@ -93,6 +109,7 @@ function syncCashflowAnchorFields(modal) {
     ?.addEventListener("change", applyAnchorVisibility);
 
   applyAnchorVisibility();
+  applyPredictionVisibility();
   applyRepeatVisibility();
   applyFlexVisibility();
 }
@@ -107,6 +124,7 @@ function coerceCashflowModalPayload(entityType, form) {
     "repeat_every_months",
     "anchor_day_of_month",
     "anchor_offset_days",
+    "prediction_min_recorded_months",
     "min_amount",
     "max_amount"
   ];

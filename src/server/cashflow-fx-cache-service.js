@@ -1,4 +1,5 @@
-﻿import { todayWarsaw } from "./cashflow-date-utils.js";
+﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { todayInTimezone } from "./cashflow-date-utils.js";
 
 import {
   FX_PROVIDER_DISABLED,
@@ -7,7 +8,9 @@ import {
   FX_PROVIDER_NBP,
   normalizeFxCurrencyList,
   normalizeFxProvider,
-  normalizeManualFxRates
+  normalizeManualFxPairs,
+  normalizeManualFxRates,
+  normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
 
 export function createCashflowFxCacheService({
@@ -22,8 +25,8 @@ export function createCashflowFxCacheService({
 }) {
   let currentFxSnapshotDisabled = false;
 
-  function fxCacheDateKey(date = null) {
-    return String(date || todayWarsaw()).slice(0, 10);
+  function fxCacheDateKey(date = null, timezone = DEFAULT_TIMEZONE) {
+    return String(date || todayInTimezone(timezone)).slice(0, 10);
   }
 
   function getFxSettings(userId) {
@@ -31,15 +34,19 @@ export function createCashflowFxCacheService({
 
     try {
       const settings = db.prepare(`
-        SELECT fx_provider, fx_used_currencies, manual_fx_rates
+        SELECT ledger_currency, timezone, fx_provider, fx_used_currencies, manual_fx_rates
         FROM settings
         WHERE id = 1
       `).get() || {};
+      const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
 
       return {
+        ledgerCurrency,
+        timezone: settings.timezone || DEFAULT_TIMEZONE,
         provider: normalizeFxProvider(settings.fx_provider),
-        usedCurrencies: normalizeFxCurrencyList(settings.fx_used_currencies),
-        manualRates: normalizeManualFxRates(settings.manual_fx_rates)
+        usedCurrencies: normalizeFxCurrencyList(settings.fx_used_currencies, ledgerCurrency),
+        manualRates: normalizeManualFxRates(settings.manual_fx_rates),
+        manualPairs: normalizeManualFxPairs(settings.manual_fx_rates, ledgerCurrency)
       };
     } finally {
       db.close();
@@ -50,20 +57,25 @@ export function createCashflowFxCacheService({
     const db = openPlanningDb(userId);
 
     try {
-      const currency = normalizeCurrency(rateInfo.currency);
-      const rateDate = fxCacheDateKey(requestedDate || rateInfo.effectiveDate || todayWarsaw());
+      const currency = normalizeCurrency(rateInfo.currency || rateInfo.baseCurrency);
+      const quoteCurrency = normalizeCurrency(rateInfo.quoteCurrency || "PLN");
+      const { timezone } = getFxSettings(userId);
+      const rateDate = fxCacheDateKey(requestedDate || rateInfo.effectiveDate, timezone);
 
       db.prepare(`
         INSERT INTO fx_rates_cache (
-          currency, rate_date, rate, effective_date, source, raw_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(currency, rate_date) DO UPDATE SET
+          base_currency, quote_currency, currency, rate_date, rate, effective_date, source, raw_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(base_currency, quote_currency, rate_date) DO UPDATE SET
+          currency = excluded.currency,
           rate = excluded.rate,
           effective_date = excluded.effective_date,
           source = excluded.source,
           raw_json = excluded.raw_json,
           updated_at = datetime('now')
       `).run(
+        currency,
+        quoteCurrency,
         currency,
         rateDate,
         Number(rateInfo.rate),
@@ -109,45 +121,75 @@ export function createCashflowFxCacheService({
     }
   }
 
-  function getCachedFxRate(userId, currency, date = null) {
+  function getCachedFxRate(userId, currency, date = null, quoteCurrency = null) {
     const normalized = normalizeCurrency(currency);
-    if (normalized === "PLN") return 1;
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
+    const quote = normalizeCurrency(quoteCurrency || ledgerCurrency || "PLN");
+    if (normalized === quote) return 1;
 
-    const { provider, manualRates } = getFxSettings(userId);
 
     if (provider === FX_PROVIDER_DISABLED) {
       return null;
     }
 
     if (provider === FX_PROVIDER_MANUAL) {
+      const pairRate = Number(manualPairs[`${normalized}/${quote}`]);
+      if (pairRate) return pairRate;
+      const baseToPln = normalized === "PLN" ? 1 : Number(manualRates[normalized]);
+      const quoteToPln = quote === "PLN" ? 1 : Number(manualRates[quote]);
+      if (
+        Number.isFinite(baseToPln) &&
+        baseToPln > 0 &&
+        Number.isFinite(quoteToPln) &&
+        quoteToPln > 0
+      ) {
+        return baseToPln / quoteToPln;
+      }
+      if (quote !== "PLN") return null;
       return Number(manualRates[normalized]) || null;
     }
 
     const db = openPlanningDb(userId);
 
     try {
-      const rateDate = fxCacheDateKey(date);
+      const rateDate = fxCacheDateKey(date, timezone);
 
       const exact = db.prepare(`
         SELECT rate
         FROM fx_rates_cache
-        WHERE currency = ?
+        WHERE base_currency = ?
+          AND quote_currency = ?
           AND rate_date = ?
         LIMIT 1
-      `).get(normalized, rateDate);
+      `).get(normalized, quote, rateDate);
 
       if (exact?.rate) return Number(exact.rate);
 
       const latestBefore = db.prepare(`
         SELECT rate
         FROM fx_rates_cache
-        WHERE currency = ?
+        WHERE base_currency = ?
+          AND quote_currency = ?
           AND rate_date <= ?
         ORDER BY rate_date DESC
         LIMIT 1
-      `).get(normalized, rateDate);
+      `).get(normalized, quote, rateDate);
 
       if (latestBefore?.rate) return Number(latestBefore.rate);
+
+      if (quote !== "PLN") {
+        const baseToPln = normalized === "PLN" ? 1 : getCachedFxRate(userId, normalized, date, "PLN");
+        const quoteToPln = quote === "PLN" ? 1 : getCachedFxRate(userId, quote, date, "PLN");
+
+        if (
+          Number.isFinite(baseToPln) &&
+          baseToPln > 0 &&
+          Number.isFinite(quoteToPln) &&
+          quoteToPln > 0
+        ) {
+          return baseToPln / quoteToPln;
+        }
+      }
 
       return null;
     } finally {
@@ -156,14 +198,22 @@ export function createCashflowFxCacheService({
   }
 
   function getCachedFxSnapshot(userId, date = null) {
-    const { provider, manualRates } = getFxSettings(userId);
-    const rateDate = fxCacheDateKey(date);
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
+    const rateDate = fxCacheDateKey(date, timezone);
     const snapshot = {
       pln: {
         currency: "PLN",
         rate: 1,
         effectiveDate: rateDate,
         source: provider === FX_PROVIDER_DISABLED ? "disabled" : "static"
+      },
+      [`${ledgerCurrency.toLowerCase()}/${ledgerCurrency.toLowerCase()}`]: {
+        currency: ledgerCurrency,
+        baseCurrency: ledgerCurrency,
+        quoteCurrency: ledgerCurrency,
+        rate: 1,
+        effectiveDate: rateDate,
+        source: "same-currency"
       }
     };
 
@@ -181,6 +231,18 @@ export function createCashflowFxCacheService({
         };
       }
 
+      for (const [pair, rate] of Object.entries(manualPairs)) {
+        const [base, quote] = pair.split("/");
+        snapshot[`${base.toLowerCase()}/${quote.toLowerCase()}`] = {
+          currency: base,
+          baseCurrency: base,
+          quoteCurrency: quote,
+          rate,
+          effectiveDate: date || todayInTimezone(timezone),
+          source: "manual"
+        };
+      }
+
       return snapshot;
     }
 
@@ -188,25 +250,33 @@ export function createCashflowFxCacheService({
 
     try {
       const rows = db.prepare(`
-        SELECT currency, rate, effective_date, source
+        SELECT base_currency, quote_currency, currency, rate, effective_date, source
         FROM fx_rates_cache
         WHERE rate_date <= ?
-        ORDER BY currency ASC, rate_date DESC
+        ORDER BY base_currency ASC, quote_currency ASC, rate_date DESC
       `).all(rateDate);
 
       const seen = new Set();
 
       for (const row of rows) {
-        const currency = normalizeCurrency(row.currency);
-        if (seen.has(currency)) continue;
+        const currency = normalizeCurrency(row.base_currency || row.currency);
+        const quote = normalizeCurrency(row.quote_currency || "PLN");
+        const pair = `${currency}/${quote}`;
+        if (seen.has(pair)) continue;
 
-        seen.add(currency);
-        snapshot[currency.toLowerCase()] = {
+        seen.add(pair);
+        const entry = {
           currency,
+          baseCurrency: currency,
+          quoteCurrency: quote,
           rate: Number(row.rate),
           effectiveDate: row.effective_date || rateDate,
           source: row.source || "cache"
         };
+        snapshot[`${currency.toLowerCase()}/${quote.toLowerCase()}`] = entry;
+        if (quote === "PLN") {
+          snapshot[currency.toLowerCase()] = entry;
+        }
       }
 
       return snapshot;
@@ -216,7 +286,7 @@ export function createCashflowFxCacheService({
   }
 
   async function refreshNbpFxCacheForUser(userId, date = null) {
-    const { provider, manualRates } = getFxSettings(userId);
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
 
     if (provider === FX_PROVIDER_DISABLED) {
       return {
@@ -227,12 +297,18 @@ export function createCashflowFxCacheService({
     }
 
     if (provider === FX_PROVIDER_MANUAL) {
-      const updated = Object.entries(manualRates).map(([currency, rate]) => {
+      const manualEntries = Object.keys(manualPairs).length
+        ? Object.entries(manualPairs)
+        : Object.entries(manualRates).map(([currency, rate]) => [`${currency}/PLN`, rate]);
+      const updated = manualEntries.map(([pair, rate]) => {
+        const [currency, quoteCurrency] = pair.split("/");
         const rateInfo = {
           currency,
+          baseCurrency: currency,
+          quoteCurrency,
           rate,
-          effectiveDate: date || todayWarsaw(),
-          requestedDate: date || todayWarsaw(),
+          effectiveDate: date || todayInTimezone(timezone),
+          requestedDate: date || todayInTimezone(timezone),
           source: FX_PROVIDER_MANUAL
         };
 
@@ -249,14 +325,14 @@ export function createCashflowFxCacheService({
 
     const currencies = collectCurrenciesForFxSnapshot(userId)
       .map(normalizeCurrency)
-      .filter(currency => currency && currency !== "PLN");
+      .filter(currency => currency && currency !== ledgerCurrency);
 
     const uniqueCurrencies = [...new Set(currencies)];
 
     const updated = [];
 
     for (const currency of uniqueCurrencies) {
-      const rateInfo = await fetchProviderRate(provider, currency, date);
+      const rateInfo = await fetchProviderRate(provider, currency, date, ledgerCurrency, timezone);
       upsertFxCacheRate(userId, rateInfo, date);
       updated.push(rateInfo);
     }
@@ -307,15 +383,15 @@ export function createCashflowFxCacheService({
     return results;
   }
 
-  async function fetchNbpRate(currency, date = null) {
+  async function fetchNbpRate(currency, date = null, timezone = DEFAULT_TIMEZONE) {
     const code = String(currency || "").trim().toLowerCase();
 
     if (!code || code === "pln") {
       return {
         currency: "PLN",
         rate: 1,
-        effectiveDate: date || todayWarsaw(),
-        requestedDate: date || todayWarsaw(),
+        effectiveDate: date || todayInTimezone(timezone),
+        requestedDate: date || todayInTimezone(timezone),
         source: "nbp"
       };
     }
@@ -378,21 +454,66 @@ export function createCashflowFxCacheService({
     throw new Error(`Could not find NBP FX rate for ${currency} on or before ${date}`);
   }
 
-  async function fetchFrankfurterRate(currency, date = null) {
-    const code = String(currency || "").trim().toUpperCase();
+  async function fetchNbpPairRate(baseCurrency, quoteCurrency = "PLN", date = null, timezone = DEFAULT_TIMEZONE) {
+    const base = normalizeCurrency(baseCurrency);
+    const quote = normalizeCurrency(quoteCurrency);
 
-    if (!code || code === "PLN") {
+    if (base === quote) {
       return {
-        currency: "PLN",
+        currency: base,
+        baseCurrency: base,
+        quoteCurrency: quote,
         rate: 1,
-        effectiveDate: date || todayWarsaw(),
-        requestedDate: date || todayWarsaw(),
+        effectiveDate: date || todayInTimezone(timezone),
+        requestedDate: date || todayInTimezone(timezone),
+        source: "same-currency"
+      };
+    }
+
+    const baseToPln = await fetchNbpRate(base, date, timezone);
+    if (quote === "PLN") {
+      return {
+        ...baseToPln,
+        baseCurrency: base,
+        quoteCurrency: quote
+      };
+    }
+
+    const quoteToPln = await fetchNbpRate(quote, date, timezone);
+
+    return {
+      currency: base,
+      baseCurrency: base,
+      quoteCurrency: quote,
+      rate: Number(baseToPln.rate) / Number(quoteToPln.rate),
+      effectiveDate: baseToPln.effectiveDate || quoteToPln.effectiveDate,
+      requestedDate: date || baseToPln.requestedDate || quoteToPln.requestedDate,
+      source: "nbp-derived",
+      legs: {
+        baseToPln,
+        quoteToPln
+      }
+    };
+  }
+
+  async function fetchFrankfurterRate(currency, date = null, quoteCurrency = "PLN", timezone = DEFAULT_TIMEZONE) {
+    const code = String(currency || "").trim().toUpperCase();
+    const quote = normalizeCurrency(quoteCurrency);
+
+    if (!code || code === quote) {
+      return {
+        currency: quote,
+        baseCurrency: quote,
+        quoteCurrency: quote,
+        rate: 1,
+        effectiveDate: date || todayInTimezone(timezone),
+        requestedDate: date || todayInTimezone(timezone),
         source: FX_PROVIDER_FRANKFURTER
       };
     }
 
     const datePart = date ? encodeURIComponent(date) : "latest";
-    const url = `https://api.frankfurter.app/${datePart}?from=${encodeURIComponent(code)}&to=PLN`;
+    const url = `https://api.frankfurter.app/${datePart}?from=${encodeURIComponent(code)}&to=${encodeURIComponent(quote)}`;
     const response = await fetch(url, {
       headers: {
         "Accept": "application/json"
@@ -406,31 +527,33 @@ export function createCashflowFxCacheService({
     }
 
     const data = await response.json();
-    const rate = Number(data?.rates?.PLN);
+    const rate = Number(data?.rates?.[quote]);
 
     if (!Number.isFinite(rate) || rate <= 0) {
-      throw new Error(`Frankfurter FX response missing valid PLN rate for ${code}${date ? ` on ${date}` : ""}`);
+      throw new Error(`Frankfurter FX response missing valid ${quote} rate for ${code}${date ? ` on ${date}` : ""}`);
     }
 
     return {
       currency: code,
+      baseCurrency: code,
+      quoteCurrency: quote,
       rate,
-      effectiveDate: data.date || date || todayWarsaw(),
-      requestedDate: date || data.date || todayWarsaw(),
+      effectiveDate: data.date || date || todayInTimezone(timezone),
+      requestedDate: date || data.date || todayInTimezone(timezone),
       source: FX_PROVIDER_FRANKFURTER,
       raw: data
     };
   }
 
-  async function fetchProviderRate(provider, currency, date = null) {
+  async function fetchProviderRate(provider, currency, date = null, quoteCurrency = "PLN", timezone = DEFAULT_TIMEZONE) {
     if (provider === FX_PROVIDER_FRANKFURTER) {
-      return fetchFrankfurterRate(currency, date);
+      return fetchFrankfurterRate(currency, date, quoteCurrency, timezone);
     }
 
-    return fetchNbpRate(currency, date);
+    return fetchNbpPairRate(currency, quoteCurrency, date, timezone);
   }
 
-  async function fetchNbpFxSnapshot(currencies, date = null) {
+  async function fetchNbpFxSnapshot(currencies, date = null, timezone = DEFAULT_TIMEZONE) {
     const uniqueCurrencies = [...new Set((currencies || []).map(c => String(c || "").toUpperCase()))];
 
     const snapshot = {};
@@ -440,13 +563,13 @@ export function createCashflowFxCacheService({
         snapshot.pln = {
           currency: "PLN",
           rate: 1,
-          effectiveDate: date || todayWarsaw(),
+          effectiveDate: date || todayInTimezone(timezone),
           source: "nbp"
         };
         continue;
       }
 
-      const rate = await fetchNbpRate(currency, date);
+      const rate = await fetchNbpRate(currency, date, timezone);
       snapshot[currency.toLowerCase()] = rate;
     }
 
@@ -458,7 +581,7 @@ export function createCashflowFxCacheService({
 
     try {
       const settings = db.prepare(`
-        SELECT fx_used_currencies
+        SELECT ledger_currency, fx_used_currencies
         FROM settings
         WHERE id = 1
       `).get() || {};
@@ -472,7 +595,8 @@ export function createCashflowFxCacheService({
         ...db.prepare("SELECT currency FROM pending_transactions").all()
       ];
 
-      const usedCurrencies = normalizeFxCurrencyList(settings.fx_used_currencies);
+      const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
+      const usedCurrencies = normalizeFxCurrencyList(settings.fx_used_currencies, ledgerCurrency);
       const observedCurrencies = rows
         .map(row => String(row.currency || "").toUpperCase())
         .filter(Boolean);
@@ -485,15 +609,15 @@ export function createCashflowFxCacheService({
 
   async function ensureFxCacheForMutation(userId, input = {}) {
     const currency = normalizeCurrency(input?.currency);
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
 
-    if (!currency || currency === "PLN") {
+    if (!currency || currency === ledgerCurrency) {
       return {
         refreshed: false,
-        currency: "PLN"
+        currency,
+        quoteCurrency: ledgerCurrency
       };
     }
-
-    const { provider, manualRates } = getFxSettings(userId);
 
     if (provider === FX_PROVIDER_DISABLED) {
       return {
@@ -508,12 +632,13 @@ export function createCashflowFxCacheService({
       return {
         refreshed: false,
         currency,
+        quoteCurrency: ledgerCurrency,
         provider,
-        manual_rate: Number(manualRates[currency]) || null
+        manual_rate: Number(manualPairs[`${currency}/${ledgerCurrency}`] || manualRates[currency]) || null
       };
     }
 
-    const cached = getCachedFxRate(userId, currency);
+    const cached = getCachedFxRate(userId, currency, null, ledgerCurrency);
 
     if (cached) {
       return {
@@ -523,7 +648,7 @@ export function createCashflowFxCacheService({
       };
     }
 
-    const rateInfo = await fetchProviderRate(provider, currency);
+    const rateInfo = await fetchProviderRate(provider, currency, null, ledgerCurrency, timezone);
     upsertFxCacheRate(userId, rateInfo);
 
     return {
@@ -539,6 +664,7 @@ export function createCashflowFxCacheService({
     ensureFxCacheForMutation,
     fetchProviderRate,
     fetchNbpFxSnapshot,
+    fetchNbpPairRate,
     fetchNbpRate,
     getCachedFxRate,
     getCachedFxSnapshot,

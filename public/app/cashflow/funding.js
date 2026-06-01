@@ -76,7 +76,7 @@ function renderDonutSegment({ cx, cy, r, strokeWidth, startAngle, endAngle, clas
   `;
 }
 
-function renderFundingPie(locale, item, label) {
+function renderFundingPie(locale, item, label, ledgerCurrency = "PLN") {
   const parts = fundingParts(item);
   const total = Math.max(parts.target, parts.confirmed + parts.pending + parts.future + parts.remaining, 0.0001);
 
@@ -159,22 +159,22 @@ function renderFundingPie(locale, item, label) {
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--confirmed"></i>
             <span>${escapeHtml(t(locale, "Confirmed"))}</span>
-            <strong>${formatMoney(parts.confirmed, "PLN", locale)}</strong>
+            <strong>${formatMoney(parts.confirmed, ledgerCurrency, locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--pending"></i>
             <span>${escapeHtml(t(locale, "Pending"))}</span>
-            <strong>${formatMoney(parts.pending, "PLN", locale)}</strong>
+            <strong>${formatMoney(parts.pending, ledgerCurrency, locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--future"></i>
             <span>${escapeHtml(t(locale, "Future"))}</span>
-            <strong>${formatMoney(parts.future, "PLN", locale)}</strong>
+            <strong>${formatMoney(parts.future, ledgerCurrency, locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--missing"></i>
             <span>${escapeHtml(t(locale, "Missing"))}</span>
-            <strong>${formatMoney(parts.remaining, "PLN", locale)}</strong>
+            <strong>${formatMoney(parts.remaining, ledgerCurrency, locale)}</strong>
           </span>
         </div>
       </div>
@@ -183,15 +183,16 @@ function renderFundingPie(locale, item, label) {
 }
 
 function renderFundingOverview(locale, cashflow) {
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
   const goals = cashflow?.goals || [];
   const flex = cashflow?.flexTransactions || [];
 
   const goalCards = goals.map(goal =>
-    renderFundingPie(locale, goal, `${t(locale, "Goal")}: ${goal.name || EMPTY_VALUE}`)
+    renderFundingPie(locale, goal, `${t(locale, "Goal")}: ${goal.name || EMPTY_VALUE}`, ledgerCurrency)
   );
 
   const flexCards = flex.map(item =>
-    renderFundingPie(locale, item, `${t(locale, "Flex")}: ${item.name || EMPTY_VALUE}`)
+    renderFundingPie(locale, item, `${t(locale, "Flex")}: ${item.name || EMPTY_VALUE}`, ledgerCurrency)
   );
 
   if (!goalCards.length && !flexCards.length) return "";

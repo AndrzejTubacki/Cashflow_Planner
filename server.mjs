@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { DEFAULT_TIMEZONE } from "./src/server/cashflow-constants.js";
+import { normalizeTimezone } from "./src/server/cashflow-date-utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,6 +15,7 @@ dotenv.config({ path: path.join(__dirname, ".env") });
 const port = Number(process.env.PORT || 3000);
 const dataDir = process.env.DATA_DIR || path.join(__dirname, "data");
 const logsDir = process.env.LOGS_DIR || path.join(__dirname, "logs");
+const logTimezone = normalizeTimezone(process.env.CASHFLOW_LOG_TIMEZONE || DEFAULT_TIMEZONE);
 const publicDir = path.join(__dirname, "public");
 const localeDir = path.join(publicDir, "app", "cashflow", "locales");
 const startedAt = new Date();
@@ -29,11 +32,11 @@ const runtime = {
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(logsDir, { recursive: true });
 
-function timestampWarsaw() {
-  // Format operational logs in the local deployment timezone with a real offset.
+function timestampForLogs() {
+  // Format operational logs in the configured deployment timezone with a real offset.
   const now = new Date();
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Warsaw",
+    timeZone: logTimezone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -66,7 +69,7 @@ function timestampWarsaw() {
 function toLogPayload(kind, details = {}) {
   // Normalize Error objects and plain metadata into one JSON-lines log shape.
   const payload = {
-    ts: timestampWarsaw(),
+    ts: timestampForLogs(),
     kind
   };
 

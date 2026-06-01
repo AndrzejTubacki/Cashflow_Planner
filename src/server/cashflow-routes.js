@@ -16,6 +16,7 @@ export function registerCashflowRoutes(app, {
   deleteRecurringExpense,
   deleteRecurringIncome,
   ensureFxCacheForMutation,
+  fetchProviderRate,
   fetchNbpFxSnapshot,
   fetchNbpRate,
   getCachedFxSnapshot,
@@ -170,30 +171,73 @@ export function registerCashflowRoutes(app, {
     });
 
     app.get("/api/fx/nbp/:currency", async (req, res) => {
+      const db = openPlanningDb(resolveRequestUser(req));
       try {
-        const rate = await fetchNbpRate(req.params.currency);
+        const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
+        const rate = await fetchNbpRate(req.params.currency, null, settings.timezone);
         res.json(rate);
       } catch (error) {
         logError("cashflow_nbp_fx_current_failed", error);
         res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+      } finally {
+        db.close();
       }
     });
 
     app.get("/api/fx/nbp/:currency/:date", async (req, res) => {
+      const db = openPlanningDb(resolveRequestUser(req));
       try {
-        const rate = await fetchNbpRate(req.params.currency, req.params.date);
+        const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
+        const rate = await fetchNbpRate(req.params.currency, req.params.date, settings.timezone);
         res.json(rate);
       } catch (error) {
         logError("cashflow_nbp_fx_historical_failed", error);
         res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+      } finally {
+        db.close();
+      }
+    });
+
+    app.get("/api/fx/rate/:base/:quote", async (req, res) => {
+      const db = openPlanningDb(resolveRequestUser(req));
+      try {
+        const settings = db.prepare("SELECT fx_provider, timezone FROM settings WHERE id = 1").get() || {};
+        const rate = await fetchProviderRate(settings.fx_provider || "nbp", req.params.base, req.query.date || null, req.params.quote, settings.timezone);
+        res.json(rate);
+      } catch (error) {
+        logError("cashflow_pair_fx_current_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+      } finally {
+        db.close();
+      }
+    });
+
+    app.get("/api/fx/rate/:base/:quote/:date", async (req, res) => {
+      const db = openPlanningDb(resolveRequestUser(req));
+      try {
+        const settings = db.prepare("SELECT fx_provider, timezone FROM settings WHERE id = 1").get() || {};
+        const rate = await fetchProviderRate(settings.fx_provider || "nbp", req.params.base, req.params.date, req.params.quote, settings.timezone);
+        res.json(rate);
+      } catch (error) {
+        logError("cashflow_pair_fx_historical_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+      } finally {
+        db.close();
       }
     });
 
     app.get("/api/fx/nbp-snapshot", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
+        const db = openPlanningDb(userId);
+        let timezone = null;
+        try {
+          timezone = db.prepare("SELECT timezone FROM settings WHERE id = 1").get()?.timezone || null;
+        } finally {
+          db.close();
+        }
         const currencies = collectCurrenciesForFxSnapshot(userId);
-        const snapshot = await fetchNbpFxSnapshot(currencies, req.query.date || null);
+        const snapshot = await fetchNbpFxSnapshot(currencies, req.query.date || null, timezone);
         res.json(snapshot);
       } catch (error) {
         logError("cashflow_nbp_fx_snapshot_failed", error);
@@ -204,7 +248,7 @@ export function registerCashflowRoutes(app, {
     app.put("/api/settings", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        const updated = updateSettings(userId, req.body);
+        const updated = await updateSettings(userId, req.body);
 
         res.json(withProjectionStatus(userId, updated));
       } catch (error) {
@@ -232,6 +276,41 @@ export function registerCashflowRoutes(app, {
       } catch (error) {
         logError("cashflow_pending_confirm_failed", error);
         res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to confirm pending transaction") });
+      }
+    });
+
+    app.post("/api/pending/recalculate", async (req, res) => {
+      const userId = resolveRequestUser(req);
+
+      try {
+        let deletedPendingCount = 0;
+        const db = openPlanningDb(userId);
+
+        try {
+          deletedPendingCount = db.transaction(() => {
+            const result = db.prepare("DELETE FROM pending_transactions").run();
+            return result.changes || 0;
+          })();
+        } finally {
+          db.close();
+        }
+
+        const projection = await regenerateProjectionsWithFxRefresh(userId, {
+          date: req.body?.date || null,
+          refreshFxFirst: true
+        });
+
+        res.json({
+          ok: true,
+          deletedPendingCount,
+          _projection: projection,
+          ...getSnapshot(userId)
+        });
+      } catch (error) {
+        logCashflowError("cashflow_pending_recalculate_failed", error, {
+          userId
+        });
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to recalculate pending transactions") });
       }
     });
 

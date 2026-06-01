@@ -92,6 +92,7 @@ function renderLedgerAmountCell(tx, locale) {
 function renderLedgerCell(tx, locale) {
   const ledgerAmount = tx.ledger_amount ?? tx.ledgerAmount;
   const runningBalance = tx.running_balance ?? tx.runningBalance;
+  const ledgerCurrency = tx.ledger_currency || tx.ledgerCurrency || DEFAULT_LEDGER_CURRENCY;
 
   if (ledgerAmount === undefined && runningBalance === undefined) {
     return EMPTY_VALUE;
@@ -100,10 +101,10 @@ function renderLedgerCell(tx, locale) {
   return `
     <div class="cashflow-ledger-cell">
       ${ledgerAmount !== undefined && ledgerAmount !== null
-        ? `<small>${escapeHtml(t(locale, "PLN"))}: ${formatMoney(ledgerAmount, "PLN", locale)}</small>`
+        ? `<small>${escapeHtml(ledgerCurrency)}: ${formatMoney(ledgerAmount, ledgerCurrency, locale)}</small>`
         : ""}
       ${runningBalance !== undefined && runningBalance !== null
-        ? `<small>${escapeHtml(t(locale, "Balance"))}: ${formatMoney(runningBalance, "PLN", locale)}</small>`
+        ? `<small>${escapeHtml(t(locale, "Balance"))}: ${formatMoney(runningBalance, ledgerCurrency, locale)}</small>`
         : ""}
     </div>
   `;

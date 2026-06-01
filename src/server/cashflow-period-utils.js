@@ -1,7 +1,7 @@
-﻿import { DEFAULT_FUTURE_PERIODS } from "./cashflow-constants.js";
-import { calculateNextDate, todayWarsaw } from "./cashflow-date-utils.js";
+﻿import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
 export function buildPeriodSummariesFromDefinitions(settings, recurringIncomes, futureTransactions) {
-    const today = todayWarsaw();
+    const today = todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
     const futurePeriods = Number(settings?.future_periods) || DEFAULT_FUTURE_PERIODS;
     const periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods);
 

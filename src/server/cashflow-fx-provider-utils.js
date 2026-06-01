@@ -60,17 +60,23 @@ export function parseJsonSetting(value, fallback) {
   }
 }
 
-export function normalizeFxCurrencyList(value) {
+export function normalizeFxCurrencyList(value, ledgerCurrency = "PLN") {
   const parsed = Array.isArray(value)
     ? value
     : parseJsonSetting(value, typeof value === "string" ? value.split(",") : []);
 
   const supported = new Set(SUPPORTED_FX_CURRENCIES);
+  const normalizedLedgerCurrency = normalizeSupportedCurrency(ledgerCurrency);
   const normalized = (Array.isArray(parsed) ? parsed : [])
     .map(currency => String(currency || "").trim().toUpperCase())
-    .filter(currency => currency && currency !== "PLN" && supported.has(currency));
+    .filter(currency => currency && currency !== normalizedLedgerCurrency && supported.has(currency));
 
   return [...new Set(normalized)].sort();
+}
+
+export function normalizeSupportedCurrency(value, fallback = "PLN") {
+  const normalized = String(value || fallback).trim().toUpperCase();
+  return SUPPORTED_FX_CURRENCIES.includes(normalized) ? normalized : fallback;
 }
 
 export function normalizeManualFxRates(value) {
@@ -94,4 +100,34 @@ export function normalizeManualFxRates(value) {
   }
 
   return rates;
+}
+
+export function normalizeManualFxPairs(value, ledgerCurrency = "PLN") {
+  const parsed = parseJsonSetting(value, {});
+  const supported = new Set(SUPPORTED_FX_CURRENCIES);
+  const quote = normalizeSupportedCurrency(ledgerCurrency);
+  const pairs = {};
+
+  for (const [key, rate] of Object.entries(parsed || {})) {
+    const normalizedRate = Number(rate);
+    const [rawBase, rawQuote] = String(key || "").includes("/")
+      ? String(key).split("/")
+      : [key, quote];
+    const base = String(rawBase || "").trim().toUpperCase();
+    const pairQuote = String(rawQuote || quote).trim().toUpperCase();
+
+    if (
+      base &&
+      pairQuote &&
+      base !== pairQuote &&
+      supported.has(base) &&
+      supported.has(pairQuote) &&
+      Number.isFinite(normalizedRate) &&
+      normalizedRate > 0
+    ) {
+      pairs[`${base}/${pairQuote}`] = normalizedRate;
+    }
+  }
+
+  return pairs;
 }

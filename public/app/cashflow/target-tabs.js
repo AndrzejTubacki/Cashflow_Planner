@@ -5,6 +5,7 @@ import { renderTransactionTable } from "./transactions.js";
 const EMPTY_VALUE = "-";
 
 export function renderGoalsTab(locale, cashflow) {
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
   const items = (cashflow?.goals || []).map(g => {
     const originalTarget = Number(g.amount || 0);
     const targetLedger = Number(g.target_ledger_amount || 0);
@@ -33,14 +34,15 @@ export function renderGoalsTab(locale, cashflow) {
       funded_ledger_amount: fundedLedger,
       currency: g.currency || "PLN",
 
-      // These are separate PLN ledger values.
+      // These are separate active-ledger values.
       ledger_amount: targetLedger,
+      ledger_currency: g.ledger_currency || ledgerCurrency,
       running_balance: null,
 
       note: [
         `${t(locale, "Priority")}: ${g.priority ?? EMPTY_VALUE}`,
-        `${t(locale, "Target in PLN")}: ${targetLedger ? formatMoney(targetLedger, "PLN", locale) : EMPTY_VALUE}`,
-        `${t(locale, "Remaining")}: ${g.remaining_ledger === null ? EMPTY_VALUE : formatMoney(g.remaining_ledger, "PLN", locale)}`
+        `${t(locale, "Target in ledger currency")}: ${targetLedger ? formatMoney(targetLedger, ledgerCurrency, locale) : EMPTY_VALUE}`,
+        `${t(locale, "Remaining")}: ${g.remaining_ledger === null ? EMPTY_VALUE : formatMoney(g.remaining_ledger, ledgerCurrency, locale)}`
       ].join(" / ")
     };
   });
@@ -67,6 +69,7 @@ export function renderGoalsTab(locale, cashflow) {
 }
 
 export function renderFlexTab(locale, cashflow) {
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
   const items = (cashflow?.flexTransactions || []).map(f => {
     const originalTarget = Number(f.amount || 0);
     const targetLedger = Number(f.target_ledger_amount || 0);
@@ -95,14 +98,15 @@ export function renderFlexTab(locale, cashflow) {
       currency: f.currency || "PLN",
 
       ledger_amount: targetLedger,
+      ledger_currency: f.ledger_currency || ledgerCurrency,
       running_balance: null,
 
       note: [
         `${t(locale, "Priority")}: ${f.priority ?? EMPTY_VALUE}`,
         f.allow_split ? t(locale, "Splittable") : t(locale, "Full only"),
         f.funded_by_date ? `${t(locale, "Funded by")}: ${f.funded_by_date}` : t(locale, "No funding date"),
-        `${t(locale, "Target in PLN")}: ${targetLedger ? formatMoney(targetLedger, "PLN", locale) : EMPTY_VALUE}`,
-        `${t(locale, "Remaining")}: ${f.remaining_ledger === null ? EMPTY_VALUE : formatMoney(f.remaining_ledger, "PLN", locale)}`
+        `${t(locale, "Target in ledger currency")}: ${targetLedger ? formatMoney(targetLedger, ledgerCurrency, locale) : EMPTY_VALUE}`,
+        `${t(locale, "Remaining")}: ${f.remaining_ledger === null ? EMPTY_VALUE : formatMoney(f.remaining_ledger, ledgerCurrency, locale)}`
       ].join(" / ")
     };
   });

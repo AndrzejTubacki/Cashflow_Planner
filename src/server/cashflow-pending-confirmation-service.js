@@ -1,4 +1,5 @@
-import { todayWarsaw } from "./cashflow-date-utils.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { todayInTimezone } from "./cashflow-date-utils.js";
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
 
 export function createCashflowPendingConfirmationService({
@@ -21,7 +22,8 @@ export function createCashflowPendingConfirmationService({
       const pending = planningDb.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id);
       if (!pending) throw new Error("Pending transaction not found");
 
-      const confirmedDate = String(input.confirmed_date || pending.date || todayWarsaw());
+      const settings = planningDb.prepare("SELECT * FROM settings WHERE id = 1").get();
+      const confirmedDate = String(input.confirmed_date || pending.date || todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE));
       const year = confirmedDate.slice(0, 4);
       const ledgerType = pending.type === "income" ? "income" : "expense";
       const occurrenceKey = pending.occurrence_key || occurrenceKeyFromRow({
@@ -30,10 +32,17 @@ export function createCashflowPendingConfirmationService({
         date: confirmedDate
       });
 
-      const settings = planningDb.prepare("SELECT * FROM settings WHERE id = 1").get();
+      const ledgerCurrency = settings?.ledger_currency || "PLN";
+      const latestCurrencyEvent = planningDb.prepare(`
+        SELECT *
+        FROM ledger_currency_events
+        WHERE old_currency != new_currency
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+      `).get();
 
-      if (settings?.ledger_currency && settings.ledger_currency !== "PLN") {
-        throw new Error("Only PLN ledger currency is supported");
+      if (latestCurrencyEvent && confirmedDate < String(latestCurrencyEvent.rate_date || "").slice(0, 10)) {
+        throw new Error("Cannot confirm transaction before the latest ledger currency change");
       }
 
       if (pending.source_recurring_income_id) {
@@ -78,9 +87,12 @@ export function createCashflowPendingConfirmationService({
           created_at: new Date().toISOString(),
           fx_rate: fx.fxRate,
           buffered_fx_rate: fx.bufferedFxRate
+          , ledger_currency: ledgerCurrency
         };
 
-        if (wouldLedgerGoNegativeAfterInsert(userId, candidate)) {
+        const isLedgerConversion = String(occurrenceKey || "").startsWith("ledger_currency_conversion:");
+
+        if (!isLedgerConversion && wouldLedgerGoNegativeAfterInsert(userId, candidate)) {
           throw new Error("Cannot confirm transaction because it would make the ledger balance negative");
         }
 
@@ -91,11 +103,11 @@ export function createCashflowPendingConfirmationService({
             ledgerDb.prepare(`
               INSERT INTO confirmed_transactions (
                 id, name, currency, amount, type, date, confirmed_date,
-                fx_rate, buffered_fx_rate, running_balance_pln,
+                fx_rate, buffered_fx_rate, ledger_currency, running_balance_pln,
                 source_recurring_expense_id, source_recurring_income_id, source_one_off_id,
                 source_flex_id, source_goal_id, occurrence_key, ledger_amount,
                 created_at, updated_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             `).run(
               id,
               pending.name,
@@ -106,6 +118,7 @@ export function createCashflowPendingConfirmationService({
               confirmedDate,
               fx.fxRate,
               fx.bufferedFxRate,
+              ledgerCurrency,
               pending.source_recurring_expense_id || null,
               pending.source_recurring_income_id || null,
               pending.source_one_off_id || null,

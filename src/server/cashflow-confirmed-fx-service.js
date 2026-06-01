@@ -17,13 +17,10 @@ export function createCashflowConfirmedFxService({
   upsertFxCacheRate
 }) {
   async function getConfirmedFxForDate(currency, confirmedDate, settings, input = {}, userId = null) {
-    if (settings?.ledger_currency && settings.ledger_currency !== "PLN") {
-      throw new Error("Only PLN ledger currency is supported");
-    }
-
     const normalizedCurrency = normalizeCurrency(currency);
+    const ledgerCurrency = normalizeCurrency(settings?.ledger_currency || "PLN");
 
-    if (normalizedCurrency === "PLN") {
+    if (normalizedCurrency === ledgerCurrency) {
       return {
         fxRate: 1,
         bufferedFxRate: 1
@@ -68,16 +65,16 @@ export function createCashflowConfirmedFxService({
     const provider = providerSettings.provider || FX_PROVIDER_NBP;
 
     if (provider === FX_PROVIDER_DISABLED) {
-      throw new Error(`FX is disabled and no rate is available for ${normalizedCurrency}/PLN`);
+      throw new Error(`FX is disabled and no rate is available for ${normalizedCurrency}/${ledgerCurrency}`);
     }
 
     if (provider === FX_PROVIDER_MANUAL) {
-      throw new Error(`Manual FX rate is missing for ${normalizedCurrency}/PLN`);
+      throw new Error(`Manual FX rate is missing for ${normalizedCurrency}/${ledgerCurrency}`);
     }
 
     const rateInfo = typeof fetchProviderRate === "function"
-      ? await fetchProviderRate(provider, normalizedCurrency, confirmedDate)
-      : await fetchNbpRate(normalizedCurrency, confirmedDate);
+      ? await fetchProviderRate(provider, normalizedCurrency, confirmedDate, ledgerCurrency, providerSettings.timezone)
+      : await fetchNbpRate(normalizedCurrency, confirmedDate, providerSettings.timezone);
 
     if (userId) {
       upsertFxCacheRate(userId, rateInfo, confirmedDate);

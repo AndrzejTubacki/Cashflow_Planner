@@ -128,6 +128,7 @@ export function createCashflowProjectionCoordinatorService({
 
   function recordProjectionFailure(db, userId, error, fxSnapshot = null) {
     const now = new Date().toISOString();
+    const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
 
     db.prepare(`
       INSERT INTO projection_snapshots (
@@ -137,14 +138,16 @@ export function createCashflowProjectionCoordinatorService({
         total_projected_expenses,
         available_balance,
         fx_rates_used,
+        ledger_currency,
         generation_succeeded,
         warning_count,
         created_at
-      ) VALUES (?, ?, 0, 0, 0, ?, 0, 1, datetime('now'))
+      ) VALUES (?, ?, 0, 0, 0, ?, ?, 0, 1, datetime('now'))
     `).run(
       generateId("snapshot"),
       now,
-      JSON.stringify(fxSnapshot || {})
+      JSON.stringify(fxSnapshot || {}),
+      settings.ledger_currency || "PLN"
     );
 
     db.prepare(`

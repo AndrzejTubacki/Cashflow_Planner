@@ -82,28 +82,33 @@ Funding statuses explain how much of a projected row was allocated:
 
 ## FX Providers
 
-Cashflow stores the ledger in PLN. Non-PLN transactions need an FX rate to be
-projected or confirmed.
+Cashflow stores the ledger in the configured ledger currency. The default for
+new installs is PLN. Transactions in any other supported currency need an FX
+rate to be projected or confirmed.
+
+When the ledger currency is changed, Cashflow switches the setting immediately
+and creates a visible pending opening-balance conversion row. Confirm that row
+to carry the current confirmed balance into the new ledger currency. Existing
+confirmed history keeps the ledger currency it was originally recorded with.
 
 The Settings tab includes an FX provider selector:
 
 | Provider | Behavior |
 | --- | --- |
-| Disabled | External FX is disabled. PLN still works; non-PLN rows require an already available rate or the projection will report missing FX. |
-| Manual rates | Uses manually entered currency-to-PLN rates. The used-currencies selector controls which manual rate fields are shown. |
-| NBP | Fetches PLN rates from the Polish central bank and stores them in the local FX cache. This is the default. |
-| Frankfurter | Fetches ECB-backed rates for major currencies and stores them in the same local FX cache. |
+| Disabled | External FX is disabled. Ledger-currency rows still work; other currencies require an already available rate or the projection will report missing FX. |
+| Manual rates | Uses manually entered currency pairs such as `EUR/USD`. Legacy `EUR` entries are treated as `EUR/PLN`. The used-currencies selector controls which manual rate fields are shown. |
+| NBP | Fetches Polish-central-bank PLN rates and derives non-PLN ledger pairs through PLN when needed. This is the default. |
+| Frankfurter | Fetches ECB-backed direct pair rates for supported currencies and stores them in the same local FX cache. |
 
 The used-currencies selector is a Django-style many-to-many control: move
 currencies from Available currencies to Used currencies, then save settings.
 Cashflow also still observes currencies already present in transactions so
-existing non-PLN rows can be refreshed automatically.
+existing foreign-currency rows can be refreshed automatically.
 
 ## Status
 
 Install-decision constraints:
 
-- Ledger currency is currently limited to PLN.
 - FX behavior is still coupled to the existing cache/provider flow.
 - Auth is deployment-level, not app-native.
 - First-run onboarding is minimal.
@@ -120,7 +125,8 @@ Install-decision constraints:
 - future, pending, and confirmed transaction states
 - projection snapshots
 - per-period funding overview
-- PLN ledger support
+- configurable ledger currency with FX conversion
+- configurable app timezone for date-sensitive planning and scheduled jobs
 - optional FX conversion through the existing FX cache flow
 - Docker support
 - local-only operational extension hook
@@ -205,6 +211,7 @@ Environment variables:
 | `CASHFLOW_HTTP_PORT` | `3000` | Host port used by the Compose example |
 | `DATA_DIR` | `./data` | SQLite/runtime data directory for non-container process managers |
 | `LOGS_DIR` | `./logs` | Log directory for non-container process managers |
+| `CASHFLOW_LOG_TIMEZONE` | `Europe/Warsaw` | Timezone used for server log timestamps |
 
 Use `.env.example` as a deployment reference.
 
@@ -215,6 +222,11 @@ systemd, Docker, TrueNAS, and other process managers can override file defaults.
 Docker Compose also reads a local `.env` file for variable substitution, such
 as `PORT` and `CASHFLOW_HTTP_PORT`. The Compose example only passes explicitly
 listed variables into the container.
+
+App settings include a timezone field. Cashflow uses that timezone for
+date-sensitive planning defaults, projection generation, confirmation defaults,
+FX cache date keys, and scheduled background jobs. Existing installs default to
+`Europe/Warsaw` until changed in Settings.
 
 ## Runtime Data
 
@@ -419,7 +431,6 @@ endpoints. Public builds do not include that implementation.
 
 ## Current Limitations
 
-- Ledger currency is currently limited to PLN.
 - FX behavior is still coupled to the existing cache/provider flow.
 - Auth is deployment-level, not app-native.
 - First-run onboarding is minimal.
@@ -442,9 +453,6 @@ endpoints. Public builds do not include that implementation.
 
 ### Generalization
 
-- Remove hard assumptions around PLN and Europe/Warsaw.
-- Add configurable timezone.
-- Add configurable ledger currency.
 - Document notification integrations and deployment expectations.
 - Separate product concepts from private deployment terminology.
 
