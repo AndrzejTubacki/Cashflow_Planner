@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils.js";
+import { renderAdminTab } from "./admin-tab.js";
 import { attachCashflowHandlers } from "./handlers.js";
 import { renderLedgerTab } from "./ledger-tab.js";
 import { renderOneOffTab } from "./one-off-tab.js";
@@ -188,6 +189,11 @@ function renderCashflowPageContent({
     { id: "priority", label: t(locale, "Priorities") },
     { id: "settings", label: t(locale, "Settings") }
   ];
+  const canAdmin = Array.isArray(cashflow?.session?.permissions) && cashflow.session.permissions.includes("admin");
+
+  if (canAdmin) {
+    tabs.push({ id: "admin", label: t(locale, "Admin") });
+  }
 
   return `
     <div class="cashflow-page" data-cashflow-page>
@@ -207,6 +213,11 @@ function renderCashflowPageContent({
         </div>
 
         <div class="cashflow-header__actions">
+          ${cashflow?.session?.userId ? `
+            <span class="cashflow-chip">
+              ${escapeHtml(t(locale, "User"))}: <strong>${escapeHtml(cashflow.session.displayName || cashflow.session.userId)}</strong>
+            </span>
+          ` : ""}
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
             ${escapeHtml(t(locale, "Refresh FX"))}
           </button>
@@ -215,6 +226,9 @@ function renderCashflowPageContent({
           </button>
           <button type="button" class="cashflow-action cashflow-action--primary" data-cashflow-run-jobs>
             ${escapeHtml(t(locale, "Regenerate"))}
+          </button>
+          <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-logout>
+            ${escapeHtml(t(locale, "Logout"))}
           </button>
         </div>
       </div>
@@ -241,6 +255,7 @@ function renderCashflowPageContent({
           ${activeTab === "flex" ? renderFlexTab(locale, cashflow) : ""}
           ${activeTab === "priority" ? renderPriorityTab(locale, cashflow) : ""}
           ${activeTab === "settings" ? renderSettingsTab(locale, cashflow) : ""}
+          ${activeTab === "admin" && canAdmin ? renderAdminTab(locale, cashflow) : ""}
         </div>
       </div>
     </div>

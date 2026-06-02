@@ -57,6 +57,13 @@ These are the basic operational endpoints, not a complete API reference:
 | `GET` | `/healthz` | Liveness check |
 | `GET` | `/api/system` | Process status and app version |
 | `GET` | `/api` | Cashflow snapshot |
+| `GET` | `/api/users` | List user namespaces known to the app |
+| `POST` | `/api/users` | Create a user namespace and return an auth-ready session |
+| `GET` | `/api/session` | Return the selected user session and admin defaults |
+| `POST` | `/api/logout` | Stateless logout placeholder for the current frontend shell |
+| `POST` | `/api/setup` | Complete first-run setup for the selected user |
+| `GET` | `/api/admin/options` | Read global defaults for newly created users |
+| `PUT` | `/api/admin/options` | Update global defaults for newly created users |
 | `GET` | `/api/locales` | Available UI locales |
 | `PUT` | `/api/settings` | Update user settings |
 | `POST` | `/api/run-jobs` | Refresh FX and regenerate projections |
@@ -71,8 +78,29 @@ These are the basic operational endpoints, not a complete API reference:
 | `GET` | `/api/export/sample` | Download the built-in sample dataset |
 | `POST` | `/api/import/sample` | Load the built-in sample dataset into the current user |
 
-The frontend sends `x-cashflow-user-id: local` by default. API clients can set
-that header to select another storage namespace, but this is not authentication.
+The frontend stores the selected user id locally and sends it as
+`x-cashflow-user-id`. API clients can set that header to select another storage
+namespace. If the header is absent, the server falls back to `local`. This is not
+authentication.
+
+## Users, Setup, And Admin Defaults
+
+Cashflow has a lightweight user-selection shell. Users are storage namespaces,
+not authenticated identities. The session shape includes a permissions array so
+native auth can be added later; for now every selected user receives `admin`.
+
+New users start with `setup_required: true`. The first-run setup flow saves:
+
+- ledger currency
+- UI locale
+- timezone
+- projection horizon
+- optional opening-balance pending row
+- optional recurring income used as the budget-period income
+
+Admin global options are stored separately from user ledgers and apply only to
+new users created after the option change. They do not rewrite existing user
+settings.
 
 ## Data Portability
 

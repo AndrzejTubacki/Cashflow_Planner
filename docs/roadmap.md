@@ -2,8 +2,6 @@
 
 ## Near Term
 
-- Add a first-run setup flow for currency, locale, opening balance, income, and
-  projection horizon.
 - Make empty-database onboarding understandable for new users.
 - Add migration safety checks and pre-migration backups.
 - Add minimum reserve / safety buffer logic.

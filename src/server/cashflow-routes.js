@@ -4,12 +4,14 @@ export function registerCashflowRoutes(app, {
   appVersion = "0.0.0",
   collectCurrenciesForFxSnapshot,
   confirmPendingTransaction,
+  completeSetup = null,
   createBackup,
   createFlexTransaction,
   createGoal,
   createOneOffTransaction,
   createRecurringExpense,
   createRecurringIncome,
+  createUser = null,
   deleteFlexTransaction,
   deleteGoal,
   deleteOneOffTransaction,
@@ -23,8 +25,10 @@ export function registerCashflowRoutes(app, {
   fetchNbpFxSnapshot,
   fetchNbpRate,
   getCachedFxSnapshot,
+  getGlobalOptions = null,
   getSnapshot,
   listAvailableLocales = () => [{ id: "en", label: "English" }],
+  listUsers = null,
   logCashflowError,
   logError,
   moveFutureTransactionToPending,
@@ -33,11 +37,13 @@ export function registerCashflowRoutes(app, {
   refreshNbpFxCacheForAllUsers,
   regenerateProjectionsWithFxRefresh,
   resolveRequestUser,
+  resolveSession = null,
   restoreBackup,
   importFullData,
   importOneOffCsv,
   importSampleData,
   safeGetCurrentFxSnapshot,
+  setupRequired = null,
   updateFlexTransaction,
   updateGoal,
   updateOneOffTransaction,
@@ -45,6 +51,7 @@ export function registerCashflowRoutes(app, {
   updateRecurringExpense,
   updateRecurringIncome,
   updateSettings,
+  updateGlobalOptions = null,
   translateLocale = async (_locale, key, params = {}) => String(key || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => params?.[name] ?? ""),
   validateCashflowData,
   withProjectionStatus
@@ -68,15 +75,154 @@ export function registerCashflowRoutes(app, {
       return translateLocale(resolveRequestLocale(req), message || fallback);
     }
 
+    function requestUserId(req) {
+      return resolveRequestUser(req);
+    }
+
+    function sessionForRequest(req) {
+      const userId = requestUserId(req);
+      return typeof resolveSession === "function"
+        ? resolveSession(userId)
+        : {
+            authenticated: true,
+            userId,
+            displayName: userId,
+            permissions: ["admin"]
+          };
+    }
+
+    function canAdmin(session) {
+      return Array.isArray(session?.permissions) && session.permissions.includes("admin");
+    }
+
+    app.get("/api/users", async (req, res) => {
+      try {
+        res.json({
+          users: typeof listUsers === "function" ? listUsers() : []
+        });
+      } catch (error) {
+        logError("cashflow_users_list_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to list users") });
+      }
+    });
+
+    app.post("/api/users", async (req, res) => {
+      try {
+        if (typeof createUser !== "function") throw new Error("User service is unavailable");
+        res.json({
+          session: createUser(req.body || {})
+        });
+      } catch (error) {
+        logError("cashflow_user_create_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create user") });
+      }
+    });
+
+    app.get("/api/session", async (req, res) => {
+      try {
+        const session = sessionForRequest(req);
+        res.json({
+          session,
+          admin: typeof getGlobalOptions === "function" && canAdmin(session)
+            ? { options: getGlobalOptions() }
+            : null
+        });
+      } catch (error) {
+        logError("cashflow_session_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load session") });
+      }
+    });
+
+    app.post("/api/logout", async (req, res) => {
+      res.json({
+        ok: true,
+        session: {
+          authenticated: false,
+          userId: "",
+          displayName: "",
+          permissions: []
+        }
+      });
+    });
+
+    app.get("/api/admin/options", async (req, res) => {
+      try {
+        const session = sessionForRequest(req);
+        if (!canAdmin(session)) {
+          res.status(403).json({ error: await translateLocale(resolveRequestLocale(req), "Admin permission required") });
+          return;
+        }
+
+        res.json({
+          options: typeof getGlobalOptions === "function" ? getGlobalOptions() : {}
+        });
+      } catch (error) {
+        logError("cashflow_admin_options_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load admin options") });
+      }
+    });
+
+    app.put("/api/admin/options", async (req, res) => {
+      try {
+        const session = sessionForRequest(req);
+        if (!canAdmin(session)) {
+          res.status(403).json({ error: await translateLocale(resolveRequestLocale(req), "Admin permission required") });
+          return;
+        }
+
+        if (typeof updateGlobalOptions !== "function") throw new Error("Admin options service is unavailable");
+        res.json({
+          ok: true,
+          options: updateGlobalOptions(req.body || {})
+        });
+      } catch (error) {
+        logError("cashflow_admin_options_update_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to save admin options") });
+      }
+    });
+
+    app.post("/api/setup", async (req, res) => {
+      try {
+        if (typeof completeSetup !== "function") throw new Error("Setup service is unavailable");
+        const userId = requestUserId(req);
+        const result = completeSetup(userId, req.body || {});
+        const snapshot = getSnapshot(userId);
+        const session = sessionForRequest(req);
+        res.json({
+          app: {
+            name: "cashflow",
+            version: appVersion
+          },
+          ...snapshot,
+          session,
+          setup_required: false,
+          admin: typeof getGlobalOptions === "function" && canAdmin(session)
+            ? { options: getGlobalOptions() }
+            : null,
+          setup: result
+        });
+      } catch (error) {
+        logError("cashflow_setup_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to complete first-run setup") });
+      }
+    });
+
     app.get("/api", async (req, res) => {
       try {
-        const userId = resolveRequestUser(req);
+        const userId = requestUserId(req);
+        const session = sessionForRequest(req);
+        const isSetupRequired = typeof setupRequired === "function" ? setupRequired(userId) : false;
         const snapshot = getSnapshot(userId);
         res.json({
           app: {
             name: "cashflow",
             version: appVersion
           },
+          session,
+          setup_required: isSetupRequired,
+          admin: typeof getGlobalOptions === "function" && canAdmin(session)
+            ? { options: getGlobalOptions() }
+            : null,
           ...snapshot
         });
       } catch (error) {

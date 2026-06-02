@@ -514,5 +514,36 @@ export function applyPlanningMigrations(db) {
 
       db.pragma("user_version = 12");
     }
+
+    if (currentVersion < 13) {
+      addColumnIfMissing("settings", "setup_completed", "setup_completed INTEGER NOT NULL DEFAULT 0");
+      addColumnIfMissing("settings", "setup_completed_at", "setup_completed_at TEXT");
+
+      const functionalTables = [
+        "planned_transactions",
+        "recurring_expenses",
+        "recurring_incomes",
+        "flex_transactions",
+        "goals",
+        "one_off_transactions",
+        "pending_transactions"
+      ];
+      const hasFunctionalRows = functionalTables.some(tableName => {
+        if (!tableExists(tableName)) return false;
+        return Boolean(db.prepare(`SELECT 1 FROM ${tableName} LIMIT 1`).get());
+      });
+
+      if (tableExists("settings") && hasFunctionalRows) {
+        db.prepare(`
+          UPDATE settings
+          SET setup_completed = 1,
+              setup_completed_at = COALESCE(setup_completed_at, datetime('now')),
+              updated_at = datetime('now')
+          WHERE id = 1
+        `).run();
+      }
+
+      db.pragma("user_version = 13");
+    }
   })();
 }

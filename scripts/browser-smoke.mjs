@@ -138,6 +138,18 @@ async function runBrowserSmoke(baseUrl) {
 
   try {
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+
+    if (await page.locator("[data-cashflow-user-selection]").isVisible().catch(() => false)) {
+      await page.locator('[data-cashflow-select-user="local"]').click();
+      await page.waitForSelector("[data-cashflow-page], [data-cashflow-setup]", { state: "visible" });
+    }
+
+    if (await page.locator("[data-cashflow-setup]").isVisible().catch(() => false)) {
+      await page.locator('input[name="income_amount"]').fill("1000");
+      await page.locator("[data-cashflow-setup-form] button[type='submit']").click();
+      await page.waitForSelector("[data-cashflow-page]", { state: "visible" });
+    }
+
     await page.locator("[data-cashflow-page]").waitFor({ state: "visible" });
     await assert.match(await page.locator("body").textContent(), /Cashflow/);
 

@@ -37,6 +37,10 @@ The core workflow is:
 - per-period funding overview
 - configurable ledger currency with FX conversion
 - configurable app timezone for date-sensitive planning and scheduled jobs
+- user selection screen for per-user data namespaces
+- first-run setup for currency, locale, timezone, opening balance, recurring
+  income, and projection horizon
+- admin tab for global defaults applied to newly created users
 - optional FX conversion through the existing FX cache flow
 - Docker support
 - local-only operational extension hook
@@ -119,9 +123,9 @@ existing foreign-currency rows can be refreshed automatically.
 ## Current Limitations
 
 - FX behavior is still coupled to the existing cache/provider flow.
-- Auth is deployment-level, not app-native.
-- First-run onboarding is minimal.
+- App-native auth is not implemented yet. The user/session model is auth-ready,
+  but all users have admin permission by default for now.
 - Automated coverage exists for the main financial invariants, but browser-level
   workflow coverage is limited to smoke-level tab rendering.
-- The API accepts `x-cashflow-user-id`, but there is no authentication or
-  user-management UI yet.
+- The API accepts `x-cashflow-user-id` to select a user namespace. This is not
+  authentication.

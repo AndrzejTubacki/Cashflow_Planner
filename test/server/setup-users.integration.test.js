@@ -1,0 +1,160 @@
+import assert from "node:assert/strict";
+import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+
+import { initializeLedgerSchema } from "../../src/server/cashflow-schema.js";
+import {
+  createCashflowTestHarness,
+  ledgerDbPath
+} from "../helpers/cashflow-test-harness.js";
+
+async function withHarness(fn) {
+  const harness = await createCashflowTestHarness();
+  try {
+    return await fn(harness);
+  } finally {
+    await harness.cleanup();
+  }
+}
+
+test("users endpoint lists local and creates auth-ready admin sessions", async () => withHarness(async harness => {
+  const listed = await harness.api("/api/users");
+
+  assert.ok(listed.users.some(user => user.id === "local"));
+
+  const created = await harness.api("/api/users", {
+    method: "POST",
+    body: {
+      userId: "first_run_user",
+      displayName: "First Run User"
+    }
+  });
+
+  assert.equal(created.session.userId, "first_run_user");
+  assert.equal(created.session.displayName, "First Run User");
+  assert.deepEqual(created.session.permissions, ["admin"]);
+}));
+
+test("admin global options apply to newly created users", async () => withHarness(async harness => {
+  const options = await harness.api("/api/admin/options", {
+    method: "PUT",
+    body: {
+      ledger_currency: "USD",
+      locale: "pl",
+      timezone: "UTC",
+      future_periods: 5,
+      fx_provider: "manual",
+      fx_buffer_percent: 2
+    }
+  });
+
+  assert.equal(options.options.ledger_currency, "USD");
+  assert.equal(options.options.locale, "pl");
+
+  await harness.api("/api/users", {
+    method: "POST",
+    body: {
+      userId: "global_defaults_user",
+      displayName: "Defaults"
+    }
+  });
+
+  const snapshot = await harness.api("/api", {
+    headers: {
+      "x-cashflow-user-id": "global_defaults_user"
+    }
+  });
+
+  assert.equal(snapshot.setup_required, true);
+  assert.equal(snapshot.settings.ledger_currency, "USD");
+  assert.equal(snapshot.settings.locale, "pl");
+  assert.equal(snapshot.settings.timezone, "UTC");
+  assert.equal(snapshot.settings.future_periods, 5);
+  assert.equal(snapshot.settings.fx_provider, "manual");
+  assert.equal(snapshot.settings.fx_buffer_percent, 2);
+}));
+
+test("first-run setup marks setup complete and creates opening balance plus recurring income", async () => withHarness(async harness => {
+  await harness.api("/api/users", {
+    method: "POST",
+    body: {
+      userId: "setup_flow_user"
+    }
+  });
+
+  const before = await harness.api("/api", {
+    headers: {
+      "x-cashflow-user-id": "setup_flow_user"
+    }
+  });
+
+  assert.equal(before.setup_required, true);
+
+  const after = await harness.api("/api/setup", {
+    method: "POST",
+    headers: {
+      "x-cashflow-user-id": "setup_flow_user"
+    },
+    body: {
+      ledger_currency: "EUR",
+      locale: "en",
+      timezone: "Europe/London",
+      future_periods: 7,
+      opening_balance: 123.45,
+      income_enabled: 1,
+      income_name: "Salary",
+      income_amount: 2500,
+      income_anchor_day: 25
+    }
+  });
+
+  assert.equal(after.setup_required, false);
+  assert.equal(after.settings.setup_completed, 1);
+  assert.equal(after.settings.ledger_currency, "EUR");
+  assert.equal(after.recurringIncomes.length, 1);
+  assert.equal(after.recurringIncomes[0].name, "Salary");
+  assert.equal(after.recurringIncomes[0].currency, "EUR");
+  assert.equal(after.recurringIncomes[0].period_setting, 1);
+  assert.equal(after.pendingTransactions.length, 1);
+  assert.equal(after.pendingTransactions[0].name, "Opening balance");
+  assert.equal(after.pendingTransactions[0].type, "income");
+  assert.equal(after.pendingTransactions[0].currency, "EUR");
+  assert.equal(after.pendingTransactions[0].ledger_currency, "EUR");
+  assert.equal(after.pendingTransactions[0].fx_rate, 1);
+  assert.equal(after.pendingTransactions[0].buffered_fx_rate, 1);
+}));
+
+test("confirmed-only users are treated as already set up", async () => withHarness(async harness => {
+  const userId = "confirmed_only_user";
+  const userDir = path.join(harness.dataDir, userId);
+  fs.mkdirSync(userDir, { recursive: true });
+
+  const ledgerDb = new Database(ledgerDbPath(harness.dataDir, userId, "2026"));
+  try {
+    initializeLedgerSchema(ledgerDb);
+    ledgerDb.prepare(`
+      INSERT INTO confirmed_transactions (
+        id, name, currency, amount, type, date, confirmed_date,
+        fx_rate, buffered_fx_rate, ledger_currency, running_balance_pln,
+        ledger_amount, created_at, updated_at
+      ) VALUES (
+        'confirmed-1', 'Historical income', 'PLN', 10, 'income', '2026-01-01', '2026-01-01',
+        1, 1, 'PLN', 10, 10, datetime('now'), datetime('now')
+      )
+    `).run();
+  } finally {
+    ledgerDb.close();
+  }
+
+  const snapshot = await harness.api("/api", {
+    headers: {
+      "x-cashflow-user-id": userId
+    }
+  });
+
+  assert.equal(snapshot.setup_required, false);
+  assert.equal(snapshot.settings.setup_completed, 1);
+  assert.equal(snapshot.confirmedTransactions.length, 1);
+}));

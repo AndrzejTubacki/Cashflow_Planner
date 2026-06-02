@@ -904,6 +904,106 @@ fieldset legend {
   margin-bottom: 0.75rem;
 }
 
+.cashflow-shell {
+  max-width: 980px;
+  margin-inline: auto;
+}
+
+.cashflow-shell-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.cashflow-shell-panel {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.72));
+  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+}
+
+.cashflow-shell-panel h3 {
+  margin: 0 0 0.85rem;
+  font-size: 1rem;
+  color: rgba(248, 250, 252, 0.96);
+}
+
+.cashflow-shell-form,
+.cashflow-setup-form {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.cashflow-shell-panel label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.cashflow-shell-panel label span {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: rgba(203, 213, 225, 0.9);
+}
+
+.cashflow-shell-panel input,
+.cashflow-shell-panel select {
+  width: 100%;
+  padding: 0.58rem 0.72rem;
+  background: rgba(8, 10, 14, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.6rem;
+  color: var(--text);
+  font-size: 0.88rem;
+}
+
+.cashflow-user-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.cashflow-user-card {
+  display: grid;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.62);
+  color: rgba(226, 232, 240, 0.96);
+  text-align: left;
+  cursor: pointer;
+}
+
+.cashflow-user-card:hover {
+  border-color: rgba(125, 211, 252, 0.52);
+  background: rgba(51, 65, 85, 0.78);
+}
+
+.cashflow-user-card strong {
+  color: rgba(248, 250, 252, 0.98);
+}
+
+.cashflow-user-card span {
+  color: rgba(148, 163, 184, 0.92);
+  font-size: 0.8rem;
+}
+
+.cashflow-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+@media (max-width: 760px) {
+  .cashflow-shell-grid,
+  .cashflow-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .cashflow-header {
   display: flex;
   align-items: center;

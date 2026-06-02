@@ -4,6 +4,8 @@ import { createCashflowStoragePaths } from "./server/cashflow-storage-utils.js";
 import { registerCashflowRoutes } from "./server/cashflow-routes.js";
 import { createCashflowBackupService } from "./server/cashflow-backup-service.js";
 import { createCashflowDataPortabilityService } from "./server/cashflow-data-portability-service.js";
+import { createCashflowGlobalService } from "./server/cashflow-global-service.js";
+import { createCashflowSetupService } from "./server/cashflow-setup-service.js";
 import { createCashflowBackgroundJobs } from "./server/cashflow-background-jobs.js";
 import { createCashflowPredictionService } from "./server/cashflow-prediction-service.js";
 import { createCashflowNotificationService } from "./server/cashflow-notification-service.js";
@@ -166,6 +168,19 @@ function createCashflowModule({
     recalculatePlanningRunningBalances
   });
 
+  const {
+    createUser,
+    getGlobalOptions,
+    listUsers,
+    resolveSession,
+    updateGlobalOptions
+  } = createCashflowGlobalService({
+    dataDir,
+    listCashflowUserIds,
+    normalizeLocale,
+    openPlanningDb
+  });
+
   // Create, update, delete planned entities, then recalculate affected projection state.
   const {
     createFlexTransaction,
@@ -297,6 +312,16 @@ function createCashflowModule({
     restoreBackupFromPath
   });
 
+  const {
+    completeSetup,
+    setupRequired
+  } = createCashflowSetupService({
+    hasAnyConfirmedTransactions,
+    normalizeLocale,
+    openPlanningDb,
+    regenerateProjectionsAfterMutation
+  });
+
   // Predict recurring amounts from historical ledger rows when a rule uses prediction.
   const {
     loadConfirmedTransactions,
@@ -316,6 +341,7 @@ function createCashflowModule({
       appVersion,
       createFlexTransaction,
       createGoal,
+      createUser,
       createOneOffTransaction,
       createRecurringExpense,
       createRecurringIncome,
@@ -332,7 +358,9 @@ function createCashflowModule({
       fetchNbpFxSnapshot,
       fetchNbpRate,
       getCachedFxSnapshot,
+      getGlobalOptions,
       getSnapshot,
+      listUsers,
       listAvailableLocales,
       logCashflowError,
       logError,
@@ -342,6 +370,7 @@ function createCashflowModule({
       refreshNbpFxCacheForAllUsers,
       regenerateProjectionsWithFxRefresh,
       resolveRequestUser,
+      resolveSession,
       restoreBackup,
       importFullData,
       importOneOffCsv,
@@ -354,6 +383,9 @@ function createCashflowModule({
       updateRecurringExpense,
       updateRecurringIncome,
       updateSettings,
+      updateGlobalOptions,
+      completeSetup,
+      setupRequired,
       translateLocale,
       validateCashflowData,
       withProjectionStatus

@@ -83,7 +83,8 @@ function syncManualFxRateRows(form, locale) {
 }
 
 async function downloadCashflowFile(url, fallbackName) {
-  const response = await fetch(url);
+  const fetchFn = window.cashflowFetch || fetch;
+  const response = await fetchFn(url);
 
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
@@ -216,6 +217,12 @@ export function attachCashflowHandlers(root, props = {}) {
   root.querySelectorAll("[data-cashflow-validate]").forEach(btn => {
     btn.addEventListener("click", () => {
       validateCashflowAction(btn);
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-logout]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("cashflow-logout"));
     });
   });
 
@@ -374,6 +381,19 @@ export function attachCashflowHandlers(root, props = {}) {
       );
 
       window.dispatchEvent(new CustomEvent("cashflow-settings-update", { detail: updates }));
+    });
+  }
+
+  const adminForm = root.querySelector("[data-cashflow-admin-options-form]");
+  if (adminForm) {
+    adminForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const formData = new FormData(adminForm);
+      const updates = Object.fromEntries(formData);
+      updates.future_periods = Number(updates.future_periods || 11);
+      updates.fx_buffer_percent = Number(updates.fx_buffer_percent || 0);
+
+      window.dispatchEvent(new CustomEvent("cashflow-admin-options-update", { detail: updates }));
     });
   }
 }

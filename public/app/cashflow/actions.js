@@ -20,7 +20,8 @@ export function cashflowApiForEntity(entityType, id = null) {
 }
 
 export async function postCashflowJson(url, body = {}) {
-  const response = await fetch(url, {
+  const fetchFn = window.cashflowFetch || fetch;
+  const response = await fetchFn(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -101,7 +102,8 @@ export async function deleteCashflowEntity(button, entityType, id) {
   button.textContent = t(null, "Working...");
 
   try {
-    const response = await fetch(cashflowApiForEntity(entityType, id), {
+    const fetchFn = window.cashflowFetch || fetch;
+    const response = await fetchFn(cashflowApiForEntity(entityType, id), {
       method: "DELETE"
     });
     const payload = await response.json().catch(() => ({}));

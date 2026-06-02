@@ -5,7 +5,7 @@ import {
 } from "./cashflow-constants.js";
 export function initializePlanningSchema(db) {
   db.exec(`
-    PRAGMA user_version = 12;
+    PRAGMA user_version = 13;
 
     CREATE TABLE fx_rates_cache (
       base_currency TEXT NOT NULL,
@@ -58,6 +58,8 @@ export function initializePlanningSchema(db) {
       ntfy_priority_goal_funded TEXT DEFAULT 'default',
       ntfy_priority_fx_changed TEXT DEFAULT 'default',
       necessary_underfunded_repeat_days INTEGER NOT NULL DEFAULT 1,
+      setup_completed INTEGER NOT NULL DEFAULT 0,
+      setup_completed_at TEXT,
       updated_at TEXT NOT NULL,
       UNIQUE(id)
     );

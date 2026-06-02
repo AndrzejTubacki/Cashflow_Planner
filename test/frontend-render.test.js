@@ -3,14 +3,91 @@ import test from "node:test";
 
 import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.js";
 import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
+import { renderAdminTab } from "../public/app/cashflow/admin-tab.js";
 import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
 import { loadLocale } from "../public/app/cashflow/shared.js";
+import {
+  renderSetupPage,
+  renderUserSelectionPage
+} from "../public/app/cashflow/session-pages.js";
 import { renderGoalsTab } from "../public/app/cashflow/target-tabs.js";
 import { renderTransactionTable } from "../public/app/cashflow/transactions.js";
 
 function assertNoMojibake(html) {
   assert.equal(/[\u00c4\u0102\u0139\u00e2\u00c2]/u.test(html), false, html);
 }
+
+test("session and setup pages render auth-ready controls", async () => {
+  await loadLocale("en");
+
+  const userHtml = renderUserSelectionPage({
+    users: [
+      { id: "local", display_name: "Local" }
+    ]
+  });
+
+  assert.match(userHtml, /data-cashflow-user-selection/);
+  assert.match(userHtml, /data-cashflow-select-user="local"/);
+  assert.match(userHtml, /data-cashflow-create-user-form/);
+  assert.match(userHtml, /name="userId"/);
+  assert.match(userHtml, /Create and continue/);
+
+  const setupHtml = renderSetupPage({
+    cashflow: {
+      session: {
+        userId: "setup-user",
+        displayName: "Setup User"
+      },
+      settings: {
+        ledger_currency: "USD",
+        locale: "en",
+        timezone: "UTC",
+        future_periods: 6
+      },
+      availableLocales: [
+        { id: "en", label: "English" },
+        { id: "pl", label: "Polski" }
+      ]
+    }
+  });
+
+  assert.match(setupHtml, /data-cashflow-setup/);
+  assert.match(setupHtml, /data-cashflow-setup-form/);
+  assert.match(setupHtml, /data-cashflow-logout/);
+  assert.match(setupHtml, /name="opening_balance"/);
+  assert.match(setupHtml, /name="income_amount"/);
+  assert.match(setupHtml, /Complete setup/);
+  assertNoMojibake(userHtml);
+  assertNoMojibake(setupHtml);
+});
+
+test("admin tab renders global options controls", async () => {
+  await loadLocale("en");
+
+  const html = renderAdminTab("en", {
+    admin: {
+      options: {
+        ledger_currency: "EUR",
+        locale: "pl",
+        timezone: "UTC",
+        future_periods: 9,
+        fx_provider: "manual",
+        fx_buffer_percent: 3
+      }
+    },
+    availableLocales: [
+      { id: "en", label: "English" },
+      { id: "pl", label: "Polski" }
+    ]
+  });
+
+  assert.match(html, /data-cashflow-admin-options-form/);
+  assert.match(html, /name="ledger_currency"/);
+  assert.match(html, /value="EUR" selected/);
+  assert.match(html, /name="fx_provider"/);
+  assert.match(html, /Save global options/);
+  assertNoMojibake(html);
+});
 
 test("settings render uses localized Polish labels and no mojibake", async () => {
   await loadLocale("pl");
