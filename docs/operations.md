@@ -13,7 +13,7 @@ Recommended backup procedure:
 1. Stop the app or pause writes.
 2. Copy `data/` to your backup destination.
 3. Start the app again.
-4. Verify `GET /api` returns expected data.
+4. Open the app and confirm your data appears as expected.
 
 SQLite note: copying live SQLite files while the app is writing can produce an
 inconsistent backup, especially when WAL files are involved. The safest simple
@@ -27,15 +27,9 @@ Restore procedure:
 3. Start the app.
 4. Verify `/healthz`, `/api/system`, and `/api`.
 
-Cashflow also has app-level backup and restore endpoints:
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/api/backup` | Creates a SQLite backup for the selected user and records it in `backup_metadata` |
-| `POST` | `/api/restore/:backupId` | Restores a recorded backup by id, with a safety backup and validation-oriented import flow |
-
-These endpoints are intended for trusted/self-hosted operation. They are not a
-replacement for external volume backups, especially before upgrades.
+Cashflow can also create safety backups before import and restore operations.
+Treat those as a convenience layer. They are not a replacement for external
+volume backups, especially before upgrades.
 
 ## Upgrade
 
@@ -44,52 +38,30 @@ Suggested safe upgrade flow:
 1. Back up `data/`.
 2. Pull or build the new version.
 3. Restart the app.
-4. Check `/api/system`.
-5. Check `/api`.
+4. Check `/healthz`.
+5. Check `/api/system`.
 6. Review logs for errors.
 
-## Operational API
+## Health Checks
 
-These are the basic operational endpoints, not a complete API reference:
+Use these checks after install, restart, restore, or upgrade:
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/healthz` | Liveness check |
-| `GET` | `/api/system` | Process status and app version |
-| `GET` | `/api` | Cashflow snapshot |
-| `GET` | `/api/users` | List user namespaces known to the app |
-| `POST` | `/api/users` | Create a user namespace and return an auth-ready session |
-| `GET` | `/api/session` | Return the selected user session and admin defaults |
-| `POST` | `/api/logout` | Stateless logout placeholder for the current frontend shell |
-| `POST` | `/api/setup` | Complete first-run setup for the selected user |
-| `GET` | `/api/admin/options` | Read global defaults for newly created users |
-| `PUT` | `/api/admin/options` | Update global defaults for newly created users |
-| `GET` | `/api/locales` | Available UI locales |
-| `PUT` | `/api/settings` | Update user settings |
-| `POST` | `/api/run-jobs` | Refresh FX and regenerate projections |
-| `POST` | `/api/fx/refresh` | Refresh FX for the current user and regenerate projections |
-| `POST` | `/api/validate` | Validate current Cashflow data |
-| `POST` | `/api/backup` | Create a user-scoped backup |
-| `POST` | `/api/restore/:backupId` | Restore a user-scoped backup |
-| `GET` | `/api/export/full` | Download functional user data as JSON |
-| `POST` | `/api/import/full` | Import full JSON data in replace or merge mode |
-| `POST` | `/api/import/one-offs-csv` | Import one-off transactions from CSV |
-| `GET` | `/api/export/confirmed-ledger.csv` | Download confirmed ledger rows as CSV |
-| `GET` | `/api/export/sample` | Download the built-in sample dataset |
-| `POST` | `/api/import/sample` | Load the built-in sample dataset into the current user |
+```sh
+curl http://localhost:3000/healthz
+curl http://localhost:3000/api/system
+npm run smoke
+```
 
-The frontend stores the selected user id locally and sends it as
-`x-cashflow-user-id`. API clients can set that header to select another storage
-namespace. If the header is absent, the server falls back to `local`. This is not
-authentication.
+For a deployment, replace `localhost:3000` with the deployed URL.
 
 ## Users, Setup, And Admin Defaults
 
-Cashflow has a lightweight user-selection shell. Users are storage namespaces,
-not authenticated identities. The session shape includes a permissions array so
-native auth can be added later; for now every selected user receives `admin`.
+Cashflow has a lightweight user-selection screen. Treat users as separate
+planner profiles, not as protected login accounts. Anyone who can reach the app
+can currently select any profile, and every selected profile can access admin
+defaults.
 
-New users start with `setup_required: true`. The first-run setup flow saves:
+New profiles open a first-run setup flow that saves:
 
 - ledger currency
 - UI locale
@@ -99,18 +71,21 @@ New users start with `setup_required: true`. The first-run setup flow saves:
 - optional recurring income used as the budget-period income
 
 Admin global options are stored separately from user ledgers and apply only to
-new users created after the option change. They do not rewrite existing user
-settings.
+new profiles created after the option change. They do not rewrite existing
+profile settings.
 
 ## Data Portability
 
-The Settings tab includes Data portability controls for the current user
-namespace.
+The Settings tab includes Data portability controls for the selected profile.
 
-Full JSON export includes functional planning data, FX cache rows, ledger
-currency events, pending rows, and confirmed ledger rows grouped by year. It
-excludes operational tables such as backup metadata, event logs, notifications,
-projection snapshots, and generated future rows.
+Full JSON export includes the planner data needed to recreate a profile:
+settings, FX rates, planned transactions, pending rows, and confirmed ledger
+rows. Generated future projections are not exported because Cashflow rebuilds
+them after import.
+
+Full export currently includes the full Settings row. Treat export files as
+private data because settings may contain deployment-specific values such as
+notification URLs, backup locations, and backup/notification toggles.
 
 Full JSON import supports:
 
@@ -136,32 +111,7 @@ data. Loading it replaces the current user data after a safety backup.
 
 ## Verification
 
-Verification commands matter for installs and upgrades: they give users a quick
-way to confirm the app boots, migrations did not break runtime data, and core
-utility behavior still passes before trusting projections.
-
-Run unit tests:
-
-```sh
-npm test
-```
-
-`npm test` runs both Node integration/unit tests and Playwright browser smoke
-checks.
-
-Run only the Node test suite:
-
-```sh
-npm run test:node
-```
-
-Run only browser smoke checks:
-
-```sh
-npm run test:browser
-```
-
-Run a local smoke check:
+Run a local smoke check after install or upgrade:
 
 ```sh
 npm run smoke
@@ -173,29 +123,5 @@ Check an already running deployment:
 CASHFLOW_BASE_URL=https://cashflow.example.com npm run smoke
 ```
 
-The smoke script checks:
-
-- `GET /healthz`
-- `GET /api/system`
-- `GET /api`
-
-The browser smoke script checks that the app loads in Chromium, `Validate`
-renders a visible result, and every main tab renders its expected heading and
-core controls.
-
-## Local Development And Private Operations
-
-Deployment-specific operational controls can be mounted in `local/`.
-
-For example, a private deployment may add:
-
-```text
-local/dev.mjs
-```
-
-`server.mjs` tries to load this module if it exists. The directory is ignored by
-Git and Docker build context, so private operational endpoints do not ship in
-the public repo or public image.
-
-This local module can register private routes such as restart or test-runner
-endpoints. Public builds do not include that implementation.
+Treat deployed smoke checks as operational checks. They confirm that the app is
+responding, but they do not replace a real backup/restore check.

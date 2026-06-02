@@ -27,30 +27,26 @@ The core workflow is:
 
 ## Feature List
 
-- SQLite-backed storage
+- local self-hosted storage
 - recurring income and recurring expenses
 - one-off transactions
 - savings goals
 - flexible spending plans
 - future, pending, and confirmed transaction states
-- projection snapshots
 - per-period funding overview
 - configurable ledger currency with FX conversion
 - configurable app timezone for date-sensitive planning and scheduled jobs
-- user selection screen for per-user data namespaces
+- user selection screen for separate planner profiles
 - first-run setup for currency, locale, timezone, opening balance, recurring
   income, and projection horizon
 - admin tab for global defaults applied to newly created users
-- optional FX conversion through the existing FX cache flow
+- FX conversion with disabled, manual, NBP, and Frankfurter provider options
 - Docker support
-- local-only operational extension hook
-- backup and restore APIs for SQLite runtime data
+- backup and restore support for self-hosted installs
 - full JSON export/import for current user data
 - CSV import for one-off transactions
 - CSV export for confirmed ledger rows
 - downloadable and loadable anonymized sample dataset
-- automated tests for projection, ledger, routes, migrations, backup/restore,
-  localization, and frontend render output
 
 ## Transaction Types
 
@@ -113,19 +109,18 @@ The Settings tab includes an FX provider selector:
 | Disabled | External FX is disabled. Ledger-currency rows still work; other currencies require an already available rate or the projection will report missing FX. |
 | Manual rates | Uses manually entered currency pairs such as `EUR/USD`. Legacy `EUR` entries are treated as `EUR/PLN`. The used-currencies selector controls which manual rate fields are shown. |
 | NBP | Fetches Polish-central-bank PLN rates and derives non-PLN ledger pairs through PLN when needed. This is the default. |
-| Frankfurter | Fetches ECB-backed direct pair rates for supported currencies and stores them in the same local FX cache. |
+| Frankfurter | Fetches ECB-backed direct pair rates for supported currencies and stores them for future projections. |
 
-The used-currencies selector is a Django-style many-to-many control: move
-currencies from Available currencies to Used currencies, then save settings.
-Cashflow also still observes currencies already present in transactions so
-existing foreign-currency rows can be refreshed automatically.
+The used-currencies selector has Available and Used lists: move currencies into
+Used currencies, then save settings. Cashflow also observes currencies already
+present in transactions so existing foreign-currency rows can be refreshed
+automatically.
 
 ## Current Limitations
 
-- FX behavior is still coupled to the existing cache/provider flow.
-- App-native auth is not implemented yet. The user/session model is auth-ready,
-  but all users have admin permission by default for now.
-- Automated coverage exists for the main financial invariants, but browser-level
-  workflow coverage is limited to smoke-level tab rendering.
-- The API accepts `x-cashflow-user-id` to select a user namespace. This is not
-  authentication.
+- Cashflow does not include built-in login yet. Use deployment-level access
+  control before exposing it outside a trusted network.
+- User profiles are separate planner datasets, not protected accounts.
+- Every selected profile currently has admin access.
+- Some advanced data operations, especially imports and currency changes, should
+  still be used carefully and backed up first.

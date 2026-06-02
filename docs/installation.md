@@ -2,7 +2,7 @@
 
 ## Requirements
 
-For local Node development:
+For a local Node install:
 
 - Node.js 22 recommended
 - npm
@@ -34,22 +34,6 @@ docker run --rm \
   -v cashflow-data:/app/data \
   -v cashflow-logs:/app/logs \
   cashflow
-```
-
-Build the test-capable image target when the container needs to run
-`npm test` or the local `/api/local/tests/run` endpoint:
-
-```sh
-docker build --target test -t cashflow:test .
-```
-
-That target installs dev/test dependencies and Chromium for Playwright. The
-default runtime target keeps the production image lean.
-
-With Compose, run the test target through the `test` profile:
-
-```sh
-docker compose -f docker-compose.example.yml --profile test run --rm cashflow-test
 ```
 
 For the standard app service, start Compose directly. Copy `.env.example` to
@@ -91,22 +75,20 @@ listed variables into the container.
 
 App settings include a timezone field. Cashflow uses that timezone for
 date-sensitive planning defaults, projection generation, confirmation defaults,
-FX cache date keys, and scheduled background jobs. Existing installs default to
+FX rate dates, and scheduled background jobs. Existing installs default to
 `Europe/Warsaw` until changed in Settings.
 
 ## Runtime Data
 
-Runtime state lives outside the publishable source tree:
+Runtime data and private deployment files should stay outside published source
+archives and container images:
 
 - `data/`
 - `logs/`
 - `backups/`
-- `local/`
-- `node_modules/`
+- `.env`
 
-These paths are ignored by Git and Docker build context where appropriate.
-
-The app creates user-scoped data under:
+The app creates profile data under:
 
 ```text
 data/<user-id>/
@@ -114,29 +96,9 @@ data/<user-id>/
 
 For the default standalone UI, the user id is `local`.
 
-Important SQLite files look like:
+Important database files look like:
 
 ```text
 data/<user-id>/planning.sqlite
 data/<user-id>/ledger_YYYY.sqlite
-```
-
-## Project Structure
-
-```text
-.
-|-- server.mjs
-|-- src/
-|   |-- cashflow.js
-|   `-- server/
-|-- public/
-|   |-- app.js
-|   |-- app/
-|   |   |-- cashflow.js
-|   |   `-- cashflow/
-|   `-- styles/
-|-- scripts/
-|-- test/
-|-- Dockerfile
-`-- docker-compose.example.yml
 ```

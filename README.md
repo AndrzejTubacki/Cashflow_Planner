@@ -1,8 +1,8 @@
 > [!CAUTION]
-> Cashflow does not include built-in authentication, registration, sessions,
-> CSRF protection, or role-based access control. Do not expose it directly to
-> the public internet without reverse-proxy authentication, VPN/private network
-> access, SSO, or another access-control layer. HTTPS alone is not auth.
+> Cashflow does not include built-in login or real access control yet. Do not
+> expose it directly to the public internet. Put it behind a VPN, private
+> network, SSO, or reverse-proxy authentication. HTTPS alone is not access
+> control.
 
 # Cashflow
 
@@ -53,15 +53,21 @@ deployment notes.
 
 ## Features At A Glance
 
-- SQLite-backed personal finance planning
+- local personal finance planning
 - recurring income and recurring expenses
 - one-off transactions, goals, and flexible spending plans
 - future, pending, and confirmed transaction states
-- projection snapshots and per-period funding overview
+- period funding overview
 - configurable ledger currency with FX conversion
 - configurable app timezone for date-sensitive planning and scheduled jobs
+- separate user profiles for different household or demo datasets
+- first-run setup for currency, locale, timezone, opening balance, income, and
+  projection horizon
+- admin defaults for newly created users
+- data portability tools for full JSON export/import, one-off CSV import,
+  confirmed-ledger CSV export, and sample data
 - Docker and Docker Compose support
-- backup and restore APIs for SQLite runtime data
+- backup and restore support for self-hosted installs
 
 See [Features](docs/features.md) for the full workflow and data model.
 
@@ -71,20 +77,19 @@ Cashflow is usable, but still early as a standalone public app.
 
 Install-decision constraints:
 
-- FX behavior is still coupled to the existing cache/provider flow.
-- Auth is deployment-level, not app-native.
-- First-run onboarding is minimal.
-- Multi-user storage exists through `x-cashflow-user-id`, but there is no
-  authentication, authorization, or user-management UI.
+- Access control must come from your deployment, such as a VPN or reverse proxy.
+- User profiles are separate planner datasets, not secure user accounts.
+- Every selected profile can currently see admin settings.
+- FX support works for supported currencies, but currency and import workflows
+  are still being hardened.
 
-## Verification
+## Check An Install
 
 ```sh
-npm test
 npm run smoke
 ```
 
-See [Operations](docs/operations.md) for backup, upgrade, API, and verification
+See [Operations](docs/operations.md) for backup, upgrade, and health-check
 details.
 
 ## License

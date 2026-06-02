@@ -1,6 +1,8 @@
 node_modules
+.git
 .stfolder
 .stignore
+*.sync-conflict-*
 AGENTS.md
 AGENTS.override.md
 data
@@ -11,3 +13,4 @@ local
 .env.*
 *.sqlite
 *.sqlite-*
+todo.md
