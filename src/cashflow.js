@@ -3,6 +3,7 @@ import { normalizeCurrency } from "./server/cashflow-money-utils.js";
 import { createCashflowStoragePaths } from "./server/cashflow-storage-utils.js";
 import { registerCashflowRoutes } from "./server/cashflow-routes.js";
 import { createCashflowBackupService } from "./server/cashflow-backup-service.js";
+import { createCashflowDataPortabilityService } from "./server/cashflow-data-portability-service.js";
 import { createCashflowBackgroundJobs } from "./server/cashflow-background-jobs.js";
 import { createCashflowPredictionService } from "./server/cashflow-prediction-service.js";
 import { createCashflowNotificationService } from "./server/cashflow-notification-service.js";
@@ -261,6 +262,7 @@ function createCashflowModule({
     createBackup,
     maybeRunAutomaticBackup,
     restoreBackup,
+    restoreBackupFromPath,
     validateBackupFolderForRestore,
     validateCashflowData
   } = createCashflowBackupService({
@@ -274,6 +276,25 @@ function createCashflowModule({
     openPlanningDb,
     recalculateLedgerRunningBalance,
     regenerateProjectionsAfterMutation
+  });
+
+  const {
+    exportConfirmedLedgerCsv,
+    exportFullData,
+    exportSampleData,
+    importFullData,
+    importOneOffCsv,
+    importSampleData
+  } = createCashflowDataPortabilityService({
+    createBackup,
+    generateId,
+    listLedgerYears,
+    loadAllConfirmedTransactions,
+    openLedgerDb,
+    openPlanningDb,
+    recalculateLedgerRunningBalance,
+    regenerateProjectionsAfterMutation,
+    restoreBackupFromPath
   });
 
   // Predict recurring amounts from historical ledger rows when a rule uses prediction.
@@ -304,6 +325,9 @@ function createCashflowModule({
       deleteRecurringExpense,
       deleteRecurringIncome,
       ensureFxCacheForMutation,
+      exportConfirmedLedgerCsv,
+      exportFullData,
+      exportSampleData,
       fetchProviderRate,
       fetchNbpFxSnapshot,
       fetchNbpRate,
@@ -319,6 +343,9 @@ function createCashflowModule({
       regenerateProjectionsWithFxRefresh,
       resolveRequestUser,
       restoreBackup,
+      importFullData,
+      importOneOffCsv,
+      importSampleData,
       safeGetCurrentFxSnapshot,
       updateFlexTransaction,
       updateGoal,

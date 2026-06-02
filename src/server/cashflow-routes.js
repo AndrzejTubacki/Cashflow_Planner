@@ -16,6 +16,9 @@ export function registerCashflowRoutes(app, {
   deleteRecurringExpense,
   deleteRecurringIncome,
   ensureFxCacheForMutation,
+  exportConfirmedLedgerCsv,
+  exportFullData,
+  exportSampleData,
   fetchProviderRate,
   fetchNbpFxSnapshot,
   fetchNbpRate,
@@ -31,6 +34,9 @@ export function registerCashflowRoutes(app, {
   regenerateProjectionsWithFxRefresh,
   resolveRequestUser,
   restoreBackup,
+  importFullData,
+  importOneOffCsv,
+  importSampleData,
   safeGetCurrentFxSnapshot,
   updateFlexTransaction,
   updateGoal,
@@ -547,6 +553,93 @@ export function registerCashflowRoutes(app, {
       } catch (error) {
         logError("cashflow_backup_failed", error);
         res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create backup") });
+      }
+    });
+
+    app.get("/api/export/full", async (req, res) => {
+      try {
+        const userId = resolveRequestUser(req);
+        const exported = exportFullData(userId, appVersion);
+        const fileName = `cashflow-${userId}-full-export.json`;
+
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+        res.send(JSON.stringify(exported, null, 2));
+      } catch (error) {
+        logError("cashflow_full_export_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to export cashflow data") });
+      }
+    });
+
+    app.post("/api/import/full", async (req, res) => {
+      try {
+        const userId = resolveRequestUser(req);
+        const result = importFullData(userId, req.body?.export || req.body, req.body?.mode || "replace");
+        res.json({
+          ...getSnapshot(userId),
+          import: result
+        });
+      } catch (error) {
+        logError("cashflow_full_import_failed", error);
+        res.status(error.status || 500).json({
+          error: await apiErrorMessage(req, error, "Failed to import cashflow data"),
+          ...(error.conflicts ? { conflicts: error.conflicts } : {})
+        });
+      }
+    });
+
+    app.post("/api/import/one-offs-csv", async (req, res) => {
+      try {
+        const userId = resolveRequestUser(req);
+        const result = importOneOffCsv(userId, req.body?.csv || "", req.body?.mode || "append");
+        res.json({
+          ...getSnapshot(userId),
+          import: result
+        });
+      } catch (error) {
+        logError("cashflow_oneoff_csv_import_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to import one-off CSV") });
+      }
+    });
+
+    app.get("/api/export/confirmed-ledger.csv", async (req, res) => {
+      try {
+        const userId = resolveRequestUser(req);
+        const csv = exportConfirmedLedgerCsv(userId);
+
+        res.setHeader("Content-Type", "text/csv; charset=utf-8");
+        res.setHeader("Content-Disposition", `attachment; filename="cashflow-${userId}-confirmed-ledger.csv"`);
+        res.send(csv);
+      } catch (error) {
+        logError("cashflow_confirmed_ledger_csv_export_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to export confirmed ledger CSV") });
+      }
+    });
+
+    app.get("/api/export/sample", async (req, res) => {
+      try {
+        const exported = exportSampleData();
+
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Content-Disposition", "attachment; filename=\"cashflow-sample-dataset.json\"");
+        res.send(JSON.stringify(exported, null, 2));
+      } catch (error) {
+        logError("cashflow_sample_export_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to export sample dataset") });
+      }
+    });
+
+    app.post("/api/import/sample", async (req, res) => {
+      try {
+        const userId = resolveRequestUser(req);
+        const result = importSampleData(userId);
+        res.json({
+          ...getSnapshot(userId),
+          import: result
+        });
+      } catch (error) {
+        logError("cashflow_sample_import_failed", error);
+        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load sample dataset") });
       }
     });
 

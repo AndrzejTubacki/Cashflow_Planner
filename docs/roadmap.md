@@ -5,7 +5,6 @@
 - Add a first-run setup flow for currency, locale, opening balance, income, and
   projection horizon.
 - Make empty-database onboarding understandable for new users.
-- Add import/export for full JSON backups and ledger CSV exports.
 - Add migration safety checks and pre-migration backups.
 - Add minimum reserve / safety buffer logic.
 - Improve README with screenshots once the public UI settles.
@@ -26,10 +25,3 @@
 ## Testing
 
 - Expand browser tests beyond smoke-level tab rendering into full workflows.
-
-## Data Portability
-
-- Full export/import.
-- CSV import for one-off transactions.
-- CSV export for confirmed ledger rows.
-- An anonymized sample dataset for demos and screenshots.

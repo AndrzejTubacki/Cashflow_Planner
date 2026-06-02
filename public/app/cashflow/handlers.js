@@ -1,5 +1,6 @@
 import {
   deleteCashflowEntity,
+  postCashflowJson,
   runCashflowAction,
   validateCashflowAction
 } from "./actions.js";
@@ -79,6 +80,49 @@ function syncManualFxRateRows(form, locale) {
       >
     </label>
   `).join("");
+}
+
+async function downloadCashflowFile(url, fallbackName) {
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || t(null, "Download failed"));
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const disposition = response.headers.get("content-disposition") || "";
+  const fileNameMatch = disposition.match(/filename="([^"]+)"/);
+
+  link.href = objectUrl;
+  link.download = fileNameMatch?.[1] || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+async function withBusyButton(button, busyLabel, fn) {
+  const oldText = button.textContent;
+  button.disabled = true;
+  button.textContent = t(null, busyLabel);
+
+  try {
+    return await fn();
+  } catch (error) {
+    window.dispatchEvent(new CustomEvent("cashflow-error", {
+      detail: {
+        message: error.message
+      }
+    }));
+    alert(error.message);
+    return null;
+  } finally {
+    button.disabled = false;
+    button.textContent = oldText;
+  }
 }
 
 export function attachCashflowHandlers(root, props = {}) {
@@ -245,6 +289,58 @@ export function attachCashflowHandlers(root, props = {}) {
     });
 
     syncManualFxRateRows(settingsForm, locale);
+
+    settingsForm.querySelector("[data-cashflow-download-full-export]")?.addEventListener("click", (event) => {
+      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile("/api/export/full", "cashflow-full-export.json"));
+    });
+
+    settingsForm.querySelector("[data-cashflow-download-ledger-csv]")?.addEventListener("click", (event) => {
+      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile("/api/export/confirmed-ledger.csv", "cashflow-confirmed-ledger.csv"));
+    });
+
+    settingsForm.querySelector("[data-cashflow-download-sample]")?.addEventListener("click", (event) => {
+      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile("/api/export/sample", "cashflow-sample-dataset.json"));
+    });
+
+    settingsForm.querySelector("[data-cashflow-import-full]")?.addEventListener("click", (event) => {
+      withBusyButton(event.currentTarget, "Importing...", async () => {
+        const input = settingsForm.querySelector("[data-cashflow-full-import-file]");
+        const file = input?.files?.[0];
+        if (!file) throw new Error(t(locale, "Choose a full export file first."));
+
+        const text = await file.text();
+        const exportData = JSON.parse(text);
+        const mode = settingsForm.querySelector("[data-cashflow-full-import-mode]")?.value || "replace";
+        const result = await postCashflowJson("/api/import/full", { mode, export: exportData });
+
+        window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
+      });
+    });
+
+    settingsForm.querySelector("[data-cashflow-import-oneoff-csv]")?.addEventListener("click", (event) => {
+      withBusyButton(event.currentTarget, "Importing...", async () => {
+        const input = settingsForm.querySelector("[data-cashflow-oneoff-csv-file]");
+        const file = input?.files?.[0];
+        if (!file) throw new Error(t(locale, "Choose a one-off CSV file first."));
+
+        const mode = window.confirm(t(locale, "Replace unconfirmed one-off transactions before importing? Cancel appends instead."))
+          ? "replace"
+          : "append";
+        const csv = await file.text();
+        const result = await postCashflowJson("/api/import/one-offs-csv", { mode, csv });
+
+        window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
+      });
+    });
+
+    settingsForm.querySelector("[data-cashflow-load-sample]")?.addEventListener("click", (event) => {
+      if (!window.confirm(t(locale, "Load sample dataset? Current data will be replaced after a safety backup."))) return;
+
+      withBusyButton(event.currentTarget, "Importing...", async () => {
+        const result = await postCashflowJson("/api/import/sample");
+        window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
+      });
+    });
 
     settingsForm.addEventListener("submit", (e) => {
       e.preventDefault();

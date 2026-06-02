@@ -418,7 +418,7 @@ export function createCashflowBackupService({
     }
   }
 
-  function restoreBackupFromPathNoSafety(userId, backupPath) {
+  function restoreBackupFromPath(userId, backupPath) {
     const { planningSource, backupLedgerYears } = validateBackupFolderForRestore(backupPath);
     const existingLedgerYears = listLedgerYears(userId);
 
@@ -465,7 +465,7 @@ export function createCashflowBackupService({
     const safetyBackup = createBackup(userId);
 
     try {
-      const projection = restoreBackupFromPathNoSafety(userId, backupPath);
+      const projection = restoreBackupFromPath(userId, backupPath);
 
       return {
         ok: true,
@@ -476,7 +476,7 @@ export function createCashflowBackupService({
       };
     } catch (error) {
       try {
-        restoreBackupFromPathNoSafety(userId, safetyBackup);
+        restoreBackupFromPath(userId, safetyBackup);
       } catch (rollbackError) {
         throw new Error(
           `Restore failed and rollback also failed. Safety backup: ${safetyBackup}. Restore error: ${error.message}. Rollback error: ${rollbackError.message}`
@@ -494,6 +494,7 @@ export function createCashflowBackupService({
     createBackup,
     maybeRunAutomaticBackup,
     restoreBackup,
+    restoreBackupFromPath,
     validateBackupFolderForRestore,
     validateCashflowData
   };

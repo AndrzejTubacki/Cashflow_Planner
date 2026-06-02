@@ -69,7 +69,7 @@ async function createCashflowTestHarness(options = {}) {
     if (server) return baseUrl;
 
     const app = express();
-    app.use(express.json({ limit: "2mb" }));
+    app.use(express.json({ limit: "10mb" }));
     app.use(express.urlencoded({ extended: true }));
     cashflow.registerRoutes(app);
 
@@ -100,7 +100,12 @@ async function createCashflowTestHarness(options = {}) {
           : JSON.stringify(requestOptions.body)
     });
     const text = await response.text();
-    const body = text ? JSON.parse(text) : null;
+    const contentType = response.headers.get("content-type") || "";
+    const body = text
+      ? contentType.includes("application/json")
+        ? JSON.parse(text)
+        : text
+      : null;
 
     return {
       response,

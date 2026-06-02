@@ -286,6 +286,54 @@ export function renderSettingsTab(locale, cashflow) {
     ${notificationRow("fx_changed", t(locale, "FX changed projection"))}
   `;
 
+  const dataPortability = `
+    <div class="cashflow-settings-actions">
+      <button type="button" class="btn-small" data-cashflow-download-full-export>
+        ${escapeHtml(t(locale, "Download full export"))}
+      </button>
+      <button type="button" class="btn-small" data-cashflow-download-ledger-csv>
+        ${escapeHtml(t(locale, "Download confirmed ledger CSV"))}
+      </button>
+      <button type="button" class="btn-small" data-cashflow-download-sample>
+        ${escapeHtml(t(locale, "Download sample dataset"))}
+      </button>
+    </div>
+
+    <label>
+      <span>${escapeHtml(t(locale, "Full import file"))}</span>
+      <input type="file" accept="application/json,.json" data-cashflow-full-import-file>
+    </label>
+
+    <label>
+      <span>${escapeHtml(t(locale, "Full import mode"))}</span>
+      <select data-cashflow-full-import-mode>
+        <option value="replace">${escapeHtml(t(locale, "Replace after backup"))}</option>
+        <option value="merge">${escapeHtml(t(locale, "Merge"))}</option>
+      </select>
+    </label>
+
+    <div class="cashflow-tab-actions">
+      <button type="button" class="btn-small" data-cashflow-import-full>
+        ${escapeHtml(t(locale, "Import full export"))}
+      </button>
+    </div>
+
+    <label>
+      <span>${escapeHtml(t(locale, "One-off CSV file"))}</span>
+      <input type="file" accept="text/csv,.csv" data-cashflow-oneoff-csv-file>
+      <small>${escapeHtml(t(locale, "CSV columns: name,type,amount,currency,date"))}</small>
+    </label>
+
+    <div class="cashflow-tab-actions">
+      <button type="button" class="btn-small" data-cashflow-import-oneoff-csv>
+        ${escapeHtml(t(locale, "Import one-off CSV"))}
+      </button>
+      <button type="button" class="btn-small" data-cashflow-load-sample>
+        ${escapeHtml(t(locale, "Load sample dataset"))}
+      </button>
+    </div>
+  `;
+
   return `
     <div class="cashflow-tab-content" data-cashflow-settings-tab>
       <form class="panel cashflow-settings-form" data-cashflow-settings-form>
@@ -298,6 +346,7 @@ export function renderSettingsTab(locale, cashflow) {
         ${renderDetailsSection(locale, "Currency & Exchange", currencyExchange)}
         ${renderDetailsSection(locale, "Budget period", budgetPeriod)}
         ${renderDetailsSection(locale, "ntfy notifications", notifications)}
+        ${renderDetailsSection(locale, "Data portability", dataPortability)}
       </form>
     </div>
   `;

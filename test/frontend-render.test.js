@@ -36,6 +36,14 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
   assert.match(html, new RegExp(">J\\u0119zyk<"));
   assert.match(html, />Waluta i kurs</);
   assert.match(html, />Strefa czasowa</);
+  assert.match(html, />Przenoszenie danych</);
+  assert.match(html, /data-cashflow-download-full-export/);
+  assert.match(html, /data-cashflow-import-full/);
+  assert.match(html, /data-cashflow-import-oneoff-csv/);
+  assert.match(html, /data-cashflow-download-ledger-csv/);
+  assert.match(html, /data-cashflow-download-sample/);
+  assert.match(html, /data-cashflow-load-sample/);
+  assert.match(html, /Kolumny CSV: name,type,amount,currency,date/);
   assert.match(html, new RegExp(">\\s*Kursy r\\u0119czne\\s*<"));
   assert.match(html, new RegExp(">U\\u017cywane waluty<"));
   assertNoMojibake(html);

@@ -64,9 +64,47 @@ These are the basic operational endpoints, not a complete API reference:
 | `POST` | `/api/validate` | Validate current Cashflow data |
 | `POST` | `/api/backup` | Create a user-scoped backup |
 | `POST` | `/api/restore/:backupId` | Restore a user-scoped backup |
+| `GET` | `/api/export/full` | Download functional user data as JSON |
+| `POST` | `/api/import/full` | Import full JSON data in replace or merge mode |
+| `POST` | `/api/import/one-offs-csv` | Import one-off transactions from CSV |
+| `GET` | `/api/export/confirmed-ledger.csv` | Download confirmed ledger rows as CSV |
+| `GET` | `/api/export/sample` | Download the built-in sample dataset |
+| `POST` | `/api/import/sample` | Load the built-in sample dataset into the current user |
 
 The frontend sends `x-cashflow-user-id: local` by default. API clients can set
 that header to select another storage namespace, but this is not authentication.
+
+## Data Portability
+
+The Settings tab includes Data portability controls for the current user
+namespace.
+
+Full JSON export includes functional planning data, FX cache rows, ledger
+currency events, pending rows, and confirmed ledger rows grouped by year. It
+excludes operational tables such as backup metadata, event logs, notifications,
+projection snapshots, and generated future rows.
+
+Full JSON import supports:
+
+- `replace`: creates a safety backup, replaces current functional data,
+  recalculates ledger balances, regenerates projections, and rolls back on
+  failure
+- `merge`: appends imported rows when there are no ID conflicts; current
+  settings are preserved
+
+One-off CSV import uses strict columns:
+
+```text
+name,type,amount,currency,date
+```
+
+`type` must be `income` or `expense`, `amount` must be non-negative, and `date`
+must use `YYYY-MM-DD`.
+
+Confirmed ledger CSV export downloads all confirmed rows across ledger years.
+
+The sample dataset is fictitious demo data. Downloading it does not change user
+data. Loading it replaces the current user data after a safety backup.
 
 ## Verification
 

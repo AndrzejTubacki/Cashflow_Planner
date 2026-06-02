@@ -41,6 +41,10 @@ The core workflow is:
 - Docker support
 - local-only operational extension hook
 - backup and restore APIs for SQLite runtime data
+- full JSON export/import for current user data
+- CSV import for one-off transactions
+- CSV export for confirmed ledger rows
+- downloadable and loadable anonymized sample dataset
 - automated tests for projection, ledger, routes, migrations, backup/restore,
   localization, and frontend render output
 
