@@ -114,6 +114,7 @@ test("first-run setup marks setup complete and creates opening balance plus recu
   });
 
   assert.equal(after.setup_required, false);
+  assert.equal(after.today, "2026-05-20");
   assert.equal(after.settings.setup_completed, 1);
   assert.equal(after.settings.ledger_currency, "EUR");
   assert.equal(after.settings.holiday_country, "DE");

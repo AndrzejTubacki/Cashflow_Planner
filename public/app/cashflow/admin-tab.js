@@ -1,5 +1,5 @@
 import { escapeHtml } from "../utils.js";
-import { SUPPORTED_FX_CURRENCIES } from "./session-pages.js";
+import { SUPPORTED_FX_CURRENCIES } from "./constants.js";
 import { t } from "./shared.js";
 
 const FX_PROVIDERS = [

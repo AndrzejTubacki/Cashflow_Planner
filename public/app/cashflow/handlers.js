@@ -82,15 +82,8 @@ function syncManualFxRateRows(form, locale) {
   `).join("");
 }
 
-async function downloadCashflowFile(url, fallbackName) {
-  const fetchFn = window.cashflowFetch || fetch;
-  const response = await fetchFn(url);
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || t(null, "Download failed"));
-  }
-
+async function downloadCashflowFile(apiClient, url, fallbackName) {
+  const response = await apiClient.raw(url);
   const blob = await response.blob();
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -118,7 +111,6 @@ async function withBusyButton(button, busyLabel, fn) {
         message: error.message
       }
     }));
-    alert(error.message);
     return null;
   } finally {
     button.disabled = false;
@@ -130,6 +122,7 @@ export function attachCashflowHandlers(root, props = {}) {
   if (!root) return;
 
   const cashflow = props.cashflow || null;
+  const apiClient = props.apiClient;
   const locale = localeOf(cashflow);
 
   const tabButtons = root.querySelectorAll("[data-cashflow-tab]");
@@ -145,6 +138,12 @@ export function attachCashflowHandlers(root, props = {}) {
     });
   }
 
+  root.querySelectorAll("[data-cashflow-dismiss-error]").forEach(button => {
+    button.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("cashflow-error-dismiss"));
+    });
+  });
+
   const addButtons = [
     { selector: "[data-cashflow-add-recurring]", type: "recurring-expense" },
     { selector: "[data-cashflow-add-income]", type: "recurring-income" },
@@ -157,6 +156,7 @@ export function attachCashflowHandlers(root, props = {}) {
     root.querySelectorAll(selector).forEach(btn => {
       btn.addEventListener("click", () => {
         openCashflowModal({
+          apiClient,
           cashflow,
           entityType: type,
           action: "create"
@@ -176,6 +176,7 @@ export function attachCashflowHandlers(root, props = {}) {
       }
 
       openCashflowModal({
+        apiClient,
         cashflow,
         entityType,
         action: "edit",
@@ -190,13 +191,14 @@ export function attachCashflowHandlers(root, props = {}) {
       const entityType = btn.getAttribute("data-cashflow-delete-entity") || "one-off";
       if (!txId) return;
 
-      deleteCashflowEntity(btn, entityType, txId);
+      deleteCashflowEntity(apiClient, btn, entityType, txId);
     });
   });
 
   root.querySelectorAll("[data-cashflow-run-jobs]").forEach(btn => {
     btn.addEventListener("click", () => {
       runCashflowAction(
+        apiClient,
         btn,
         "/api/run-jobs",
         "cashflow-regenerated"
@@ -207,6 +209,7 @@ export function attachCashflowHandlers(root, props = {}) {
   root.querySelectorAll("[data-cashflow-refresh-fx]").forEach(btn => {
     btn.addEventListener("click", () => {
       runCashflowAction(
+        apiClient,
         btn,
         "/api/fx/refresh",
         "cashflow-fx-refreshed"
@@ -216,7 +219,7 @@ export function attachCashflowHandlers(root, props = {}) {
 
   root.querySelectorAll("[data-cashflow-validate]").forEach(btn => {
     btn.addEventListener("click", () => {
-      validateCashflowAction(btn);
+      validateCashflowAction(apiClient, btn);
     });
   });
 
@@ -233,6 +236,7 @@ export function attachCashflowHandlers(root, props = {}) {
       if (!txId) return;
 
       runCashflowAction(
+        apiClient,
         btn,
         `/api/future/${encodeURIComponent(txId)}/move-to-pending`,
         "cashflow-future-moved-to-pending",
@@ -246,6 +250,7 @@ export function attachCashflowHandlers(root, props = {}) {
       if (!window.confirm(t(locale, "Delete pending and recalculate?"))) return;
 
       runCashflowAction(
+        apiClient,
         btn,
         "/api/pending/recalculate",
         "cashflow-pending-recalculated"
@@ -261,6 +266,7 @@ export function attachCashflowHandlers(root, props = {}) {
       if (!txId) return;
 
       runCashflowAction(
+        apiClient,
         btn,
         `/api/pending/${encodeURIComponent(txId)}/confirm`,
         "cashflow-pending-confirmed",
@@ -303,16 +309,16 @@ export function attachCashflowHandlers(root, props = {}) {
         const url = includeOperationalSettings
           ? "/api/export/full?includeOperationalSettings=1"
           : "/api/export/full";
-        return downloadCashflowFile(url, "cashflow-full-export.json");
+        return downloadCashflowFile(apiClient, url, "cashflow-full-export.json");
       });
     });
 
     settingsForm.querySelector("[data-cashflow-download-ledger-csv]")?.addEventListener("click", (event) => {
-      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile("/api/export/confirmed-ledger.csv", "cashflow-confirmed-ledger.csv"));
+      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile(apiClient, "/api/export/confirmed-ledger.csv", "cashflow-confirmed-ledger.csv"));
     });
 
     settingsForm.querySelector("[data-cashflow-download-sample]")?.addEventListener("click", (event) => {
-      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile("/api/export/sample", "cashflow-sample-dataset.json"));
+      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile(apiClient, "/api/export/sample", "cashflow-sample-dataset.json"));
     });
 
     settingsForm.querySelector("[data-cashflow-import-full]")?.addEventListener("click", (event) => {
@@ -325,7 +331,7 @@ export function attachCashflowHandlers(root, props = {}) {
         const exportData = JSON.parse(text);
         const mode = settingsForm.querySelector("[data-cashflow-full-import-mode]")?.value || "replace";
         const includeOperationalSettings = settingsForm.querySelector("[data-cashflow-import-operational-settings]")?.checked;
-        const result = await postCashflowJson("/api/import/full", {
+        const result = await postCashflowJson(apiClient, "/api/import/full", {
           mode,
           export: exportData,
           includeOperationalSettings
@@ -345,7 +351,7 @@ export function attachCashflowHandlers(root, props = {}) {
           ? "replace"
           : "append";
         const csv = await file.text();
-        const result = await postCashflowJson("/api/import/one-offs-csv", { mode, csv });
+        const result = await postCashflowJson(apiClient, "/api/import/one-offs-csv", { mode, csv });
 
         window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
       });
@@ -355,7 +361,7 @@ export function attachCashflowHandlers(root, props = {}) {
       if (!window.confirm(t(locale, "Load sample dataset? Current data will be replaced after a safety backup."))) return;
 
       withBusyButton(event.currentTarget, "Importing...", async () => {
-        const result = await postCashflowJson("/api/import/sample");
+        const result = await postCashflowJson(apiClient, "/api/import/sample");
         window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
       });
     });

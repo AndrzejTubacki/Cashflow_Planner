@@ -1,5 +1,6 @@
 import { escapeHtml } from "../utils.js";
-import { t } from "./shared.js";
+import { SUPPORTED_FX_CURRENCIES } from "./constants.js";
+import { t, todayForCashflow } from "./shared.js";
 
 function fieldValue(item, name, fallback = "") {
   const value = item?.[name];
@@ -15,13 +16,12 @@ function checkedAttr(value, fallback = false) {
 
 function renderCurrencySelect(locale, item = {}) {
   const selected = String(item?.currency || "PLN").toUpperCase();
-  const currencies = ["PLN", "EUR", "USD", "GBP", "CHF", "CZK", "SEK", "NOK", "DKK"];
 
   return `
     <label>
       <span>${escapeHtml(t(locale, "Currency"))}</span>
       <select name="currency" required>
-        ${currencies.map(currency => `
+        ${SUPPORTED_FX_CURRENCIES.map(currency => `
           <option value="${escapeHtml(currency)}"${selected === currency ? " selected" : ""}>
             ${escapeHtml(currency)}
           </option>
@@ -112,7 +112,7 @@ function renderPredictionMinRecordedMonthsField(locale, item = {}) {
 }
 
 export function renderCashflowModalFields(locale, entityType, item = {}, cashflow = null) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayForCashflow(cashflow);
 
   const defaultPriority = fieldValue(
     item,

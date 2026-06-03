@@ -6,8 +6,10 @@ import {
   renderSetupPage,
   renderUserSelectionPage
 } from "./app/cashflow/session-pages.js";
+import { createCashflowApiClient } from "./app/cashflow/api-client.js";
 import {
   formatMessage,
+  hasPermission,
   loadLocale,
   localeOf,
   t
@@ -30,46 +32,24 @@ function selectedUserId() {
   return String(state.selectedUserId || "").trim();
 }
 
-async function cashflowFetch(url, options = {}) {
-  const headers = {
-    ...(options.headers || {})
-  };
-  const userId = selectedUserId();
+const apiClient = createCashflowApiClient({
+  getUserId: selectedUserId
+});
 
-  if (userId) {
-    headers["x-cashflow-user-id"] = userId;
-  }
-
-  return fetch(url, {
-    ...options,
-    headers
-  });
+function clearSelectedUserState() {
+  state.selectedUserId = "";
+  state.cashflow = null;
+  state.error = "";
+  state.message = "";
+  state.validationResult = null;
+  localStorage.removeItem("cashflow_user_id");
 }
 
-window.cashflowFetch = cashflowFetch;
-
-async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    ...options
-  });
-  const payload = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
+function enforceActiveTabPermissions() {
+  if (state.activeTab === "admin" && !hasPermission(state.cashflow, "admin")) {
+    state.activeTab = "ledger";
+    sessionStorage.setItem("cashflow_active_tab", "ledger");
   }
-
-  return payload;
-}
-
-async function fetchCashflowJson(url, options = {}) {
-  const response = await cashflowFetch(url, options);
-  const payload = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
-  }
-
-  return payload;
 }
 
 function render() {
@@ -94,7 +74,7 @@ function render() {
   }
 
   root.innerHTML = renderCashflowPage(state);
-  attachCashflowHandlers(root, { cashflow: state.cashflow });
+  attachCashflowHandlers(root, { apiClient, cashflow: state.cashflow });
 }
 
 async function loadUsers(messageKey = "") {
@@ -103,7 +83,7 @@ async function loadUsers(messageKey = "") {
   state.cashflow = null;
 
   try {
-    const result = await fetchJson("/api/users", { cache: "no-store" });
+    const result = await apiClient.json("/api/users", { cache: "no-store", scoped: false });
     state.users = Array.isArray(result.users) ? result.users : [];
     state.message = messageKey ? t(null, messageKey) : "";
   } catch (error) {
@@ -119,16 +99,43 @@ async function loadCashflow(messageKey = "") {
   state.validationResult = null;
 
   try {
-    state.cashflow = await fetchCashflowJson("/api", { cache: "no-store" });
+    state.cashflow = await apiClient.json("/api", { cache: "no-store" });
     const locale = localeOf(state.cashflow);
     await loadLocale(locale);
     document.documentElement.lang = locale;
+    enforceActiveTabPermissions();
     state.message = messageKey ? t(locale, messageKey) : "";
   } catch (error) {
     state.error = error.message || t(null, "Failed to load cashflow");
   }
 
   render();
+}
+
+async function resumeSelectedUser() {
+  try {
+    const result = await apiClient.json("/api/session", { cache: "no-store" });
+    const session = result?.session || {};
+
+    if (!session.authenticated || session.userId !== selectedUserId()) {
+      const error = new Error("Selected user is no longer available. Choose a user to continue.");
+      error.status = 404;
+      throw error;
+    }
+
+    await loadCashflow();
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 404) {
+      clearSelectedUserState();
+      await loadLocale("en");
+      document.documentElement.lang = "en";
+      await loadUsers("Selected user is no longer available. Choose a user to continue.");
+      return;
+    }
+
+    state.error = error.message || t(null, "Failed to load session");
+    render();
+  }
 }
 
 function attachShellHandlers() {
@@ -138,10 +145,10 @@ function attachShellHandlers() {
       if (!userId) return;
 
       try {
-        await fetchJson("/api/session/select", {
+        await apiClient.json("/api/session/select", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userId })
+          body: { userId },
+          scoped: false
         });
         state.selectedUserId = userId;
         localStorage.setItem("cashflow_user_id", userId);
@@ -158,10 +165,10 @@ function attachShellHandlers() {
     const formData = new FormData(event.currentTarget);
 
     try {
-      const result = await fetchJson("/api/users", {
+      const result = await apiClient.json("/api/users", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(Object.fromEntries(formData))
+        body: Object.fromEntries(formData),
+        scoped: false
       });
       const userId = result?.session?.userId || formData.get("userId");
       state.selectedUserId = String(userId || "").trim();
@@ -185,14 +192,14 @@ function attachShellHandlers() {
     payload.income_enabled = form.querySelector("input[name='income_enabled']")?.checked ? 1 : 0;
 
     try {
-      state.cashflow = await fetchCashflowJson("/api/setup", {
+      state.cashflow = await apiClient.json("/api/setup", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: payload
       });
       const locale = localeOf(state.cashflow);
       await loadLocale(locale);
       document.documentElement.lang = locale;
+      enforceActiveTabPermissions();
       state.message = t(locale, "Setup completed");
       state.error = "";
       render();
@@ -236,6 +243,11 @@ window.addEventListener("cashflow-error", (event) => {
   render();
 });
 
+window.addEventListener("cashflow-error-dismiss", () => {
+  state.error = "";
+  render();
+});
+
 window.addEventListener("cashflow-validated", (event) => {
   const result = event.detail || {};
   const warnings = Array.isArray(result.warnings) ? result.warnings : [];
@@ -254,10 +266,9 @@ window.addEventListener("cashflow-validated", (event) => {
 
 window.addEventListener("cashflow-settings-update", async (event) => {
   try {
-    await fetchCashflowJson("/api/settings", {
+    await apiClient.json("/api/settings", {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(event.detail || {})
+      body: event.detail || {}
     });
     await loadCashflow("Settings saved");
   } catch (error) {
@@ -268,10 +279,9 @@ window.addEventListener("cashflow-settings-update", async (event) => {
 
 window.addEventListener("cashflow-admin-options-update", async (event) => {
   try {
-    await fetchCashflowJson("/api/admin/options", {
+    await apiClient.json("/api/admin/options", {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(event.detail || {})
+      body: event.detail || {}
     });
     await loadCashflow("Global options saved");
   } catch (error) {
@@ -282,28 +292,22 @@ window.addEventListener("cashflow-admin-options-update", async (event) => {
 
 window.addEventListener("cashflow-logout", async () => {
   try {
-    await fetchCashflowJson("/api/logout", {
+    await apiClient.json("/api/logout", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
+      body: {}
     });
   } catch {
     // Logout is local for now; future auth can make this endpoint stateful.
   }
 
-  state.selectedUserId = "";
-  state.cashflow = null;
-  state.error = "";
-  state.message = "";
-  state.validationResult = null;
-  localStorage.removeItem("cashflow_user_id");
+  clearSelectedUserState();
   await loadLocale("en");
   document.documentElement.lang = "en";
   await loadUsers();
 });
 
 if (selectedUserId()) {
-  void loadCashflow();
+  void resumeSelectedUser();
 } else {
   void loadUsers();
 }

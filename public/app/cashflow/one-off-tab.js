@@ -1,9 +1,9 @@
 import { escapeHtml } from "../utils.js";
-import { renderDetailsPanel, t } from "./shared.js";
+import { renderDetailsPanel, t, todayForCashflow } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
 export function renderOneOffTab(locale, cashflow) {
-  const now = new Date().toISOString().slice(0, 10);
+  const now = todayForCashflow(cashflow);
   const confirmedOneOffIds = new Set(
     (cashflow?.confirmedTransactions || [])
       .map(tx => tx.source_one_off_id)

@@ -19,33 +19,21 @@ export function cashflowApiForEntity(entityType, id = null) {
   return id ? `${base}/${encodeURIComponent(id)}` : base;
 }
 
-export async function postCashflowJson(url, body = {}) {
-  const fetchFn = window.cashflowFetch || fetch;
-  const response = await fetchFn(url, {
+export async function postCashflowJson(apiClient, url, body = {}) {
+  return apiClient.json(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(body)
+    body
   });
-
-  const payload = await response.json().catch(() => ({}));
-
-  if (!response.ok) {
-    throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
-  }
-
-  return payload;
 }
 
-export async function runCashflowAction(button, url, eventName, body = {}) {
+export async function runCashflowAction(apiClient, button, url, eventName, body = {}) {
   const oldText = button.textContent;
 
   button.disabled = true;
   button.textContent = t(null, "Working...");
 
   try {
-    const result = await postCashflowJson(url, body);
+    const result = await postCashflowJson(apiClient, url, body);
 
     window.dispatchEvent(new CustomEvent(eventName, {
       detail: result
@@ -61,21 +49,20 @@ export async function runCashflowAction(button, url, eventName, body = {}) {
       }
     }));
 
-    alert(error.message);
   } finally {
     button.disabled = false;
     button.textContent = oldText;
   }
 }
 
-export async function validateCashflowAction(button) {
+export async function validateCashflowAction(apiClient, button) {
   const oldText = button.textContent;
 
   button.disabled = true;
   button.textContent = t(null, "Validating...");
 
   try {
-    const result = await postCashflowJson("/api/validate");
+    const result = await postCashflowJson(apiClient, "/api/validate");
 
     window.dispatchEvent(new CustomEvent("cashflow-validated", {
       detail: result
@@ -87,14 +74,13 @@ export async function validateCashflowAction(button) {
       }
     }));
 
-    alert(error.message);
   } finally {
     button.disabled = false;
     button.textContent = oldText;
   }
 }
 
-export async function deleteCashflowEntity(button, entityType, id) {
+export async function deleteCashflowEntity(apiClient, button, entityType, id) {
   if (!window.confirm(t(null, "Delete this transaction?"))) return;
 
   const oldText = button.textContent;
@@ -102,15 +88,9 @@ export async function deleteCashflowEntity(button, entityType, id) {
   button.textContent = t(null, "Working...");
 
   try {
-    const fetchFn = window.cashflowFetch || fetch;
-    const response = await fetchFn(cashflowApiForEntity(entityType, id), {
+    const payload = await apiClient.json(cashflowApiForEntity(entityType, id), {
       method: "DELETE"
     });
-    const payload = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      throw new Error(payload.error || formatMessage(null, "Request failed with status {status}", { status: response.status }));
-    }
 
     window.dispatchEvent(new CustomEvent("cashflow-deleted", {
       detail: payload
@@ -126,7 +106,6 @@ export async function deleteCashflowEntity(button, entityType, id) {
       }
     }));
 
-    alert(error.message);
   } finally {
     button.disabled = false;
     button.textContent = oldText;

@@ -190,6 +190,40 @@ async function assertModalUsesSelectedUser(page) {
   await assert.doesNotMatch(await page.locator("[data-cashflow-oneoff-tab]").textContent(), /Smoke edited one-off/);
 }
 
+async function assertActionErrorsStayInApp(page) {
+  await page.route("**/api/run-jobs", route => route.fulfill({
+    status: 500,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "Smoke action failure" })
+  }));
+
+  await page.locator("[data-cashflow-run-jobs]").click();
+  const banner = page.locator("[data-cashflow-error-banner]");
+  await banner.waitFor({ state: "visible" });
+  await assert.match(await banner.textContent(), /Smoke action failure/);
+  await page.locator("[data-cashflow-page]").waitFor({ state: "visible" });
+  await banner.locator("[data-cashflow-dismiss-error]").click();
+  await banner.waitFor({ state: "detached" });
+  await page.unroute("**/api/run-jobs");
+}
+
+async function assertInvalidRememberedUserReturnsToSelection(page) {
+  await page.evaluate(() => {
+    localStorage.setItem("cashflow_user_id", "missing-remembered-user");
+  });
+  await page.route("**/api/session", route => route.fulfill({
+    status: 404,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "User not found" })
+  }));
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator("[data-cashflow-user-selection]").waitFor({ state: "visible" });
+  await assert.match(await page.locator("[data-cashflow-user-selection]").textContent(), /Selected user is no longer available/);
+  assert.equal(await page.evaluate(() => localStorage.getItem("cashflow_user_id")), null);
+  await page.unroute("**/api/session");
+}
+
 async function runBrowserSmoke(baseUrl) {
   const executablePath = SYSTEM_CHROME_CANDIDATES.find(candidate => existsSync(candidate));
   const browser = await chromium.launch(executablePath ? { executablePath } : {});
@@ -220,7 +254,9 @@ async function runBrowserSmoke(baseUrl) {
     await assertTab(page, "flex", "[data-cashflow-flex-tab]", /Flex[\s\S]*Add flex/);
     await assertTab(page, "priority", "[data-cashflow-priority-tab]", /Operating priority[\s\S]*Goal priority/);
     await assertTab(page, "settings", "[data-cashflow-settings-tab]", /Settings[\s\S]*General[\s\S]*Currency & Exchange/);
+    await assertActionErrorsStayInApp(page);
     await assertModalUsesSelectedUser(page);
+    await assertInvalidRememberedUserReturnsToSelection(page);
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});

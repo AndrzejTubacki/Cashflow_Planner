@@ -66,6 +66,36 @@ function localeOf(cashflow = null) {
   return normalizeLocaleId(cashflow?.settings?.locale || DEFAULT_LOCALE);
 }
 
+function hasPermission(cashflow = null, permission = "") {
+  return Array.isArray(cashflow?.session?.permissions)
+    && cashflow.session.permissions.includes(permission);
+}
+
+function todayForCashflow(cashflow = null, now = new Date()) {
+  const serverToday = String(cashflow?.today || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(serverToday)) {
+    return serverToday;
+  }
+
+  const timezone = String(cashflow?.settings?.timezone || "Europe/Warsaw");
+
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(now).reduce((result, part) => {
+      result[part.type] = part.value;
+      return result;
+    }, {});
+
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  } catch {
+    return now.toISOString().slice(0, 10);
+  }
+}
+
 function formatMoney(amount, currency, locale) {
   const num = Number(amount) || 0;
   const formatted = num.toLocaleString(locale === "en" ? "en-US" : "pl-PL", {
@@ -134,15 +164,16 @@ function renderProjectionWarnings(locale, cashflow) {
   const projectionFailed = latestSnapshot && Number(latestSnapshot.generation_succeeded) === 0;
 
   const warnings = [];
+  const canAdmin = hasPermission(cashflow, "admin");
 
   if (missingFxRates.length) {
     warnings.push(`
       <div class="detail-note cashflow-warning" data-cashflow-missing-fx>
         <strong>${escapeHtml(t(locale, "Missing FX rates"))}</strong>
         <span>${escapeHtml(missingFxRates.join(", "))}</span>
-        <button type="button" class="btn-small" data-cashflow-refresh-fx>
+        ${canAdmin ? `<button type="button" class="btn-small" data-cashflow-refresh-fx>
           ${escapeHtml(t(locale, "Fetch NBP rates"))}
-        </button>
+        </button>` : ""}
       </div>
     `);
   }
@@ -152,9 +183,9 @@ function renderProjectionWarnings(locale, cashflow) {
       <div class="detail-note cashflow-warning" data-cashflow-projection-failed>
         <strong>${escapeHtml(t(locale, "Last projection failed"))}</strong>
         <span>${escapeHtml(latestSnapshot.snapshot_timestamp || "")}</span>
-        <button type="button" class="btn-small" data-cashflow-run-jobs>
+        ${canAdmin ? `<button type="button" class="btn-small" data-cashflow-run-jobs>
           ${escapeHtml(t(locale, "Regenerate"))}
-        </button>
+        </button>` : ""}
       </div>
     `);
   }
@@ -207,6 +238,7 @@ export {
   formatMoney,
   formatPercent,
   groupBy,
+  hasPermission,
   localeOf,
   loadLocale,
   renderDetailsPanel,
@@ -214,5 +246,6 @@ export {
   renderStatCard,
   renderStatusBadge,
   t,
+  todayForCashflow,
   transactionTypeLabel
 };

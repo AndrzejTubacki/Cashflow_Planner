@@ -1,13 +1,14 @@
 import { escapeHtml } from "../utils.js";
 import { renderFundingOverview } from "./funding.js";
 import { renderBudgetPeriodStats } from "./periods.js";
-import { formatMoney, groupBy, renderDetailsPanel, t } from "./shared.js";
+import { formatMoney, groupBy, hasPermission, renderDetailsPanel, t } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
 const EMPTY_VALUE = "-";
 
 export function renderLedgerTab(locale, cashflow) {
   const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
+  const canAdmin = hasPermission(cashflow, "admin");
   const pending = (cashflow?.pendingTransactions || []).map(p => ({
     ...p,
     entityType: "pending",
@@ -76,9 +77,9 @@ export function renderLedgerTab(locale, cashflow) {
       <div class="panel">
         <div class="cashflow-panel-heading">
           <h3>${escapeHtml(t(locale, "Pending"))}</h3>
-          <button type="button" class="btn-small" data-cashflow-recalculate-pending>
+          ${canAdmin ? `<button type="button" class="btn-small" data-cashflow-recalculate-pending>
             ${escapeHtml(t(locale, "Recalculate pending"))}
-          </button>
+          </button>` : ""}
         </div>
         <div data-pending-list>
           ${renderTransactionTable(pending, locale, { entityType: "pending", canConfirmPending: true })}

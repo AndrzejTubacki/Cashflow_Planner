@@ -2,16 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.js";
+import { SUPPORTED_FX_CURRENCIES as FRONTEND_CURRENCIES } from "../public/app/cashflow/constants.js";
 import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
+import { renderOneOffTab } from "../public/app/cashflow/one-off-tab.js";
+import { renderCashflowPage } from "../public/app/cashflow/page.js";
 import { renderAdminTab } from "../public/app/cashflow/admin-tab.js";
 import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
-import { loadLocale } from "../public/app/cashflow/shared.js";
+import { loadLocale, todayForCashflow } from "../public/app/cashflow/shared.js";
 import {
   renderSetupPage,
   renderUserSelectionPage
 } from "../public/app/cashflow/session-pages.js";
 import { renderGoalsTab } from "../public/app/cashflow/target-tabs.js";
 import { renderTransactionTable } from "../public/app/cashflow/transactions.js";
+import { SUPPORTED_FX_CURRENCIES as SERVER_CURRENCIES } from "../src/server/cashflow-fx-provider-utils.js";
 
 function assertNoMojibake(html) {
   assert.equal(/[\u00c4\u0102\u0139\u00e2\u00c2]/u.test(html), false, html);
@@ -59,6 +63,107 @@ test("session and setup pages render auth-ready controls", async () => {
   assert.match(setupHtml, /Complete setup/);
   assertNoMojibake(userHtml);
   assertNoMojibake(setupHtml);
+});
+
+test("frontend currency selectors share the complete server-supported list", async () => {
+  await loadLocale("en");
+  assert.deepEqual(FRONTEND_CURRENCIES, SERVER_CURRENCIES);
+
+  const setupHtml = renderSetupPage({ cashflow: { settings: {}, availableLocales: [] } });
+  const settingsHtml = renderSettingsTab("en", {
+    session: { permissions: ["admin"] },
+    settings: {},
+    recurringIncomes: []
+  });
+  const adminHtml = renderAdminTab("en", { admin: { options: {} }, availableLocales: [] });
+  const modalHtml = renderCashflowModalFields("en", "one-off", {}, { today: "2026-06-03" });
+
+  for (const currency of SERVER_CURRENCIES) {
+    const option = new RegExp(`value="${currency}"`);
+    assert.match(setupHtml, option);
+    assert.match(settingsHtml, option);
+    assert.match(adminHtml, option);
+    assert.match(modalHtml, option);
+  }
+});
+
+test("frontend date defaults and one-off classification use the profile date", async () => {
+  await loadLocale("en");
+
+  assert.equal(todayForCashflow({ today: "2030-01-02" }), "2030-01-02");
+  assert.equal(
+    todayForCashflow(
+      { settings: { timezone: "America/New_York" } },
+      new Date("2026-05-20T02:59:00Z")
+    ),
+    "2026-05-19"
+  );
+
+  const cashflow = {
+    today: "2030-01-02",
+    settings: { timezone: "UTC" },
+    oneOffs: [
+      { id: "past", name: "Past item", type: "expense", amount: 1, currency: "PLN", date: "2030-01-01" },
+      { id: "today", name: "Today item", type: "expense", amount: 1, currency: "PLN", date: "2030-01-02" }
+    ]
+  };
+  const oneOffModal = renderCashflowModalFields("en", "one-off", {}, cashflow);
+  const goalModal = renderCashflowModalFields("en", "goal", {}, cashflow);
+  const oneOffTab = renderOneOffTab("en", cashflow);
+
+  assert.match(oneOffModal, /name="date" type="date" value="2030-01-02"/);
+  assert.match(goalModal, /name="due_date" type="date" value="2030-01-02"/);
+  assert.ok(oneOffTab.indexOf("Today item") < oneOffTab.indexOf("Past item"));
+});
+
+test("page keeps transient errors visible and hides admin controls for non-admin users", async () => {
+  await loadLocale("en");
+  const cashflow = {
+    today: "2026-06-03",
+    session: { userId: "regular", permissions: [] },
+    settings: { locale: "en", ledger_currency: "PLN" },
+    pendingTransactions: [],
+    confirmedTransactions: [],
+    futureTransactions: [],
+    periodSummaries: [],
+    missingFxRates: ["EUR"],
+    latestProjectionSnapshot: {
+      generation_succeeded: 0,
+      snapshot_timestamp: "2026-06-03T00:00:00.000Z"
+    }
+  };
+
+  const html = renderCashflowPage({
+    cashflow,
+    activeTab: "admin",
+    error: "Action failed"
+  });
+
+  assert.match(html, /data-cashflow-error-banner/);
+  assert.match(html, /data-cashflow-dismiss-error/);
+  assert.match(html, /data-cashflow-ledger-tab/);
+  assert.doesNotMatch(html, /data-cashflow-tab="admin"/);
+  assert.doesNotMatch(html, /data-cashflow-refresh-fx/);
+  assert.doesNotMatch(html, /data-cashflow-validate/);
+  assert.doesNotMatch(html, /data-cashflow-run-jobs/);
+  assert.doesNotMatch(html, /data-cashflow-recalculate-pending/);
+
+  const fatal = renderCashflowPage({ cashflow: null, error: "Load failed" });
+  assert.match(fatal, /data-cashflow-logout/);
+  assert.match(fatal, /Return to user selection/);
+
+  const adminHtml = renderCashflowPage({
+    cashflow: {
+      ...cashflow,
+      session: { userId: "admin", permissions: ["admin"] }
+    },
+    activeTab: "ledger"
+  });
+  assert.match(adminHtml, /data-cashflow-tab="admin"/);
+  assert.match(adminHtml, /data-cashflow-refresh-fx/);
+  assert.match(adminHtml, /data-cashflow-validate/);
+  assert.match(adminHtml, /data-cashflow-run-jobs/);
+  assert.match(adminHtml, /data-cashflow-recalculate-pending/);
 });
 
 test("admin tab renders global options controls", async () => {
@@ -234,6 +339,9 @@ test("ledger future rows can move to pending from every generated period", async
   await loadLocale("en");
 
   const html = renderLedgerTab("en", {
+    session: {
+      permissions: ["admin"]
+    },
     pendingTransactions: [],
     confirmedTransactions: [],
     periodSummaries: [

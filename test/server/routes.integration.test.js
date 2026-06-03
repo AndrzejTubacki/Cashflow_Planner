@@ -68,6 +68,8 @@ test("x-cashflow-user-id selects isolated user data", async () => withHarness(as
   assert.equal(localUser.body.oneOffs.length, 1);
   assert.equal(otherUser.body.oneOffs.length, 0);
   assert.equal(otherUser.body.settings.ledger_currency, "PLN");
+  assert.equal(otherUser.body.today, "2026-05-20");
+  assert.equal(localUser.body.today, "2026-05-20");
 }));
 
 test("read routes reject unknown users without creating profile data", async () => {

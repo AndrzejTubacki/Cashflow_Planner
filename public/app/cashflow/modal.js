@@ -165,7 +165,7 @@ export function closeCashflowModal() {
   document.querySelector("[data-cashflow-modal-root]")?.remove();
 }
 
-export function openCashflowModal({ cashflow, entityType, action = "create", id = null }) {
+export function openCashflowModal({ apiClient, cashflow, entityType, action = "create", id = null }) {
   const locale = localeOf(cashflow);
   const item = action === "edit" ? findCashflowEntity(cashflow, entityType, id) : {};
 
@@ -232,21 +232,10 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
       const payload = coerceCashflowModalPayload(entityType, form);
       const url = cashflowApiForEntity(entityType, action === "edit" ? id : null);
       const method = action === "edit" ? "PUT" : "POST";
-      const fetchFn = window.cashflowFetch || fetch;
-
-      const response = await fetchFn(url, {
+      const body = await apiClient.json(url, {
         method,
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
+        body: payload
       });
-
-      const body = await response.json().catch(() => ({}));
-
-      if (!response.ok) {
-        throw new Error(body.error || formatMessage(locale, "Request failed with status {status}", { status: response.status }));
-      }
 
       closeCashflowModal();
 

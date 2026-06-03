@@ -1,5 +1,6 @@
 import { escapeHtml } from "../utils.js";
-import { t } from "./shared.js";
+import { SUPPORTED_FX_CURRENCIES } from "./constants.js";
+import { hasPermission, t } from "./shared.js";
 
 const FX_PROVIDER_OPTIONS = [
   { id: "disabled", labelKey: "Disabled", noteKey: "Only ledger-currency transactions can project without supplied rates." },
@@ -8,11 +9,6 @@ const FX_PROVIDER_OPTIONS = [
   { id: "frankfurter", labelKey: "Frankfurter", noteKey: "ECB-backed rates for major currencies." }
 ];
 
-const SUPPORTED_FX_CURRENCIES = [
-  "AUD", "BGN", "BRL", "CAD", "CHF", "CNY", "CZK", "DKK", "EUR", "GBP",
-  "HKD", "HUF", "IDR", "ILS", "INR", "ISK", "JPY", "KRW", "MXN", "MYR",
-  "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TRY", "USD", "ZAR"
-];
 const DEFAULT_TIMEZONE = "Europe/Warsaw";
 const HOLIDAY_COUNTRIES = [
   { code: "PL", labelKey: "Poland" },
@@ -147,6 +143,7 @@ export function renderSettingsTab(locale, cashflow) {
     ? storedFxCurrencies.filter(currency => currency !== ledgerCurrency)
     : observedForeignCurrencies(cashflow, ledgerCurrency);
   const manualFxRates = parseObjectSetting(settings.manual_fx_rates);
+  const canAdmin = hasPermission(cashflow, "admin");
 
   const priorityLabels = {
     min: "Min",
@@ -251,11 +248,11 @@ export function renderSettingsTab(locale, cashflow) {
     ${renderFxCurrencySelector(locale, selectedFxCurrencies, ledgerCurrency)}
     ${renderManualFxRates(locale, selectedFxCurrencies, manualFxRates, ledgerCurrency)}
 
-    <div class="cashflow-tab-actions">
+    ${canAdmin ? `<div class="cashflow-tab-actions">
       <button type="button" class="btn-small" data-cashflow-refresh-fx>
         ${escapeHtml(t(locale, "Refresh FX rates"))}
       </button>
-    </div>
+    </div>` : ""}
   `;
 
   const budgetPeriod = `

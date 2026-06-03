@@ -15,6 +15,7 @@ import {
 } from "./target-tabs.js";
 import {
   formatMessage,
+  hasPermission,
   localeOf,
   renderProjectionWarnings,
   t
@@ -168,12 +169,15 @@ function renderCashflowPageContent({
 }) {
   const locale = localeOf(cashflow);
 
-  if (error) {
+  if (error && !cashflow) {
     return `
       <div class="cashflow-page" data-cashflow-page>
         <div class="empty-state">
           <h2>${escapeHtml(t(locale, "Error"))}</h2>
           <p>${escapeHtml(error)}</p>
+          <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-logout>
+            ${escapeHtml(t(locale, "Return to user selection"))}
+          </button>
         </div>
       </div>
     `;
@@ -189,7 +193,8 @@ function renderCashflowPageContent({
     { id: "priority", label: t(locale, "Priorities") },
     { id: "settings", label: t(locale, "Settings") }
   ];
-  const canAdmin = Array.isArray(cashflow?.session?.permissions) && cashflow.session.permissions.includes("admin");
+  const canAdmin = hasPermission(cashflow, "admin");
+  const effectiveActiveTab = activeTab === "admin" && !canAdmin ? "ledger" : activeTab;
 
   if (canAdmin) {
     tabs.push({ id: "admin", label: t(locale, "Admin") });
@@ -218,7 +223,7 @@ function renderCashflowPageContent({
               ${escapeHtml(t(locale, "User"))}: <strong>${escapeHtml(cashflow.session.displayName || cashflow.session.userId)}</strong>
             </span>
           ` : ""}
-          <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
+          ${canAdmin ? `<button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
             ${escapeHtml(t(locale, "Refresh FX"))}
           </button>
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-validate>
@@ -226,13 +231,21 @@ function renderCashflowPageContent({
           </button>
           <button type="button" class="cashflow-action cashflow-action--primary" data-cashflow-run-jobs>
             ${escapeHtml(t(locale, "Regenerate"))}
-          </button>
+          </button>` : ""}
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-logout>
             ${escapeHtml(t(locale, "Logout"))}
           </button>
         </div>
       </div>
 
+      ${error ? `
+        <div class="cashflow-notice cashflow-notice--error" data-cashflow-error-banner role="alert">
+          <span>${escapeHtml(error)}</span>
+          <button type="button" class="btn-small" data-cashflow-dismiss-error>
+            ${escapeHtml(t(locale, "Dismiss"))}
+          </button>
+        </div>
+      ` : ""}
       ${message ? `<div class="detail-note">${escapeHtml(message)}</div>` : ""}
       ${renderValidationResult(locale, validationResult)}
       ${renderProjectionWarnings(locale, cashflow)}
@@ -240,22 +253,22 @@ function renderCashflowPageContent({
       <div class="cashflow-tabs" data-cashflow-tabs>
         <div class="tab-buttons">
           ${tabs.map(tab => `
-            <button class="tab-button${activeTab === tab.id ? " active" : ""}" data-cashflow-tab="${tab.id}">
+            <button class="tab-button${effectiveActiveTab === tab.id ? " active" : ""}" data-cashflow-tab="${tab.id}">
               ${escapeHtml(tab.label)}
             </button>
           `).join("")}
         </div>
 
         <div class="tab-content">
-          ${activeTab === "ledger" ? renderLedgerTab(locale, cashflow) : ""}
-          ${activeTab === "recurring" ? renderRecurringExpensesTab(locale, cashflow) : ""}
-          ${activeTab === "income" ? renderRecurringIncomeTab(locale, cashflow) : ""}
-          ${activeTab === "oneoff" ? renderOneOffTab(locale, cashflow) : ""}
-          ${activeTab === "goals" ? renderGoalsTab(locale, cashflow) : ""}
-          ${activeTab === "flex" ? renderFlexTab(locale, cashflow) : ""}
-          ${activeTab === "priority" ? renderPriorityTab(locale, cashflow) : ""}
-          ${activeTab === "settings" ? renderSettingsTab(locale, cashflow) : ""}
-          ${activeTab === "admin" && canAdmin ? renderAdminTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "ledger" ? renderLedgerTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "recurring" ? renderRecurringExpensesTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "income" ? renderRecurringIncomeTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "oneoff" ? renderOneOffTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "goals" ? renderGoalsTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "flex" ? renderFlexTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "priority" ? renderPriorityTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "settings" ? renderSettingsTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "admin" && canAdmin ? renderAdminTab(locale, cashflow) : ""}
         </div>
       </div>
     </div>

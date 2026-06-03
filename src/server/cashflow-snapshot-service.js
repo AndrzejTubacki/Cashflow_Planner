@@ -404,6 +404,7 @@ export function createCashflowSnapshotService({
       `).get();
 
       return {
+        today,
         settings: {
           ...(settings || {}),
           ledger_currency: ledgerCurrency,
