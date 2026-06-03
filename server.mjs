@@ -16,6 +16,7 @@ const port = Number(process.env.PORT || 3000);
 const dataDir = process.env.DATA_DIR || path.join(__dirname, "data");
 const logsDir = process.env.LOGS_DIR || path.join(__dirname, "logs");
 const logTimezone = normalizeTimezone(process.env.CASHFLOW_LOG_TIMEZONE || DEFAULT_TIMEZONE);
+const jsonLimit = process.env.CASHFLOW_JSON_LIMIT || "10mb";
 const publicDir = path.join(__dirname, "public");
 const localeDir = path.join(publicDir, "app", "cashflow", "locales");
 const startedAt = new Date();
@@ -118,7 +119,7 @@ try {
 
 const app = express();
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: jsonLimit }));
 app.use(express.urlencoded({ extended: true }));
 
 let createCashflowModule;

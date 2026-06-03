@@ -714,7 +714,9 @@ export function registerCashflowRoutes(app, {
     app.get("/api/export/full", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        const exported = exportFullData(userId, appVersion);
+        const includeOperationalSettings = req.query.includeOperationalSettings === "1"
+          || req.query.includeOperationalSettings === "true";
+        const exported = exportFullData(userId, appVersion, { includeOperationalSettings });
         const fileName = `cashflow-${userId}-full-export.json`;
 
         res.setHeader("Content-Type", "application/json");
@@ -728,7 +730,12 @@ export function registerCashflowRoutes(app, {
     app.post("/api/import/full", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        const result = importFullData(userId, req.body?.export || req.body, req.body?.mode || "replace");
+        const result = importFullData(
+          userId,
+          req.body?.export || req.body,
+          req.body?.mode || "replace",
+          { includeOperationalSettings: Boolean(req.body?.includeOperationalSettings) }
+        );
         res.json({
           ...getSnapshot(userId),
           import: result

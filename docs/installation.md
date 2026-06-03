@@ -61,6 +61,7 @@ Environment variables:
 | `CASHFLOW_HTTP_PORT` | `3000` | Host port used by the Compose example |
 | `DATA_DIR` | `./data` | SQLite/runtime data directory for non-container process managers |
 | `LOGS_DIR` | `./logs` | Log directory for non-container process managers |
+| `CASHFLOW_JSON_LIMIT` | `10mb` | Maximum JSON request body size, used by full JSON import/export tooling |
 | `CASHFLOW_LOG_TIMEZONE` | `Europe/Warsaw` | Timezone used for server log timestamps |
 
 Use `.env.example` as a deployment reference.

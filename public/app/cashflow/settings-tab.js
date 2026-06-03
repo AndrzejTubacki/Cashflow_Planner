@@ -322,6 +322,11 @@ export function renderSettingsTab(locale, cashflow) {
       </button>
     </div>
 
+    <label class="cashflow-checkbox">
+      <input type="checkbox" data-cashflow-export-operational-settings>
+      <span>${escapeHtml(t(locale, "Include operational settings in full export"))}</span>
+    </label>
+
     <label>
       <span>${escapeHtml(t(locale, "Full import file"))}</span>
       <input type="file" accept="application/json,.json" data-cashflow-full-import-file>
@@ -333,6 +338,11 @@ export function renderSettingsTab(locale, cashflow) {
         <option value="replace">${escapeHtml(t(locale, "Replace after backup"))}</option>
         <option value="merge">${escapeHtml(t(locale, "Merge"))}</option>
       </select>
+    </label>
+
+    <label class="cashflow-checkbox">
+      <input type="checkbox" data-cashflow-import-operational-settings>
+      <span>${escapeHtml(t(locale, "Include operational settings during full import"))}</span>
     </label>
 
     <div class="cashflow-tab-actions">

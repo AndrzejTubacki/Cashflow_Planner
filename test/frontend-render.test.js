@@ -124,7 +124,9 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
   assert.match(html, /name="minimum_reserve_enabled"/);
   assert.match(html, /name="minimum_reserve_amount" value="250"/);
   assert.match(html, /data-cashflow-download-full-export/);
+  assert.match(html, /data-cashflow-export-operational-settings/);
   assert.match(html, /data-cashflow-import-full/);
+  assert.match(html, /data-cashflow-import-operational-settings/);
   assert.match(html, /data-cashflow-import-oneoff-csv/);
   assert.match(html, /data-cashflow-download-ledger-csv/);
   assert.match(html, /data-cashflow-download-sample/);

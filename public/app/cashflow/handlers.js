@@ -298,7 +298,13 @@ export function attachCashflowHandlers(root, props = {}) {
     syncManualFxRateRows(settingsForm, locale);
 
     settingsForm.querySelector("[data-cashflow-download-full-export]")?.addEventListener("click", (event) => {
-      withBusyButton(event.currentTarget, "Working...", () => downloadCashflowFile("/api/export/full", "cashflow-full-export.json"));
+      withBusyButton(event.currentTarget, "Working...", () => {
+        const includeOperationalSettings = settingsForm.querySelector("[data-cashflow-export-operational-settings]")?.checked;
+        const url = includeOperationalSettings
+          ? "/api/export/full?includeOperationalSettings=1"
+          : "/api/export/full";
+        return downloadCashflowFile(url, "cashflow-full-export.json");
+      });
     });
 
     settingsForm.querySelector("[data-cashflow-download-ledger-csv]")?.addEventListener("click", (event) => {
@@ -318,7 +324,12 @@ export function attachCashflowHandlers(root, props = {}) {
         const text = await file.text();
         const exportData = JSON.parse(text);
         const mode = settingsForm.querySelector("[data-cashflow-full-import-mode]")?.value || "replace";
-        const result = await postCashflowJson("/api/import/full", { mode, export: exportData });
+        const includeOperationalSettings = settingsForm.querySelector("[data-cashflow-import-operational-settings]")?.checked;
+        const result = await postCashflowJson("/api/import/full", {
+          mode,
+          export: exportData,
+          includeOperationalSettings
+        });
 
         window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
       });

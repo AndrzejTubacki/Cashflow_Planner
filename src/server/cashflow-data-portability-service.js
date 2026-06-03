@@ -57,6 +57,35 @@ const ID_TABLES = [
 ];
 
 const ONE_OFF_CSV_COLUMNS = ["name", "type", "amount", "currency", "date"];
+const OPERATIONAL_SETTINGS_COLUMNS = new Set([
+  "backup_location",
+  "auto_backup_enabled",
+  "backup_interval_minutes",
+  "backup_retention_count",
+  "ntfy_url",
+  "notification_delivery_time",
+  "notify_goal_impossible",
+  "notify_necessary_underfunded",
+  "notify_funding_shortfall",
+  "notify_income_missing",
+  "notify_pending_summary",
+  "notify_goal_funded",
+  "notify_fx_changed",
+  "ntfy_priority_goal_impossible",
+  "ntfy_priority_necessary_underfunded",
+  "ntfy_priority_funding_shortfall",
+  "ntfy_priority_income_missing",
+  "ntfy_priority_pending_summary",
+  "ntfy_priority_goal_funded",
+  "ntfy_priority_fx_changed",
+  "necessary_underfunded_repeat_days"
+]);
+
+const SETTINGS_COMPAT_DEFAULTS = {
+  holiday_country: "PL",
+  minimum_reserve_enabled: 0,
+  minimum_reserve_amount: 0
+};
 
 function tableColumns(db, tableName) {
   return db.prepare(`PRAGMA table_info(${tableName})`).all().map(col => col.name);
@@ -94,10 +123,11 @@ function csvEscape(value) {
   return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
-function parseCsvLine(line) {
+function parseCsvLine(line, rowNumber = 1) {
   const values = [];
   let current = "";
   let inQuotes = false;
+  let quoteClosed = false;
 
   for (let i = 0; i < line.length; i += 1) {
     const char = line[i];
@@ -106,15 +136,29 @@ function parseCsvLine(line) {
       if (inQuotes && line[i + 1] === "\"") {
         current += "\"";
         i += 1;
+      } else if (inQuotes) {
+        inQuotes = false;
+        quoteClosed = true;
+      } else if (current === "") {
+        inQuotes = true;
+        quoteClosed = false;
       } else {
-        inQuotes = !inQuotes;
+        throw badRequest("CSV row has malformed quotes", [{ row: rowNumber, field: null, reason: "malformed_quotes" }]);
       }
     } else if (char === "," && !inQuotes) {
       values.push(current);
       current = "";
+      quoteClosed = false;
     } else {
+      if (quoteClosed) {
+        throw badRequest("CSV row has malformed quotes", [{ row: rowNumber, field: null, reason: "unexpected_character_after_quote" }]);
+      }
       current += char;
     }
+  }
+
+  if (inQuotes) {
+    throw badRequest("CSV row has malformed quotes", [{ row: rowNumber, field: null, reason: "unterminated_quote" }]);
   }
 
   values.push(current);
@@ -131,15 +175,31 @@ function parseCsv(text) {
     throw badRequest("CSV file is empty");
   }
 
-  const headers = parseCsvLine(lines[0]).map(header => header.trim().toLowerCase());
-  const missing = ONE_OFF_CSV_COLUMNS.filter(column => !headers.includes(column));
+  const headers = parseCsvLine(lines[0], 1).map(header => header.trim().toLowerCase());
 
-  if (missing.length) {
-    throw badRequest(`CSV is missing required columns: ${missing.join(", ")}`);
+  if (headers.length !== ONE_OFF_CSV_COLUMNS.length || headers.some((header, index) => header !== ONE_OFF_CSV_COLUMNS[index])) {
+    const details = [];
+    const missing = ONE_OFF_CSV_COLUMNS.filter(column => !headers.includes(column));
+    const unexpected = headers.filter(column => !ONE_OFF_CSV_COLUMNS.includes(column));
+
+    for (const column of missing) details.push({ row: 1, field: column, reason: "missing_column" });
+    for (const column of unexpected) details.push({ row: 1, field: column, reason: "unexpected_column" });
+    if (!details.length) details.push({ row: 1, field: null, reason: "columns_must_be_exactly_name_type_amount_currency_date" });
+
+    throw badRequest("CSV columns must be exactly: name,type,amount,currency,date", details);
   }
 
   return lines.slice(1).map((line, index) => {
-    const values = parseCsvLine(line);
+    const rowNumber = index + 2;
+    const values = parseCsvLine(line, rowNumber);
+    if (values.length !== headers.length) {
+      throw badRequest("CSV row has the wrong number of columns", [{
+        row: rowNumber,
+        field: null,
+        reason: "column_count_mismatch"
+      }]);
+    }
+
     const row = {};
 
     headers.forEach((header, valueIndex) => {
@@ -156,20 +216,45 @@ function parseCsv(text) {
 function normalizeCsvOneOff({ rowNumber, row }, generateId) {
   const name = String(row.name || "").trim();
   const type = String(row.type || "").trim().toLowerCase();
-  const amount = Number(row.amount);
-  const currency = requireSupportedCurrency(row.currency || "PLN");
-  const date = requireIsoDate(row.date || "", `CSV row ${rowNumber} date`);
+  const details = [];
+  const amountText = String(row.amount ?? "").trim();
+  let amount = null;
+  let currency = null;
+  let date = null;
 
   if (!name) {
-    throw badRequest(`CSV row ${rowNumber} is missing name`);
+    details.push({ row: rowNumber, field: "name", reason: "required" });
   }
 
   if (!["income", "expense"].includes(type)) {
-    throw badRequest(`CSV row ${rowNumber} has invalid type`);
+    details.push({ row: rowNumber, field: "type", reason: "must_be_income_or_expense" });
   }
 
-  if (!Number.isFinite(amount) || amount < 0) {
-    throw badRequest(`CSV row ${rowNumber} has invalid amount`);
+  if (!amountText) {
+    details.push({ row: rowNumber, field: "amount", reason: "required" });
+  } else {
+    amount = Number(amountText);
+    if (!Number.isFinite(amount)) {
+      details.push({ row: rowNumber, field: "amount", reason: "must_be_numeric" });
+    } else if (amount < 0) {
+      details.push({ row: rowNumber, field: "amount", reason: "must_be_non_negative" });
+    }
+  }
+
+  try {
+    currency = requireSupportedCurrency(row.currency || "", `CSV row ${rowNumber} currency`);
+  } catch {
+    details.push({ row: rowNumber, field: "currency", reason: "unsupported_currency" });
+  }
+
+  try {
+    date = requireIsoDate(row.date || "", `CSV row ${rowNumber} date`);
+  } catch {
+    details.push({ row: rowNumber, field: "date", reason: "invalid_date" });
+  }
+
+  if (details.length) {
+    throw badRequest(`CSV row ${rowNumber} is invalid`, details);
   }
 
   return {
@@ -180,6 +265,74 @@ function normalizeCsvOneOff({ rowNumber, row }, generateId) {
     type,
     date
   };
+}
+
+function cloneExportData(exportData) {
+  return JSON.parse(JSON.stringify(exportData));
+}
+
+function stripOperationalSettings(settingsRow) {
+  const next = { ...settingsRow };
+  for (const column of OPERATIONAL_SETTINGS_COLUMNS) {
+    delete next[column];
+  }
+  return next;
+}
+
+function hasFunctionalRows(exportData) {
+  const planning = exportData?.planning || {};
+  const functionalTables = [
+    "planned_transactions",
+    "recurring_expenses",
+    "recurring_incomes",
+    "flex_transactions",
+    "goals",
+    "one_off_transactions",
+    "pending_transactions"
+  ];
+
+  return functionalTables.some(tableName => (planning[tableName] || []).length > 0)
+    || Object.values(exportData?.ledgers || {}).some(rows => Array.isArray(rows) && rows.length > 0);
+}
+
+function prepareExportDataForImport(exportData, { includeOperationalSettings = false } = {}) {
+  const prepared = cloneExportData(exportData);
+  const settings = { ...(prepared.planning.settings[0] || {}) };
+  const hasData = hasFunctionalRows(prepared);
+  const setupTimestamp = prepared.exportedAt || new Date().toISOString();
+
+  for (const [key, value] of Object.entries(SETTINGS_COMPAT_DEFAULTS)) {
+    if (settings[key] === undefined || settings[key] === null || settings[key] === "") {
+      settings[key] = value;
+    }
+  }
+
+  if (settings.setup_completed === undefined || settings.setup_completed === null) {
+    settings.setup_completed = hasData ? 1 : 0;
+  }
+
+  if (Number(settings.setup_completed) === 1 && !settings.setup_completed_at) {
+    settings.setup_completed_at = setupTimestamp;
+  }
+
+  if (!settings.updated_at) {
+    settings.updated_at = setupTimestamp;
+  }
+
+  prepared.planning.settings = [includeOperationalSettings ? settings : stripOperationalSettings(settings)];
+  return prepared;
+}
+
+function wrapRolledBackError(error, safetyBackup) {
+  const wrapped = new Error(`Import failed and was rolled back from safety backup ${safetyBackup}: ${error.message}`);
+  const message = String(error?.message || "");
+  wrapped.status = Number(error?.status) || (message.includes("FOREIGN KEY constraint failed") ? 400 : 500);
+  if (!error?.details && message.includes("FOREIGN KEY constraint failed")) {
+    wrapped.details = [{ row: null, field: null, reason: "foreign_key_constraint_failed" }];
+  }
+  if (error?.details) wrapped.details = error.details;
+  if (error?.conflicts) wrapped.conflicts = error.conflicts;
+  return wrapped;
 }
 
 function normalizeExportPayload(payload) {
@@ -312,6 +465,8 @@ function sampleExport() {
         ntfy_priority_goal_funded: "default",
         ntfy_priority_fx_changed: "default",
         necessary_underfunded_repeat_days: 1,
+        setup_completed: 1,
+        setup_completed_at: now,
         updated_at: now
       }],
       fx_rates_cache: [{
@@ -486,13 +641,17 @@ export function createCashflowDataPortabilityService({
   regenerateProjectionsAfterMutation,
   restoreBackupFromPath
 }) {
-  function exportFullData(userId, appVersion = "0.0.0") {
+  function exportFullData(userId, appVersion = "0.0.0", options = {}) {
+    const includeOperationalSettings = Boolean(options.includeOperationalSettings);
     const db = openPlanningDb(userId);
     const planning = {};
 
     try {
       for (const tableName of PLANNING_EXPORT_TABLES) {
         planning[tableName] = selectRows(db, tableName);
+      }
+      if (!includeOperationalSettings) {
+        planning.settings = planning.settings.map(stripOperationalSettings);
       }
     } finally {
       db.close();
@@ -515,6 +674,7 @@ export function createCashflowDataPortabilityService({
       appVersion,
       exportedAt: new Date().toISOString(),
       userId,
+      operationalSettingsIncluded: includeOperationalSettings,
       planning,
       ledgers
     };
@@ -685,8 +845,11 @@ export function createCashflowDataPortabilityService({
     }
   }
 
-  function importFullData(userId, payload, mode = "replace") {
-    const exportData = normalizeExportPayload(payload);
+  function importFullData(userId, payload, mode = "replace", options = {}) {
+    const exportData = prepareExportDataForImport(
+      normalizeExportPayload(payload),
+      { includeOperationalSettings: Boolean(options.includeOperationalSettings) }
+    );
     const normalizedMode = mode === "merge" ? "merge" : "replace";
 
     if (normalizedMode === "merge") {
@@ -698,18 +861,26 @@ export function createCashflowDataPortabilityService({
         throw error;
       }
 
-      mergePlanningData(userId, exportData);
-      mergeLedgerData(userId, exportData);
-      recalculateLedgerRunningBalance(userId);
-      const projection = regenerateProjectionsAfterMutation(userId);
+      const safetyBackup = createBackup(userId);
 
-      return {
-        ok: true,
-        mode: normalizedMode,
-        importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings"),
-        importedLedgerYears: Object.keys(exportData.ledgers),
-        _projection: projection
-      };
+      try {
+        mergePlanningData(userId, exportData);
+        mergeLedgerData(userId, exportData);
+        recalculateLedgerRunningBalance(userId);
+        const projection = regenerateProjectionsAfterMutation(userId);
+
+        return {
+          ok: true,
+          mode: normalizedMode,
+          safetyBackup,
+          importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings"),
+          importedLedgerYears: Object.keys(exportData.ledgers),
+          _projection: projection
+        };
+      } catch (error) {
+        restoreBackupFromPath(userId, safetyBackup);
+        throw wrapRolledBackError(error, safetyBackup);
+      }
     }
 
     const safetyBackup = createBackup(userId);
@@ -729,7 +900,7 @@ export function createCashflowDataPortabilityService({
       };
     } catch (error) {
       restoreBackupFromPath(userId, safetyBackup);
-      throw new Error(`Import failed and was rolled back from safety backup ${safetyBackup}: ${error.message}`);
+      throw wrapRolledBackError(error, safetyBackup);
     }
   }
 

@@ -83,17 +83,29 @@ settings, FX rates, planned transactions, pending rows, and confirmed ledger
 rows. Generated future projections are not exported because Cashflow rebuilds
 them after import.
 
-Full export currently includes the full Settings row. Treat export files as
-private data because settings may contain deployment-specific values such as
-notification URLs, backup locations, and backup/notification toggles.
+By default, full JSON export includes functional planner settings only.
+Deployment-specific settings such as backup locations, auto-backup options,
+notification URLs, notification toggles, notification priorities, and notification
+repeat timing are omitted. Use **Include operational settings** only when you
+intend to move those private deployment settings too.
 
 Full JSON import supports:
 
 - `replace`: creates a safety backup, replaces current functional data,
   recalculates ledger balances, regenerates projections, and rolls back on
   failure
-- `merge`: appends imported rows when there are no ID conflicts; current
-  settings are preserved
+- `merge`: creates a safety backup, appends imported rows when there are no ID
+  conflicts, recalculates ledger balances, regenerates projections, and rolls
+  back on failure
+
+Full import ignores operational settings by default, even when the export file
+contains them. Enable **Include operational settings** during import only when
+restoring into the same trusted deployment or intentionally copying those
+settings.
+
+Full import also accepts older export files that do not contain newer setup,
+holiday-country, or reserve fields. Cashflow fills current defaults and marks
+the profile setup complete when the import contains planner or ledger data.
 
 One-off CSV import uses strict columns:
 
@@ -102,12 +114,54 @@ name,type,amount,currency,date
 ```
 
 `type` must be `income` or `expense`, `amount` must be non-negative, and `date`
-must use `YYYY-MM-DD`.
+must use a real `YYYY-MM-DD` date. Missing columns, unexpected columns, malformed
+quotes, blank amounts, unsupported currencies, negative amounts, invalid types,
+wrong column counts, and impossible dates are rejected.
 
 Confirmed ledger CSV export downloads all confirmed rows across ledger years.
 
 The sample dataset is fictitious demo data. Downloading it does not change user
 data. Loading it replaces the current user data after a safety backup.
+
+Large full imports use the server JSON request limit. The default is `10mb`; set
+`CASHFLOW_JSON_LIMIT` when your deployment needs a larger limit.
+
+Recommended import drill:
+
+1. Download a full export from the source profile.
+2. Download a second full export from the target profile as a manual safety copy.
+3. Import with `replace` or `merge`.
+4. Confirm the import response is successful.
+5. Refresh the app and verify Settings, pending rows, confirmed ledger rows, and
+   summary balances.
+6. Run `/api/validate` from an admin session.
+
+Recommended sample-load drill:
+
+1. Download a full export from the current profile.
+2. Click **Load sample dataset**.
+3. Confirm sample rows appear and first-run setup does not reappear.
+4. Restore your saved export with `replace` when finished.
+
+Recommended backup/restore drill:
+
+1. Create or download a backup before the test.
+2. Make a small reversible change.
+3. Restore the backup.
+4. Verify `/healthz`, `/api/system`, `/api`, Settings, and a confirmed ledger
+   row.
+
+Live verification should use an isolated profile, not `local`. For example:
+
+```sh
+curl https://cashflow.example.com/healthz
+curl https://cashflow.example.com/api/system
+curl -H 'x-cashflow-user-id: codex-portability-smoke' https://cashflow.example.com/api/session
+```
+
+When files are synced to a live host, wait for the sync window, restart the
+backend through the deployment restart endpoint, and verify only with the
+isolated profile.
 
 ## Verification
 

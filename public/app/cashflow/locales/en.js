@@ -84,6 +84,8 @@ export default {
     "Inactive": "Inactive",
     "Import full export": "Import full export",
     "Import one-off CSV": "Import one-off CSV",
+    "Include operational settings during full import": "Include operational settings during full import",
+    "Include operational settings in full export": "Include operational settings in full export",
     "Importing...": "Importing...",
     "Language": "Language",
     "Last projection failed": "Last projection failed",

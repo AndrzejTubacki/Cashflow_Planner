@@ -84,6 +84,8 @@ export default {
     "Inactive": "Nieaktywne",
     "Import full export": "Importuj pełny eksport",
     "Import one-off CSV": "Importuj CSV jednorazowych",
+    "Include operational settings during full import": "Uwzględnij ustawienia operacyjne podczas pełnego importu",
+    "Include operational settings in full export": "Uwzględnij ustawienia operacyjne w pełnym eksporcie",
     "Importing...": "Importuję...",
     "Language": "Język",
     "Last projection failed": "Ostatnia projekcja nie powiodła się",

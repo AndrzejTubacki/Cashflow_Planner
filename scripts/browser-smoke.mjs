@@ -147,6 +147,14 @@ async function openOneOffFutureSection(page) {
   });
 }
 
+async function waitForOneOffRow(page, text) {
+  const row = page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: text });
+  await row.waitFor({ state: "attached" });
+  await openOneOffFutureSection(page);
+  await row.waitFor({ state: "visible" });
+  return row;
+}
+
 async function assertModalUsesSelectedUser(page) {
   const smokeUserId = `browser_smoke_${Date.now()}`;
 
@@ -165,15 +173,13 @@ async function assertModalUsesSelectedUser(page) {
   await page.locator("[data-cashflow-modal-form] input[name='date']").fill("2099-01-15");
   await page.locator("[data-cashflow-modal-form] button[type='submit']").click();
   await page.locator("[data-cashflow-modal-root]").waitFor({ state: "detached" });
-  await openOneOffFutureSection(page);
-  await page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: "Smoke modal one-off" }).waitFor({ state: "visible" });
+  await waitForOneOffRow(page, "Smoke modal one-off");
 
   await page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: "Smoke modal one-off" }).locator("[data-edit-tx]").click();
   await page.locator("[data-cashflow-modal-form] input[name='name']").fill("Smoke edited one-off");
   await page.locator("[data-cashflow-modal-form] button[type='submit']").click();
   await page.locator("[data-cashflow-modal-root]").waitFor({ state: "detached" });
-  await openOneOffFutureSection(page);
-  await page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: "Smoke edited one-off" }).waitFor({ state: "visible" });
+  await waitForOneOffRow(page, "Smoke edited one-off");
 
   await page.locator("[data-cashflow-logout]").click();
   await page.waitForSelector("[data-cashflow-user-selection]", { state: "visible" });
