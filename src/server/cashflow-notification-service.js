@@ -1,5 +1,6 @@
 ﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
+import { fetchWithTimeout, notificationFetchTimeoutMs } from "./cashflow-fetch-utils.js";
 
 export function createCashflowNotificationService({
   generateId,
@@ -39,7 +40,7 @@ export function createCashflowNotificationService({
       let sent = 0;
 
       for (const notification of pending) {
-        const response = await fetch(settings.ntfy_url, {
+        const response = await fetchWithTimeout(settings.ntfy_url, {
           method: "POST",
           headers: {
             "Title": notification.title,
@@ -47,7 +48,7 @@ export function createCashflowNotificationService({
             "Tags": "money"
           },
           body: notification.message
-        });
+        }, notificationFetchTimeoutMs());
 
         if (!response.ok) {
           throw new Error(`ntfy failed: ${response.status} ${response.statusText}`);

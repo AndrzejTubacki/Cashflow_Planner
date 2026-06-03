@@ -9,9 +9,10 @@ import {
 import { normalizeTimezone } from "./cashflow-date-utils.js";
 import {
   normalizeFxProvider,
-  normalizeSupportedCurrency
+  normalizeSupportedCurrency,
+  requireSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
-import { normalizeUserId, userNotFoundError } from "./cashflow-user-utils.js";
+import { conflict, normalizeUserId, userNotFoundError } from "./cashflow-user-utils.js";
 
 function initPragmas(db) {
   db.pragma("foreign_keys = ON");
@@ -182,7 +183,7 @@ export function createCashflowGlobalService({
     try {
       const existing = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);
       if (existing || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId))) {
-        throw new Error("User already exists");
+        throw conflict("User already exists");
       }
 
       db.prepare(`
@@ -193,8 +194,19 @@ export function createCashflowGlobalService({
       db.close();
     }
 
-    openPlanningDb(userId).close();
-    applyDefaultsToUser(userId, options);
+    try {
+      openPlanningDb(userId).close();
+      applyDefaultsToUser(userId, options);
+    } catch (error) {
+      const cleanupDb = openGlobalDb();
+      try {
+        cleanupDb.prepare("DELETE FROM users WHERE id = ?").run(userId);
+      } finally {
+        cleanupDb.close();
+      }
+      throw error;
+    }
+
     return selectUser(userId);
   }
 
@@ -256,7 +268,7 @@ export function createCashflowGlobalService({
   function updateGlobalOptions(updates = {}) {
     const current = getGlobalOptions();
     const safe = {
-      ledger_currency: normalizeSupportedCurrency(updates.ledger_currency, current.ledger_currency || "PLN"),
+      ledger_currency: requireSupportedCurrency(updates.ledger_currency || current.ledger_currency || "PLN", "ledger_currency"),
       locale: normalizeLocale(updates.locale || current.locale || "en"),
       timezone: normalizeTimezone(updates.timezone || current.timezone || DEFAULT_TIMEZONE),
       future_periods: Math.max(1, Math.min(60, Number(updates.future_periods ?? current.future_periods) || DEFAULT_FUTURE_PERIODS)),

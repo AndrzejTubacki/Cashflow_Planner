@@ -32,7 +32,7 @@ test("routes return localized error messages based on saved user locale", async 
     }
   });
 
-  assert.equal(result.response.status, 500);
+  assert.equal(result.response.status, 404);
   assert.deepEqual(Object.keys(result.body), ["error"]);
   assert.equal(result.body.error, "Nie znaleziono celu");
 }));

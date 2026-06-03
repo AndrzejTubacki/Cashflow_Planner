@@ -1,4 +1,6 @@
-import { normalizeCurrency } from "./cashflow-money-utils.js";
+import { requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
+import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
+import { badRequest } from "./cashflow-user-utils.js";
 
 const EXPORT_FORMAT = "cashflow-full-export";
 const EXPORT_VERSION = 1;
@@ -126,14 +128,14 @@ function parseCsv(text) {
     .filter(line => line.trim() !== "");
 
   if (!lines.length) {
-    throw new Error("CSV file is empty");
+    throw badRequest("CSV file is empty");
   }
 
   const headers = parseCsvLine(lines[0]).map(header => header.trim().toLowerCase());
   const missing = ONE_OFF_CSV_COLUMNS.filter(column => !headers.includes(column));
 
   if (missing.length) {
-    throw new Error(`CSV is missing required columns: ${missing.join(", ")}`);
+    throw badRequest(`CSV is missing required columns: ${missing.join(", ")}`);
   }
 
   return lines.slice(1).map((line, index) => {
@@ -155,23 +157,19 @@ function normalizeCsvOneOff({ rowNumber, row }, generateId) {
   const name = String(row.name || "").trim();
   const type = String(row.type || "").trim().toLowerCase();
   const amount = Number(row.amount);
-  const currency = normalizeCurrency(row.currency || "PLN");
-  const date = String(row.date || "").trim();
+  const currency = requireSupportedCurrency(row.currency || "PLN");
+  const date = requireIsoDate(row.date || "", `CSV row ${rowNumber} date`);
 
   if (!name) {
-    throw new Error(`CSV row ${rowNumber} is missing name`);
+    throw badRequest(`CSV row ${rowNumber} is missing name`);
   }
 
   if (!["income", "expense"].includes(type)) {
-    throw new Error(`CSV row ${rowNumber} has invalid type`);
+    throw badRequest(`CSV row ${rowNumber} has invalid type`);
   }
 
   if (!Number.isFinite(amount) || amount < 0) {
-    throw new Error(`CSV row ${rowNumber} has invalid amount`);
-  }
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(`${date}T00:00:00Z`).getTime())) {
-    throw new Error(`CSV row ${rowNumber} has invalid date`);
+    throw badRequest(`CSV row ${rowNumber} has invalid amount`);
   }
 
   return {
@@ -188,42 +186,82 @@ function normalizeExportPayload(payload) {
   const exportData = payload?.export || payload;
 
   if (!exportData || typeof exportData !== "object") {
-    throw new Error("Import payload is missing export data");
+    throw badRequest("Import payload is missing export data");
   }
 
   if (exportData.format !== EXPORT_FORMAT) {
-    throw new Error("Unsupported export format");
+    throw badRequest("Unsupported export format");
   }
 
   if (Number(exportData.version) !== EXPORT_VERSION) {
-    throw new Error("Unsupported export version");
+    throw badRequest("Unsupported export version");
   }
 
   if (!exportData.planning || typeof exportData.planning !== "object") {
-    throw new Error("Export is missing planning data");
+    throw badRequest("Export is missing planning data");
   }
 
   if (!exportData.ledgers || typeof exportData.ledgers !== "object") {
-    throw new Error("Export is missing ledger data");
+    throw badRequest("Export is missing ledger data");
   }
 
   for (const tableName of PLANNING_EXPORT_TABLES) {
     if (!Array.isArray(exportData.planning[tableName])) {
-      throw new Error(`Export is missing planning table: ${tableName}`);
+      throw badRequest(`Export is missing planning table: ${tableName}`);
     }
   }
 
   if (!Array.isArray(exportData.planning.settings) || exportData.planning.settings.length !== 1) {
-    throw new Error("Export must include exactly one settings row");
+    throw badRequest("Export must include exactly one settings row");
   }
 
   for (const [year, rows] of Object.entries(exportData.ledgers)) {
     if (!/^\d{4}$/.test(String(year)) || !Array.isArray(rows)) {
-      throw new Error(`Export has invalid ledger year: ${year}`);
+      throw badRequest(`Export has invalid ledger year: ${year}`);
     }
   }
 
+  validateExportPayloadRows(exportData);
+
   return exportData;
+}
+
+function validateExportPayloadRows(exportData) {
+  const settings = exportData.planning.settings[0] || {};
+  requireSupportedCurrency(settings.ledger_currency || "PLN", "settings.ledger_currency");
+
+  for (const tableName of ["recurring_expenses", "recurring_incomes", "goals", "flex_transactions", "one_off_transactions", "pending_transactions"]) {
+    for (const row of exportData.planning[tableName] || []) {
+      if (row.currency !== undefined) {
+        requireSupportedCurrency(row.currency, `${tableName}.currency`);
+      }
+      if (row.ledger_currency !== undefined && row.ledger_currency !== null) {
+        requireSupportedCurrency(row.ledger_currency, `${tableName}.ledger_currency`);
+      }
+      if (row.date) {
+        requireIsoDate(row.date, `${tableName}.date`);
+      }
+      if (row.due_date) {
+        requireIsoDate(row.due_date, `${tableName}.due_date`);
+      }
+      if (row.start_month_year) {
+        requireIsoMonth(row.start_month_year, `${tableName}.start_month_year`);
+      }
+    }
+  }
+
+  for (const [year, rows] of Object.entries(exportData.ledgers || {})) {
+    for (const row of rows || []) {
+      if (String(row.date || "").slice(0, 4) !== String(year)) {
+        requireIsoDate(row.date, `ledger_${year}.date`);
+      } else {
+        requireIsoDate(row.date, `ledger_${year}.date`);
+      }
+      requireIsoDate(row.confirmed_date, `ledger_${year}.confirmed_date`);
+      requireSupportedCurrency(row.currency, `ledger_${year}.currency`);
+      requireSupportedCurrency(row.ledger_currency || settings.ledger_currency || "PLN", `ledger_${year}.ledger_currency`);
+    }
+  }
 }
 
 function sampleExport() {
@@ -494,7 +532,7 @@ export function createCashflowDataPortabilityService({
 
         const fkErrors = db.prepare("PRAGMA foreign_key_check").all();
         if (fkErrors.length) {
-          throw new Error(`Import failed foreign key check: ${JSON.stringify(fkErrors)}`);
+          throw badRequest(`Import failed foreign key check: ${JSON.stringify(fkErrors)}`);
         }
       })();
     } finally {
@@ -618,7 +656,7 @@ export function createCashflowDataPortabilityService({
 
         const fkErrors = db.prepare("PRAGMA foreign_key_check").all();
         if (fkErrors.length) {
-          throw new Error(`Import failed foreign key check: ${JSON.stringify(fkErrors)}`);
+          throw badRequest(`Import failed foreign key check: ${JSON.stringify(fkErrors)}`);
         }
       })();
     } finally {

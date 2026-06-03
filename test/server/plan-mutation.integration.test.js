@@ -90,7 +90,7 @@ test("flex min_amount greater than max_amount is rejected on create and update",
     }
   });
 
-  assert.equal(createResult.response.status, 500);
+  assert.equal(createResult.response.status, 400);
   assert.match(createResult.body.error, /min amount/i);
 
   const flex = await harness.api("/api/flex", {
@@ -116,7 +116,7 @@ test("flex min_amount greater than max_amount is rejected on create and update",
     }
   });
 
-  assert.equal(updateResult.response.status, 500);
+  assert.equal(updateResult.response.status, 400);
   assert.match(updateResult.body.error, /min amount/i);
 }));
 
@@ -199,11 +199,11 @@ test("confirmed goal flex and one-off sources cannot be deleted", async () => wi
   const deleteGoal = await harness.request(`/api/goals/${encodeURIComponent(goal.id)}`, { method: "DELETE" });
   const deleteFlex = await harness.request(`/api/flex/${encodeURIComponent(flex.id)}`, { method: "DELETE" });
 
-  assert.equal(deleteOneOff.response.status, 500);
+  assert.equal(deleteOneOff.response.status, 400);
   assert.match(deleteOneOff.body.error, /confirmed one-off/i);
-  assert.equal(deleteGoal.response.status, 500);
+  assert.equal(deleteGoal.response.status, 400);
   assert.match(deleteGoal.body.error, /confirmed goal/i);
-  assert.equal(deleteFlex.response.status, 500);
+  assert.equal(deleteFlex.response.status, 400);
   assert.match(deleteFlex.body.error, /confirmed flex/i);
 }));
 

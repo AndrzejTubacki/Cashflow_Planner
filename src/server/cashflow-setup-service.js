@@ -1,7 +1,8 @@
 import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
-import { normalizeSupportedCurrency } from "./cashflow-fx-provider-utils.js";
+import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
+import { badRequest } from "./cashflow-user-utils.js";
 
 function asNonNegativeNumber(value, fallback = 0) {
   const number = Number(value);
@@ -45,7 +46,7 @@ export function createCashflowSetupService({
   }
 
   function completeSetup(userId, input = {}) {
-    const ledgerCurrency = normalizeSupportedCurrency(input.ledger_currency || input.currency || "PLN");
+    const ledgerCurrency = requireSupportedCurrency(input.ledger_currency || input.currency || "PLN", "ledger_currency");
     const locale = normalizeLocale(input.locale || "en");
     const timezone = normalizeTimezone(input.timezone || DEFAULT_TIMEZONE);
     const futurePeriods = Math.max(1, Math.min(60, Number(input.future_periods) || DEFAULT_FUTURE_PERIODS));
@@ -69,7 +70,7 @@ export function createCashflowSetupService({
       result = db.transaction(() => {
         const settings = db.prepare("SELECT setup_completed FROM settings WHERE id = 1").get();
         if (Number(settings?.setup_completed || 0) === 1) {
-          throw new Error("First-run setup is already completed");
+          throw badRequest("First-run setup is already completed");
         }
 
         db.prepare(`

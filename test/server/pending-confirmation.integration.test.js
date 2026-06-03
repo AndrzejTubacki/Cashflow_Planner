@@ -381,6 +381,6 @@ test("changing ledger currency with a non-zero balance requires an FX rate", asy
     }
   });
 
-  assert.equal(result.response.status, 500);
+  assert.equal(result.response.status, 400);
   assert.match(result.body.error, /Missing FX rate for PLN\/USD/);
 }));

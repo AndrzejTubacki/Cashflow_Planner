@@ -1,6 +1,9 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { badRequest } from "./cashflow-user-utils.js";
 
 let testTodayOverride = null;
+const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const MONTH_PATTERN = /^(\d{4})-(\d{2})$/;
 
 export function setTodayOverrideForTests(dateString = null) {
   // Integration tests pin the app calendar without monkey-patching Date or changing production defaults.
@@ -43,6 +46,48 @@ export function normalizeTimezone(timezone) {
   } catch {
     return DEFAULT_TIMEZONE;
   }
+}
+
+export function requireIsoDate(value, fieldName = "date") {
+  const normalized = String(value || "").trim();
+  const match = normalized.match(DATE_PATTERN);
+  if (!match) {
+    throw badRequest(`${fieldName} must be a valid YYYY-MM-DD value`);
+  }
+
+  const [, yearRaw, monthRaw, dayRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  const date = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    throw badRequest(`${fieldName} must be a valid YYYY-MM-DD value`);
+  }
+
+  return normalized;
+}
+
+export function requireIsoMonth(value, fieldName = "start_month_year") {
+  const normalized = String(value || "").trim();
+  const match = normalized.match(MONTH_PATTERN);
+  if (!match) {
+    throw badRequest(`${fieldName} must be a valid YYYY-MM value`);
+  }
+
+  const [, yearRaw, monthRaw] = match;
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+
+  if (year < 1 || month < 1 || month > 12) {
+    throw badRequest(`${fieldName} must be a valid YYYY-MM value`);
+  }
+
+  return normalized;
 }
 
 export function easterSundayUtc(year) {

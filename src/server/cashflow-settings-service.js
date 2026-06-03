@@ -6,9 +6,24 @@ import {
   normalizeFxProvider,
   normalizeManualFxPairs,
   normalizeManualFxRates,
-  normalizeSupportedCurrency
+  normalizeSupportedCurrency,
+  requireSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
+import { badRequest } from "./cashflow-user-utils.js";
+
+function configuredBackupAllowedRoots() {
+  return String(process.env.CASHFLOW_BACKUP_ALLOWED_ROOTS || "")
+    .split(",")
+    .map(root => root.trim())
+    .filter(Boolean)
+    .map(root => path.resolve(root));
+}
+
+function isPathInside(candidate, root) {
+  const resolved = path.resolve(candidate);
+  return resolved === root || resolved.startsWith(`${root}${path.sep}`);
+}
 
 export function createCashflowSettingsService({
   fetchProviderRate = null,
@@ -75,17 +90,22 @@ export function createCashflowSettingsService({
         const backupLocation = String(safeUpdates.backup_location).trim();
 
         if (!path.isAbsolute(backupLocation)) {
-          throw new Error("backup_location must be an absolute path");
+          throw badRequest("backup_location must be an absolute path");
         }
 
-        safeUpdates.backup_location = backupLocation;
+        const allowedRoots = configuredBackupAllowedRoots();
+        if (!allowedRoots.length || !allowedRoots.some(root => isPathInside(backupLocation, root))) {
+          throw badRequest("backup_location must be under an allowed backup root");
+        }
+
+        safeUpdates.backup_location = path.resolve(backupLocation);
       }
 
       if (safeUpdates.ntfy_url !== undefined && safeUpdates.ntfy_url !== null && safeUpdates.ntfy_url !== "") {
         const ntfyUrl = String(safeUpdates.ntfy_url).trim();
 
         if (!/^https?:\/\//i.test(ntfyUrl)) {
-          throw new Error("ntfy_url must be a full http(s) URL, for example https://ntfy.example.com/topic");
+          throw badRequest("ntfy_url must be a full http(s) URL, for example https://ntfy.example.com/topic");
         }
 
         safeUpdates.ntfy_url = ntfyUrl;
@@ -100,10 +120,7 @@ export function createCashflowSettingsService({
       }
 
       if (safeUpdates.ledger_currency !== undefined) {
-        safeUpdates.ledger_currency = normalizeSupportedCurrency(
-          safeUpdates.ledger_currency,
-          currentSettings?.ledger_currency || "PLN"
-        );
+        safeUpdates.ledger_currency = requireSupportedCurrency(safeUpdates.ledger_currency, "ledger_currency");
       }
 
       if (safeUpdates.timezone !== undefined) {
@@ -150,7 +167,7 @@ export function createCashflowSettingsService({
         `).get(safeUpdates.budget_period_income_id);
 
         if (!income) {
-          throw new Error("Selected budget period income does not exist");
+          throw badRequest("Selected budget period income does not exist");
         }
       }
 
@@ -216,7 +233,7 @@ export function createCashflowSettingsService({
             rate = 1;
             source = "zero-balance";
           } else {
-            throw new Error(`Missing FX rate for ${previousLedgerCurrency}/${nextLedgerCurrency}. Refresh FX cache first.`);
+            throw badRequest(`Missing FX rate for ${previousLedgerCurrency}/${nextLedgerCurrency}. Refresh FX cache first.`);
           }
         }
 

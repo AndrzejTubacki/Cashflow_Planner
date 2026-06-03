@@ -1,4 +1,6 @@
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
+import { requireIsoMonth } from "./cashflow-date-utils.js";
+import { badRequest } from "./cashflow-user-utils.js";
 
 export function createCashflowProjectionStateService({
   latestConfirmedBalance,
@@ -14,7 +16,11 @@ export function createCashflowProjectionStateService({
     const repeatEveryMonths = Math.max(1, Math.min(12, Number(input.repeat_every_months) || 1));
 
     if (repeatEveryMonths > 1 && !input.start_month_year) {
-      throw new Error("start_month_year is required when repeat_every_months is greater than 1");
+      throw badRequest("start_month_year is required when repeat_every_months is greater than 1");
+    }
+
+    if (input.start_month_year) {
+      input.start_month_year = requireIsoMonth(input.start_month_year);
     }
 
     return repeatEveryMonths;
@@ -29,7 +35,11 @@ export function createCashflowProjectionStateService({
     merged.repeat_every_months = Math.max(1, Math.min(12, Number(merged.repeat_every_months) || 1));
 
     if (merged.repeat_every_months > 1 && !merged.start_month_year) {
-      throw new Error("start_month_year is required when repeat_every_months is greater than 1");
+      throw badRequest("start_month_year is required when repeat_every_months is greater than 1");
+    }
+
+    if (merged.start_month_year) {
+      merged.start_month_year = requireIsoMonth(merged.start_month_year);
     }
 
     return merged;

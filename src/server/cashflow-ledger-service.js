@@ -3,6 +3,13 @@
   openLedgerDb,
   openPlanningDb
 }) {
+  function requireFundingSourceColumn(sourceColumn) {
+    if (!["source_flex_id", "source_goal_id"].includes(sourceColumn)) {
+      throw new Error(`Unsupported funding source column: ${sourceColumn}`);
+    }
+    return sourceColumn;
+  }
+
   function currentLedgerSettings(userId) {
     const db = openPlanningDb(userId);
 
@@ -59,6 +66,7 @@
   }
 
   function sumConfirmedFunding(userId, sourceColumn, sourceId, targetCurrency = "PLN", settings = null) {
+    const safeSourceColumn = requireFundingSourceColumn(sourceColumn);
     let totalLedger = 0;
     const ledgerCurrency = settings?.ledger_currency || currentLedgerSettings(userId).ledgerCurrency;
 
@@ -69,7 +77,7 @@
         const rows = ledgerDb.prepare(`
           SELECT amount, fx_rate, buffered_fx_rate, ledger_amount
           FROM confirmed_transactions
-          WHERE ${sourceColumn} = ?
+          WHERE ${safeSourceColumn} = ?
             AND type = 'expense'
             AND COALESCE(ledger_currency, 'PLN') = ?
         `).all(sourceId, ledgerCurrency);
@@ -90,6 +98,7 @@
   }
 
   function sumPendingFunding(userId, sourceColumn, sourceId, targetCurrency = "PLN", settings = null) {
+    const safeSourceColumn = requireFundingSourceColumn(sourceColumn);
     const db = openPlanningDb(userId);
     let totalLedger = 0;
     const ledgerCurrency = settings?.ledger_currency || currentLedgerSettings(userId).ledgerCurrency;
@@ -98,7 +107,7 @@
       const rows = db.prepare(`
         SELECT amount, funded_amount, fx_rate, buffered_fx_rate, ledger_amount
         FROM pending_transactions
-        WHERE ${sourceColumn} = ?
+        WHERE ${safeSourceColumn} = ?
           AND type != 'income'
           AND COALESCE(ledger_currency, 'PLN') = ?
       `).all(sourceId, ledgerCurrency);

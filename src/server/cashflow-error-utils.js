@@ -27,3 +27,27 @@ export function createCashflowErrorLogger(logError) {
     logError(kind, normalized);
   };
 }
+
+export async function sendApiError({
+  req,
+  res,
+  error,
+  fallback,
+  logKind,
+  logError,
+  resolveLocale = () => "en",
+  translateLocale = async (_locale, key) => key
+}) {
+  if (typeof logError === "function" && logKind) {
+    logError(logKind, error);
+  }
+
+  const status = Number(error?.status) || 500;
+  const message = cashflowErrorMessage(error) || fallback;
+  const localized = await translateLocale(resolveLocale(req), message || fallback);
+  res.status(status).json({
+    error: localized,
+    ...(error?.conflicts ? { conflicts: error.conflicts } : {}),
+    ...(error?.details ? { details: error.details } : {})
+  });
+}

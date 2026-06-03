@@ -276,7 +276,7 @@ test("CSV one-off import rejects invalid rows", async () => withHarness(async ha
       }
     });
 
-    assert.equal(result.response.status, 500);
+    assert.equal(result.response.status, 400);
   }
 }));
 

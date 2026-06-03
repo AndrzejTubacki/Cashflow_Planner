@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "npm run test:node && npm run test:browser",
-    "test:node": "node --test",
+    "test:node": "node --test \"test/**/*.test.js\" \"test/**/*.integration.test.js\"",
     "test:browser": "node scripts/browser-smoke.mjs",
     "smoke": "node scripts/smoke.mjs",
     "smoke:browser": "npm run test:browser"

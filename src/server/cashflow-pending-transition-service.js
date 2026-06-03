@@ -1,5 +1,6 @@
 import { generateId } from "./cashflow-id-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
+import { notFound } from "./cashflow-user-utils.js";
 
 export function createCashflowPendingTransitionService({
   normalizePendingStatus,
@@ -128,7 +129,7 @@ export function createCashflowPendingTransitionService({
           }
         }
 
-        throw new Error("Future transaction not found");
+        throw notFound("Future transaction not found");
       }
 
       const insertPending = db.prepare(`

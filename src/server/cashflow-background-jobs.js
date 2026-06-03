@@ -15,6 +15,7 @@ export function createCashflowBackgroundJobs({
   sendQueuedNotifications
 }) {
   const lastRunKeys = new Set();
+  let tickRunning = false;
 
   function startBackgroundJobs() {
     setInterval(() => {
@@ -55,60 +56,75 @@ export function createCashflowBackgroundJobs({
   }
 
   async function tickPerUserJobs() {
-    const userIds = listCashflowUserIds();
+    if (tickRunning) {
+      logServerEvent("cashflow_background_tick_skipped", {
+        reason: "previous_tick_still_running"
+      });
+      return { skipped: true };
+    }
 
-    for (const userId of userIds) {
-      try {
-        const settings = getSettings(userId) || {};
-        const timezone = settings.timezone || DEFAULT_TIMEZONE;
-        const local = localParts(timezone);
-        const today = todayInTimezone(timezone);
+    tickRunning = true;
+    try {
+      const userIds = listCashflowUserIds();
 
-        if (local.time === "00:00" && shouldRun(`midnight:${userId}:${local.date}`)) {
-          const created = moveDueFutureTransactionsToPending(userId, today);
-          const pendingSummaryCount = queueDailyPendingSummary(userId);
-          const missingIncomeCount = queueMissingIncomeNotifications(userId);
+      for (const userId of userIds) {
+        try {
+          const settings = getSettings(userId) || {};
+          const timezone = settings.timezone || DEFAULT_TIMEZONE;
+          const local = localParts(timezone);
+          const today = todayInTimezone(timezone);
 
-          logServerEvent("cashflow_midnight_job_completed", {
-            userId,
-            transactionsCreated: created,
-            pendingSummaryCount,
-            missingIncomeCount
-          });
-        }
+          if (local.time === "00:00" && shouldRun(`midnight:${userId}:${local.date}`)) {
+            const created = moveDueFutureTransactionsToPending(userId, today);
+            const pendingSummaryCount = queueDailyPendingSummary(userId);
+            const missingIncomeCount = queueMissingIncomeNotifications(userId);
 
-        if (local.time === "08:00" && shouldRun(`fx:${userId}:${local.date}`)) {
-          const result = typeof refreshNbpFxCacheForUser === "function"
-            ? await refreshNbpFxCacheForUser(userId, today)
-            : { users: await refreshNbpFxCacheForAllUsers(today) };
-          logServerEvent("cashflow_fx_refresh_completed", {
-            userId,
-            result
-          });
-        }
-
-        const deliveryTime = settings.notification_delivery_time || NOTIFICATION_DELIVERY_TIME;
-        if (local.time === deliveryTime && shouldRun(`notify:${userId}:${local.date}:${deliveryTime}`)) {
-          const sent = await sendQueuedNotifications(userId);
-          if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
-        }
-
-        if (local.time === "03:30" && shouldRun(`backup:${userId}:${local.date}`)) {
-          const result = maybeRunAutomaticBackup(userId);
-          if (result) {
-            logServerEvent("cashflow_auto_backup_completed", { userId, ...result });
+            logServerEvent("cashflow_midnight_job_completed", {
+              userId,
+              transactionsCreated: created,
+              pendingSummaryCount,
+              missingIncomeCount
+            });
           }
+
+          if (local.time === "08:00" && shouldRun(`fx:${userId}:${local.date}`)) {
+            const result = typeof refreshNbpFxCacheForUser === "function"
+              ? await refreshNbpFxCacheForUser(userId, today)
+              : { users: await refreshNbpFxCacheForAllUsers(today) };
+            logServerEvent("cashflow_fx_refresh_completed", {
+              userId,
+              result
+            });
+          }
+
+          const deliveryTime = settings.notification_delivery_time || NOTIFICATION_DELIVERY_TIME;
+          if (local.time === deliveryTime && shouldRun(`notify:${userId}:${local.date}:${deliveryTime}`)) {
+            const sent = await sendQueuedNotifications(userId);
+            if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
+          }
+
+          if (local.time === "03:30" && shouldRun(`backup:${userId}:${local.date}`)) {
+            const result = maybeRunAutomaticBackup(userId);
+            if (result) {
+              logServerEvent("cashflow_auto_backup_completed", { userId, ...result });
+            }
+          }
+        } catch (err) {
+          logError("cashflow_background_user_failed", {
+            userId,
+            error: err.message
+          });
         }
-      } catch (err) {
-        logError("cashflow_background_user_failed", {
-          userId,
-          error: err.message
-        });
       }
+
+      return { skipped: false, users: userIds.length };
+    } finally {
+      tickRunning = false;
     }
   }
 
   return {
-    startBackgroundJobs
+    startBackgroundJobs,
+    tickPerUserJobs
   };
 }

@@ -1,3 +1,5 @@
+import { notFound } from "./cashflow-user-utils.js";
+
 export function normalizePriority(value) {
   const n = Number(value);
   return Number.isInteger(n) && n > 0 ? n : 1;
@@ -54,7 +56,7 @@ export function updatePlannedPriority(db, plannedTransactionId, domain, requeste
     WHERE id = ?
   `).get(plannedTransactionId);
 
-  if (!existing) throw new Error("Planned transaction not found");
+  if (!existing) throw notFound("Planned transaction not found");
 
   reorderPriorityDomain(db, domain, plannedTransactionId, requestedPriority);
 }

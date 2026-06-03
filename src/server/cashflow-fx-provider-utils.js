@@ -79,6 +79,18 @@ export function normalizeSupportedCurrency(value, fallback = "PLN") {
   return SUPPORTED_FX_CURRENCIES.includes(normalized) ? normalized : fallback;
 }
 
+export function requireSupportedCurrency(value, fieldName = "currency") {
+  const normalized = String(value || "").trim().toUpperCase();
+
+  if (!SUPPORTED_FX_CURRENCIES.includes(normalized)) {
+    const error = new Error(`${fieldName} must be one of the supported currencies`);
+    error.status = 400;
+    throw error;
+  }
+
+  return normalized;
+}
+
 export function normalizeManualFxRates(value) {
   const parsed = parseJsonSetting(value, {});
   const rates = {};

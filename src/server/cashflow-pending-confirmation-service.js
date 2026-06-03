@@ -1,6 +1,7 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { todayInTimezone } from "./cashflow-date-utils.js";
+import { requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
+import { badRequest, notFound } from "./cashflow-user-utils.js";
 
 export function createCashflowPendingConfirmationService({
   deletePendingOccurrence,
@@ -20,10 +21,10 @@ export function createCashflowPendingConfirmationService({
 
     try {
       const pending = planningDb.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id);
-      if (!pending) throw new Error("Pending transaction not found");
+      if (!pending) throw notFound("Pending transaction not found");
 
       const settings = planningDb.prepare("SELECT * FROM settings WHERE id = 1").get();
-      const confirmedDate = String(input.confirmed_date || pending.date || todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE));
+      const confirmedDate = requireIsoDate(input.confirmed_date || pending.date || todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE), "confirmed_date");
       const year = confirmedDate.slice(0, 4);
       const ledgerType = pending.type === "income" ? "income" : "expense";
       const occurrenceKey = pending.occurrence_key || occurrenceKeyFromRow({
@@ -42,7 +43,7 @@ export function createCashflowPendingConfirmationService({
       `).get();
 
       if (latestCurrencyEvent && confirmedDate < String(latestCurrencyEvent.rate_date || "").slice(0, 10)) {
-        throw new Error("Cannot confirm transaction before the latest ledger currency change");
+        throw badRequest("Cannot confirm transaction before the latest ledger currency change");
       }
 
       if (pending.source_recurring_income_id) {
@@ -59,7 +60,7 @@ export function createCashflowPendingConfirmationService({
           newestConfirmed &&
           confirmedDate < newestConfirmed
         ) {
-          throw new Error(
+          throw badRequest(
             "Period-setting income cannot be confirmed earlier than the newest confirmed ledger transaction"
           );
         }
@@ -68,7 +69,7 @@ export function createCashflowPendingConfirmationService({
       const amount = Math.abs(Number(input.amount ?? pending.funded_amount ?? pending.amount) || 0);
 
       if (!Number.isFinite(amount) || amount < 0) {
-        throw new Error("Confirmed amount must be a non-negative number");
+        throw badRequest("Confirmed amount must be a non-negative number");
       }
 
       const alreadyConfirmed = findConfirmedOccurrence(userId, occurrenceKey);
@@ -93,7 +94,7 @@ export function createCashflowPendingConfirmationService({
         const isLedgerConversion = String(occurrenceKey || "").startsWith("ledger_currency_conversion:");
 
         if (!isLedgerConversion && wouldLedgerGoNegativeAfterInsert(userId, candidate)) {
-          throw new Error("Cannot confirm transaction because it would make the ledger balance negative");
+          throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
         }
 
         const ledgerDb = openLedgerDb(userId, year);
