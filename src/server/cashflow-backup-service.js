@@ -331,6 +331,7 @@ export function createCashflowBackupService({
       "recurring_incomes",
       "recurring_expenses",
       "planned_transactions",
+      "ledger_currency_events",
       "fx_rates_cache",
       "settings"
     ];
@@ -338,6 +339,7 @@ export function createCashflowBackupService({
     const insertOrder = [
       "settings",
       "fx_rates_cache",
+      "ledger_currency_events",
       "planned_transactions",
       "recurring_expenses",
       "recurring_incomes",

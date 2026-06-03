@@ -20,6 +20,23 @@ async function requestJson(url) {
   return JSON.parse(body);
 }
 
+async function postJson(url, payload = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`${url} returned ${response.status}: ${body.slice(0, 200)}`);
+  }
+
+  return JSON.parse(body);
+}
+
 async function waitForHealth(baseUrl, timeoutMs = Number(process.env.SMOKE_START_TIMEOUT_MS || 180000)) {
   // Windows/network-mounted workspaces can take a long time to import server dependencies cold.
   const startedAt = Date.now();
@@ -114,7 +131,18 @@ async function main() {
     throw new Error("Unexpected /api/system payload");
   }
 
-  const cashflow = await requestJson(`${baseUrl}/api`);
+  await postJson(`${baseUrl}/api/session/select`, { userId: "local" });
+
+  const response = await fetch(`${baseUrl}/api`, {
+    cache: "no-store",
+    headers: {
+      "x-cashflow-user-id": "local"
+    }
+  });
+  const cashflow = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`${baseUrl}/api returned ${response.status}: ${JSON.stringify(cashflow).slice(0, 200)}`);
+  }
   if (cashflow?.settings?.ledger_currency !== "PLN") {
     throw new Error("Unexpected /api settings payload");
   }

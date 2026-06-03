@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
-import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
+import {
+  createCashflowTestHarness,
+  planningDbPath
+} from "../helpers/cashflow-test-harness.js";
 
 async function withHarness(fn) {
   const harness = await createCashflowTestHarness();
@@ -44,6 +49,13 @@ test("x-cashflow-user-id selects isolated user data", async () => withHarness(as
     }
   });
 
+  await harness.api("/api/users", {
+    method: "POST",
+    body: {
+      userId: "other"
+    }
+  });
+
   const otherUser = await harness.request("/api", {
     headers: {
       "x-cashflow-user-id": "other"
@@ -57,6 +69,85 @@ test("x-cashflow-user-id selects isolated user data", async () => withHarness(as
   assert.equal(otherUser.body.oneOffs.length, 0);
   assert.equal(otherUser.body.settings.ledger_currency, "PLN");
 }));
+
+test("read routes reject unknown users without creating profile data", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    const unknownId = "missing_user";
+    const result = await harness.request("/api", {
+      headers: {
+        "x-cashflow-user-id": unknownId
+      }
+    });
+
+    assert.equal(result.response.status, 404);
+    assert.equal(fs.existsSync(path.join(harness.dataDir, unknownId)), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("session lookup is read-only and session select initializes local only explicitly", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    const listed = await harness.request("/api/users", { skipUserHeader: true });
+    assert.equal(listed.response.status, 200);
+    assert.ok(listed.body.users.some(user => user.id === "local"));
+    assert.equal(fs.existsSync(planningDbPath(harness.dataDir, "local")), false);
+
+    const missingSession = await harness.request("/api/session", {
+      headers: {
+        "x-cashflow-user-id": "ghost"
+      }
+    });
+    assert.equal(missingSession.response.status, 404);
+    assert.equal(fs.existsSync(path.join(harness.dataDir, "ghost")), false);
+
+    const selectMissing = await harness.request("/api/session/select", {
+      method: "POST",
+      skipUserHeader: true,
+      body: {
+        userId: "ghost"
+      }
+    });
+    assert.equal(selectMissing.response.status, 404);
+    assert.equal(fs.existsSync(path.join(harness.dataDir, "ghost")), false);
+
+    const selected = await harness.request("/api/session/select", {
+      method: "POST",
+      skipUserHeader: true,
+      body: {
+        userId: "local"
+      }
+    });
+    assert.equal(selected.response.status, 200);
+    assert.equal(selected.body.session.userId, "local");
+    assert.equal(fs.existsSync(planningDbPath(harness.dataDir, "local")), true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("invalid user headers return 400 and do not create data directories", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    const invalidIds = ["../x", "/absolute", "", "_reserved", "a".repeat(65), "has/slash", "has\\slash"];
+
+    for (const userId of invalidIds) {
+      const result = await harness.request("/api", {
+        headers: {
+          "x-cashflow-user-id": userId
+        }
+      });
+      assert.equal(result.response.status, 400);
+    }
+
+    assert.equal(fs.existsSync(path.join(harness.dataDir, "..", "x")), false);
+    assert.equal(fs.existsSync(path.join(harness.dataDir, "_reserved")), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
 
 test("core route flow validates after settings and job regeneration", async () => withHarness(async harness => {
   const settings = await harness.api("/api/settings", {

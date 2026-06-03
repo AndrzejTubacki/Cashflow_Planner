@@ -70,6 +70,29 @@ function backupCount(harness) {
   }
 }
 
+function insertLedgerCurrencyEvent(harness, id) {
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare(`
+      INSERT INTO ledger_currency_events (
+        id, old_currency, new_currency, old_balance, converted_opening_balance,
+        fx_rate, rate_date, source, details, created_at
+      ) VALUES (?, 'PLN', 'USD', 100, 25, 0.25, '2026-06-01', 'test', '{}', datetime('now'))
+    `).run(id);
+  } finally {
+    db.close();
+  }
+}
+
+function ledgerCurrencyEventIds(harness) {
+  const db = harness.openPlanningDb();
+  try {
+    return db.prepare("SELECT id FROM ledger_currency_events ORDER BY id").all().map(row => row.id);
+  } finally {
+    db.close();
+  }
+}
+
 test("full export includes functional planning data and confirmed ledger rows", async () => withHarness(async harness => {
   const { oneOff } = await createConfirmedLedgerScenario(harness);
   const exported = await harness.api("/api/export/full");
@@ -116,7 +139,9 @@ test("full replace import restores exported data and creates a safety backup", a
 
 test("full replace import rolls back after invalid imported data", async () => withHarness(async harness => {
   const { oneOff } = await createConfirmedLedgerScenario(harness);
+  insertLedgerCurrencyEvent(harness, "event-before-failed-import");
   const exported = await harness.api("/api/export/full");
+  exported.planning.ledger_currency_events = [];
   exported.planning.recurring_expenses.push({
     id: "bad-recurring",
     name: "Bad recurring",
@@ -151,6 +176,7 @@ test("full replace import rolls back after invalid imported data", async () => w
   const snapshot = await harness.api("/api");
   assert.equal(snapshot.oneOffs.some(row => row.id === oneOff.id), true);
   assert.equal(snapshot.confirmedTransactions.some(row => row.source_one_off_id === oneOff.id), true);
+  assert.deepEqual(ledgerCurrencyEventIds(harness), ["event-before-failed-import"]);
 }));
 
 test("full merge import appends rows and rejects ID conflicts", async () => {

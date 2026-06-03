@@ -137,9 +137,19 @@ function attachShellHandlers() {
       const userId = button.getAttribute("data-cashflow-select-user");
       if (!userId) return;
 
-      state.selectedUserId = userId;
-      localStorage.setItem("cashflow_user_id", userId);
-      await loadCashflow();
+      try {
+        await fetchJson("/api/session/select", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId })
+        });
+        state.selectedUserId = userId;
+        localStorage.setItem("cashflow_user_id", userId);
+        await loadCashflow();
+      } catch (error) {
+        state.error = error.message || t(null, "Failed to select user");
+        render();
+      }
     });
   });
 

@@ -279,6 +279,7 @@ export default {
     "Failed to load admin options": "Failed to load admin options",
     "Failed to load session": "Failed to load session",
     "Failed to save admin options": "Failed to save admin options",
+    "Failed to select user": "Failed to select user",
     "First-run setup": "First-run setup",
     "Global options": "Global options",
     "Global options saved": "Global options saved",

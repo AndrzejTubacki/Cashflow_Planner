@@ -38,6 +38,7 @@ export function registerCashflowRoutes(app, {
   regenerateProjectionsWithFxRefresh,
   resolveRequestUser,
   resolveSession = null,
+  selectUser = null,
   restoreBackup,
   importFullData,
   importOneOffCsv,
@@ -59,7 +60,7 @@ export function registerCashflowRoutes(app, {
     function resolveRequestLocale(req) {
       try {
         const userId = resolveRequestUser(req);
-        const db = openPlanningDb(userId);
+        const db = openPlanningDb(userId, { create: false });
         try {
           return db.prepare("SELECT locale FROM settings WHERE id = 1").get()?.locale || "en";
         } finally {
@@ -79,15 +80,19 @@ export function registerCashflowRoutes(app, {
       return resolveRequestUser(req);
     }
 
+    function requestUserHeader(req) {
+      return String(req.headers["x-cashflow-user-id"] || "").trim();
+    }
+
     function sessionForRequest(req) {
-      const userId = requestUserId(req);
+      const userId = requestUserHeader(req);
       return typeof resolveSession === "function"
         ? resolveSession(userId)
         : {
-            authenticated: true,
+            authenticated: Boolean(userId),
             userId,
             displayName: userId,
-            permissions: ["admin"]
+            permissions: userId ? ["admin"] : []
           };
     }
 
@@ -102,7 +107,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_users_list_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to list users") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to list users") });
       }
     });
 
@@ -114,7 +119,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_user_create_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create user") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create user") });
       }
     });
 
@@ -129,7 +134,23 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_session_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load session") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to load session") });
+      }
+    });
+
+    app.post("/api/session/select", async (req, res) => {
+      try {
+        if (typeof selectUser !== "function") throw new Error("User service is unavailable");
+        const session = selectUser(req.body?.userId || req.body?.id || "");
+        res.json({
+          session,
+          admin: typeof getGlobalOptions === "function" && canAdmin(session)
+            ? { options: getGlobalOptions() }
+            : null
+        });
+      } catch (error) {
+        logError("cashflow_session_select_failed", error);
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to select user") });
       }
     });
 
@@ -158,7 +179,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_admin_options_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load admin options") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to load admin options") });
       }
     });
 
@@ -177,7 +198,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_admin_options_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to save admin options") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to save admin options") });
       }
     });
 
@@ -187,7 +208,9 @@ export function registerCashflowRoutes(app, {
         const userId = requestUserId(req);
         const result = completeSetup(userId, req.body || {});
         const snapshot = getSnapshot(userId);
-        const session = sessionForRequest(req);
+        const session = typeof resolveSession === "function"
+          ? resolveSession(userId)
+          : { authenticated: true, userId, displayName: userId, permissions: ["admin"] };
         res.json({
           app: {
             name: "cashflow",
@@ -203,14 +226,16 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_setup_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to complete first-run setup") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to complete first-run setup") });
       }
     });
 
     app.get("/api", async (req, res) => {
       try {
         const userId = requestUserId(req);
-        const session = sessionForRequest(req);
+        const session = typeof resolveSession === "function"
+          ? resolveSession(userId)
+          : { authenticated: true, userId, displayName: userId, permissions: ["admin"] };
         const isSetupRequired = typeof setupRequired === "function" ? setupRequired(userId) : false;
         const snapshot = getSnapshot(userId);
         res.json({
@@ -227,7 +252,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_snapshot_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load cashflow data") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to load cashflow data") });
       }
     });
 
@@ -239,14 +264,15 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_locales_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to list locales") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to list locales") });
       }
     });
 
     app.post("/api/run-jobs", async (req, res) => {
-      const userId = resolveRequestUser(req);
+      let userId = "";
 
       try {
+        userId = resolveRequestUser(req);
         const projection = await regenerateProjectionsWithFxRefresh(userId, {
           date: req.body?.date || null,
           refreshFxFirst: true
@@ -281,16 +307,17 @@ export function registerCashflowRoutes(app, {
           userId
         });
 
-        res.status(500).json({
+        res.status(error.status || 500).json({
           error: await apiErrorMessage(req, error, "Failed to regenerate projection")
         });
       }
     });
 
     app.post("/api/fx/refresh", async (req, res) => {
-      const userId = resolveRequestUser(req);
+      let userId = "";
 
       try {
+        userId = resolveRequestUser(req);
         const projection = await regenerateProjectionsWithFxRefresh(userId, {
           date: req.body?.date || null,
           refreshFxFirst: true
@@ -306,7 +333,7 @@ export function registerCashflowRoutes(app, {
           userId
         });
 
-        res.status(500).json({
+        res.status(error.status || 500).json({
           error: await apiErrorMessage(req, error, "Failed to refresh FX rates")
         });
       }
@@ -318,63 +345,67 @@ export function registerCashflowRoutes(app, {
         res.json({ ok: true, users: result });
       } catch (error) {
         logError("cashflow_fx_refresh_all_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to refresh FX rates") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to refresh FX rates") });
       }
     });
 
     app.get("/api/fx/nbp/:currency", async (req, res) => {
-      const db = openPlanningDb(resolveRequestUser(req));
+      let db = null;
       try {
+        db = openPlanningDb(resolveRequestUser(req));
         const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
         const rate = await fetchNbpRate(req.params.currency, null, settings.timezone);
         res.json(rate);
       } catch (error) {
         logError("cashflow_nbp_fx_current_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
       } finally {
-        db.close();
+        db?.close();
       }
     });
 
     app.get("/api/fx/nbp/:currency/:date", async (req, res) => {
-      const db = openPlanningDb(resolveRequestUser(req));
+      let db = null;
       try {
+        db = openPlanningDb(resolveRequestUser(req));
         const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
         const rate = await fetchNbpRate(req.params.currency, req.params.date, settings.timezone);
         res.json(rate);
       } catch (error) {
         logError("cashflow_nbp_fx_historical_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
       } finally {
-        db.close();
+        db?.close();
       }
     });
 
     app.get("/api/fx/rate/:base/:quote", async (req, res) => {
-      const db = openPlanningDb(resolveRequestUser(req));
+      let db = null;
       try {
+        db = openPlanningDb(resolveRequestUser(req));
         const settings = db.prepare("SELECT fx_provider, timezone FROM settings WHERE id = 1").get() || {};
         const rate = await fetchProviderRate(settings.fx_provider || "nbp", req.params.base, req.query.date || null, req.params.quote, settings.timezone);
         res.json(rate);
       } catch (error) {
         logError("cashflow_pair_fx_current_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
       } finally {
-        db.close();
+        db?.close();
       }
     });
 
     app.get("/api/fx/rate/:base/:quote/:date", async (req, res) => {
-      const db = openPlanningDb(resolveRequestUser(req));
+      let db = null;
       try {
+        db = openPlanningDb(resolveRequestUser(req));
         const settings = db.prepare("SELECT fx_provider, timezone FROM settings WHERE id = 1").get() || {};
         const rate = await fetchProviderRate(settings.fx_provider || "nbp", req.params.base, req.params.date, req.params.quote, settings.timezone);
         res.json(rate);
       } catch (error) {
         logError("cashflow_pair_fx_historical_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
       } finally {
-        db.close();
+        db?.close();
       }
     });
 
@@ -393,7 +424,7 @@ export function registerCashflowRoutes(app, {
         res.json(snapshot);
       } catch (error) {
         logError("cashflow_nbp_fx_snapshot_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to fetch FX rates") });
       }
     });
 
@@ -405,7 +436,7 @@ export function registerCashflowRoutes(app, {
         res.json(withProjectionStatus(userId, updated));
       } catch (error) {
         logError("cashflow_settings_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to save settings") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to save settings") });
       }
     });
 
@@ -416,7 +447,7 @@ export function registerCashflowRoutes(app, {
         res.json(updated);
       } catch (error) {
         logError("cashflow_pending_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to update pending transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to update pending transaction") });
       }
     });
 
@@ -427,14 +458,15 @@ export function registerCashflowRoutes(app, {
         res.json(confirmed);
       } catch (error) {
         logError("cashflow_pending_confirm_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to confirm pending transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to confirm pending transaction") });
       }
     });
 
     app.post("/api/pending/recalculate", async (req, res) => {
-      const userId = resolveRequestUser(req);
+      let userId = "";
 
       try {
+        userId = resolveRequestUser(req);
         let deletedPendingCount = 0;
         const db = openPlanningDb(userId);
 
@@ -462,15 +494,16 @@ export function registerCashflowRoutes(app, {
         logCashflowError("cashflow_pending_recalculate_failed", error, {
           userId
         });
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to recalculate pending transactions") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to recalculate pending transactions") });
       }
     });
 
     app.post("/api/future/:id/move-to-pending", async (req, res) => {
-      const userId = resolveRequestUser(req);
+      let userId = "";
       const occurrenceKey = typeof req.body?.occurrenceKey === "string" ? req.body.occurrenceKey : "";
 
       try {
+        userId = resolveRequestUser(req);
         const moved = moveFutureTransactionToPending(userId, req.params.id, { occurrenceKey });
         res.json({
           ...getSnapshot(userId),
@@ -483,7 +516,7 @@ export function registerCashflowRoutes(app, {
           occurrenceKey,
           error: error.message || String(error)
         });
-        res.status(error.message === "Future transaction not found" ? 404 : 500).json({ error: await apiErrorMessage(req, error, "Failed to move future transaction to pending") });
+        res.status(error.status || (error.message === "Future transaction not found" ? 404 : 500)).json({ error: await apiErrorMessage(req, error, "Failed to move future transaction to pending") });
       }
     });
 
@@ -494,7 +527,7 @@ export function registerCashflowRoutes(app, {
         res.json(createRecurringExpense(userId, req.body));
       } catch (error) {
         logError("cashflow_recurring_expense_create_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create recurring expense") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create recurring expense") });
       }
     });
 
@@ -505,7 +538,7 @@ export function registerCashflowRoutes(app, {
         res.json(updateRecurringExpense(userId, req.params.id, req.body));
       } catch (error) {
         logError("cashflow_recurring_expense_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to update recurring expense") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to update recurring expense") });
       }
     });
 
@@ -515,7 +548,7 @@ export function registerCashflowRoutes(app, {
         res.json(deleteRecurringExpense(userId, req.params.id));
       } catch (error) {
         logError("cashflow_recurring_expense_delete_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to delete recurring expense") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to delete recurring expense") });
       }
     });
 
@@ -526,7 +559,7 @@ export function registerCashflowRoutes(app, {
         res.json(createRecurringIncome(userId, req.body));
       } catch (error) {
         logError("cashflow_recurring_income_create_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create recurring income") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create recurring income") });
       }
     });
 
@@ -537,7 +570,7 @@ export function registerCashflowRoutes(app, {
         res.json(updateRecurringIncome(userId, req.params.id, req.body));
       } catch (error) {
         logError("cashflow_recurring_income_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to update recurring income") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to update recurring income") });
       }
     });
 
@@ -547,7 +580,7 @@ export function registerCashflowRoutes(app, {
         res.json(deleteRecurringIncome(userId, req.params.id));
       } catch (error) {
         logError("cashflow_recurring_income_delete_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to delete recurring income") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to delete recurring income") });
       }
     });
 
@@ -558,7 +591,7 @@ export function registerCashflowRoutes(app, {
         res.json(createGoal(userId, req.body));
       } catch (error) {
         logError("cashflow_goal_create_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create goal") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create goal") });
       }
     });
 
@@ -569,7 +602,7 @@ export function registerCashflowRoutes(app, {
         res.json(updateGoal(userId, req.params.id, req.body));
       } catch (error) {
         logError("cashflow_goal_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to update goal") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to update goal") });
       }
     });
 
@@ -579,7 +612,7 @@ export function registerCashflowRoutes(app, {
         res.json(deleteGoal(userId, req.params.id));
       } catch (error) {
         logError("cashflow_goal_delete_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to delete goal") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to delete goal") });
       }
     });
 
@@ -590,7 +623,7 @@ export function registerCashflowRoutes(app, {
         res.json(createFlexTransaction(userId, req.body));
       } catch (error) {
         logError("cashflow_flex_create_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create flex transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create flex transaction") });
       }
     });
 
@@ -601,7 +634,7 @@ export function registerCashflowRoutes(app, {
         res.json(updateFlexTransaction(userId, req.params.id, req.body));
       } catch (error) {
         logError("cashflow_flex_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to update flex transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to update flex transaction") });
       }
     });
 
@@ -611,7 +644,7 @@ export function registerCashflowRoutes(app, {
         res.json(deleteFlexTransaction(userId, req.params.id));
       } catch (error) {
         logError("cashflow_flex_delete_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to delete flex transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to delete flex transaction") });
       }
     });
 
@@ -622,7 +655,7 @@ export function registerCashflowRoutes(app, {
         res.json(createOneOffTransaction(userId, req.body));
       } catch (error) {
         logError("cashflow_oneoff_create_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create one-off transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create one-off transaction") });
       }
     });
 
@@ -633,7 +666,7 @@ export function registerCashflowRoutes(app, {
         res.json(updateOneOffTransaction(userId, req.params.id, req.body));
       } catch (error) {
         logError("cashflow_oneoff_update_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to update one-off transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to update one-off transaction") });
       }
     });
 
@@ -643,14 +676,15 @@ export function registerCashflowRoutes(app, {
         res.json(deleteOneOffTransaction(userId, req.params.id));
       } catch (error) {
         logError("cashflow_oneoff_delete_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to delete one-off transaction") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to delete one-off transaction") });
       }
     });
 
     app.post("/api/regenerate-projections", async (req, res) => {
-      const userId = resolveRequestUser(req);
+      let userId = "";
 
       try {
+        userId = resolveRequestUser(req);
         const projection = await regenerateProjectionsWithFxRefresh(userId, {
           date: req.body?.date || null,
           refreshFxFirst: true
@@ -685,7 +719,7 @@ export function registerCashflowRoutes(app, {
           userId
         });
 
-        res.status(500).json({
+        res.status(error.status || 500).json({
           error: await apiErrorMessage(req, error, "Failed to regenerate projection")
         });
       }
@@ -698,7 +732,7 @@ export function registerCashflowRoutes(app, {
         res.json({ ok: true, path: backupPath });
       } catch (error) {
         logError("cashflow_backup_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to create backup") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to create backup") });
       }
     });
 
@@ -713,7 +747,7 @@ export function registerCashflowRoutes(app, {
         res.send(JSON.stringify(exported, null, 2));
       } catch (error) {
         logError("cashflow_full_export_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to export cashflow data") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to export cashflow data") });
       }
     });
 
@@ -744,7 +778,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_oneoff_csv_import_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to import one-off CSV") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to import one-off CSV") });
       }
     });
 
@@ -758,7 +792,7 @@ export function registerCashflowRoutes(app, {
         res.send(csv);
       } catch (error) {
         logError("cashflow_confirmed_ledger_csv_export_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to export confirmed ledger CSV") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to export confirmed ledger CSV") });
       }
     });
 
@@ -771,7 +805,7 @@ export function registerCashflowRoutes(app, {
         res.send(JSON.stringify(exported, null, 2));
       } catch (error) {
         logError("cashflow_sample_export_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to export sample dataset") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to export sample dataset") });
       }
     });
 
@@ -785,7 +819,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_sample_import_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to load sample dataset") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to load sample dataset") });
       }
     });
 
@@ -795,7 +829,7 @@ export function registerCashflowRoutes(app, {
         res.json(validateCashflowData(userId));
       } catch (error) {
         logError("cashflow_validate_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to run validation") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to run validation") });
       }
     });
 
@@ -809,7 +843,7 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         logError("cashflow_restore_failed", error);
-        res.status(500).json({ error: await apiErrorMessage(req, error, "Failed to restore backup") });
+        res.status(error.status || 500).json({ error: await apiErrorMessage(req, error, "Failed to restore backup") });
       }
     });
 }

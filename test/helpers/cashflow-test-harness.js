@@ -62,6 +62,10 @@ async function createCashflowTestHarness(options = {}) {
     appendApiLogLine: () => {}
   });
 
+  if (options.initializeUser !== false) {
+    cashflow.getSnapshot(userId);
+  }
+
   let server = null;
   let baseUrl = null;
 
@@ -73,8 +77,8 @@ async function createCashflowTestHarness(options = {}) {
     app.use(express.urlencoded({ extended: true }));
     cashflow.registerRoutes(app);
 
-    await new Promise(resolve => {
-      server = app.listen(0, "127.0.0.1", resolve);
+    server = await new Promise(resolve => {
+      const listeningServer = app.listen(0, "127.0.0.1", () => resolve(listeningServer));
     });
 
     const address = server.address();
@@ -85,8 +89,8 @@ async function createCashflowTestHarness(options = {}) {
   async function request(pathname, requestOptions = {}) {
     const url = `${await startServer()}${pathname}`;
     const headers = {
-      "x-cashflow-user-id": userId,
       ...(requestOptions.body !== undefined ? { "content-type": "application/json" } : {}),
+      ...(requestOptions.skipUserHeader ? {} : { "x-cashflow-user-id": userId }),
       ...(requestOptions.headers || {})
     };
 

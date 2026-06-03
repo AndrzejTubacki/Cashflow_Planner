@@ -27,6 +27,29 @@ function latestBackupId(harness) {
   }
 }
 
+function insertLedgerCurrencyEvent(harness, id, oldCurrency = "PLN", newCurrency = "USD") {
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare(`
+      INSERT INTO ledger_currency_events (
+        id, old_currency, new_currency, old_balance, converted_opening_balance,
+        fx_rate, rate_date, source, details, created_at
+      ) VALUES (?, ?, ?, 100, 25, 0.25, '2026-06-01', 'test', '{}', datetime('now'))
+    `).run(id, oldCurrency, newCurrency);
+  } finally {
+    db.close();
+  }
+}
+
+function ledgerCurrencyEventIds(harness) {
+  const db = harness.openPlanningDb();
+  try {
+    return db.prepare("SELECT id FROM ledger_currency_events ORDER BY id").all().map(row => row.id);
+  } finally {
+    db.close();
+  }
+}
+
 test("backup and restore preserve planning data and validate after restore", async () => withHarness(async harness => {
   await harness.api("/api/settings", {
     method: "PUT",
@@ -87,4 +110,32 @@ test("backup and restore preserve planning data and validate after restore", asy
   assert.equal(validation.ok, true);
   assert.equal(restored.settings.fx_provider, before.settings.fx_provider);
   assert.equal(restored.settings.future_periods, before.settings.future_periods);
+}));
+
+test("backup and restore replace ledger currency events", async () => withHarness(async harness => {
+  insertLedgerCurrencyEvent(harness, "event-backed-up");
+
+  await harness.api("/api/backup", { method: "POST", body: {} });
+  const backupId = latestBackupId(harness);
+  assert.ok(backupId);
+
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare("DELETE FROM ledger_currency_events").run();
+    db.prepare(`
+      INSERT INTO ledger_currency_events (
+        id, old_currency, new_currency, old_balance, converted_opening_balance,
+        fx_rate, rate_date, source, details, created_at
+      ) VALUES ('event-live-only', 'USD', 'EUR', 10, 9, 0.9, '2026-06-02', 'test', '{}', datetime('now'))
+    `).run();
+  } finally {
+    db.close();
+  }
+
+  await harness.api(`/api/restore/${encodeURIComponent(backupId)}`, {
+    method: "POST",
+    body: {}
+  });
+
+  assert.deepEqual(ledgerCurrencyEventIds(harness), ["event-backed-up"]);
 }));

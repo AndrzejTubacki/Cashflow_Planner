@@ -11,24 +11,13 @@ import {
   normalizeFxProvider,
   normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
-
-const USER_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+import { normalizeUserId, userNotFoundError } from "./cashflow-user-utils.js";
 
 function initPragmas(db) {
   db.pragma("foreign_keys = ON");
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   db.pragma("busy_timeout = 5000");
-}
-
-function normalizeUserId(value) {
-  const userId = String(value || "").trim();
-
-  if (!USER_ID_RE.test(userId) || userId.startsWith("_")) {
-    throw new Error("User ID must use 1-64 letters, numbers, underscores, or hyphens.");
-  }
-
-  return userId;
 }
 
 function normalizePermissions(value) {
@@ -45,6 +34,7 @@ function normalizePermissions(value) {
 }
 
 export function createCashflowGlobalService({
+  cashflowUserStorageExists,
   dataDir,
   listCashflowUserIds,
   normalizeLocale = value => String(value || "en"),
@@ -111,6 +101,28 @@ export function createCashflowGlobalService({
     return normalizedId;
   }
 
+  function metadataUser(db, userId) {
+    const normalizedId = normalizeUserId(userId);
+    return db.prepare(`
+      SELECT id, display_name, permissions
+      FROM users
+      WHERE id = ?
+    `).get(normalizedId);
+  }
+
+  function userExists(userId) {
+    const normalizedId = normalizeUserId(userId);
+    if (normalizedId === "local") return true;
+    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) return true;
+
+    const db = openGlobalDb();
+    try {
+      return Boolean(metadataUser(db, normalizedId));
+    } finally {
+      db.close();
+    }
+  }
+
   function applyDefaultsToUser(userId, options = null) {
     const defaults = options || getGlobalOptions();
     const db = openPlanningDb(userId);
@@ -169,7 +181,7 @@ export function createCashflowGlobalService({
     const db = openGlobalDb();
     try {
       const existing = db.prepare("SELECT id FROM users WHERE id = ?").get(userId);
-      if (existing) {
+      if (existing || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId))) {
         throw new Error("User already exists");
       }
 
@@ -183,13 +195,18 @@ export function createCashflowGlobalService({
 
     openPlanningDb(userId).close();
     applyDefaultsToUser(userId, options);
-    return resolveSession(userId);
+    return selectUser(userId);
   }
 
-  function markUserSelected(userId) {
+  function selectUser(userId = "") {
+    const normalizedId = normalizeUserId(userId);
+    if (normalizedId !== "local" && !userExists(normalizedId)) {
+      throw userNotFoundError(normalizedId);
+    }
+
     const db = openGlobalDb();
     try {
-      const normalizedId = ensureUserMetadata(db, userId);
+      ensureUserMetadata(db, normalizedId);
       db.prepare(`
         UPDATE users
         SET last_selected_at = datetime('now'),
@@ -197,7 +214,7 @@ export function createCashflowGlobalService({
         WHERE id = ?
       `).run(normalizedId);
       openPlanningDb(normalizedId).close();
-      return normalizedId;
+      return resolveSession(normalizedId);
     } finally {
       db.close();
     }
@@ -213,14 +230,18 @@ export function createCashflowGlobalService({
       };
     }
 
-    const normalizedId = markUserSelected(userId);
+    const normalizedId = normalizeUserId(userId);
+    if (!userExists(normalizedId)) {
+      throw userNotFoundError(normalizedId);
+    }
+
     const db = openGlobalDb();
     try {
-      const row = db.prepare(`
-        SELECT id, display_name, permissions
-        FROM users
-        WHERE id = ?
-      `).get(normalizedId);
+      let row = metadataUser(db, normalizedId);
+      if (!row && (normalizedId === "local" || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)))) {
+        ensureUserMetadata(db, normalizedId);
+        row = metadataUser(db, normalizedId);
+      }
       return {
         authenticated: true,
         userId: row?.id || normalizedId,
@@ -275,6 +296,8 @@ export function createCashflowGlobalService({
     getGlobalOptions,
     listUsers,
     resolveSession,
+    selectUser,
+    userExists,
     updateGlobalOptions
   };
 }

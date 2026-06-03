@@ -131,6 +131,59 @@ async function assertTab(page, tabId, selector, expectedText) {
   await assert.match(await tab.textContent(), expectedText);
 }
 
+async function completeSetupIfNeeded(page) {
+  if (await page.locator("[data-cashflow-setup]").isVisible().catch(() => false)) {
+    await page.locator('input[name="income_amount"]').fill("1000");
+    await page.locator("[data-cashflow-setup-form] button[type='submit']").click();
+    await page.waitForSelector("[data-cashflow-page]", { state: "visible" });
+  }
+}
+
+async function openOneOffFutureSection(page) {
+  await page.locator("[data-cashflow-oneoff-tab] details").evaluateAll(detailsList => {
+    for (const details of detailsList) {
+      details.open = true;
+    }
+  });
+}
+
+async function assertModalUsesSelectedUser(page) {
+  const smokeUserId = `browser_smoke_${Date.now()}`;
+
+  await page.locator("[data-cashflow-logout]").click();
+  await page.waitForSelector("[data-cashflow-user-selection]", { state: "visible" });
+  await page.locator('input[name="userId"]').fill(smokeUserId);
+  await page.locator('input[name="displayName"]').fill("Browser Smoke");
+  await page.locator("[data-cashflow-create-user-form] button[type='submit']").click();
+  await page.waitForSelector("[data-cashflow-page], [data-cashflow-setup]", { state: "visible" });
+  await completeSetupIfNeeded(page);
+
+  await page.locator('[data-cashflow-tab="oneoff"]').click();
+  await page.locator("[data-cashflow-add-oneoff]").click();
+  await page.locator("[data-cashflow-modal-form] input[name='name']").fill("Smoke modal one-off");
+  await page.locator("[data-cashflow-modal-form] input[name='amount']").fill("42");
+  await page.locator("[data-cashflow-modal-form] input[name='date']").fill("2099-01-15");
+  await page.locator("[data-cashflow-modal-form] button[type='submit']").click();
+  await page.locator("[data-cashflow-modal-root]").waitFor({ state: "detached" });
+  await openOneOffFutureSection(page);
+  await page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: "Smoke modal one-off" }).waitFor({ state: "visible" });
+
+  await page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: "Smoke modal one-off" }).locator("[data-edit-tx]").click();
+  await page.locator("[data-cashflow-modal-form] input[name='name']").fill("Smoke edited one-off");
+  await page.locator("[data-cashflow-modal-form] button[type='submit']").click();
+  await page.locator("[data-cashflow-modal-root]").waitFor({ state: "detached" });
+  await openOneOffFutureSection(page);
+  await page.locator('[data-cashflow-oneoff-tab] tr[data-tx-type="one-off"]', { hasText: "Smoke edited one-off" }).waitFor({ state: "visible" });
+
+  await page.locator("[data-cashflow-logout]").click();
+  await page.waitForSelector("[data-cashflow-user-selection]", { state: "visible" });
+  await page.locator('[data-cashflow-select-user="local"]').click();
+  await page.waitForSelector("[data-cashflow-page], [data-cashflow-setup]", { state: "visible" });
+  await completeSetupIfNeeded(page);
+  await page.locator('[data-cashflow-tab="oneoff"]').click();
+  await assert.doesNotMatch(await page.locator("[data-cashflow-oneoff-tab]").textContent(), /Smoke edited one-off/);
+}
+
 async function runBrowserSmoke(baseUrl) {
   const executablePath = SYSTEM_CHROME_CANDIDATES.find(candidate => existsSync(candidate));
   const browser = await chromium.launch(executablePath ? { executablePath } : {});
@@ -144,11 +197,7 @@ async function runBrowserSmoke(baseUrl) {
       await page.waitForSelector("[data-cashflow-page], [data-cashflow-setup]", { state: "visible" });
     }
 
-    if (await page.locator("[data-cashflow-setup]").isVisible().catch(() => false)) {
-      await page.locator('input[name="income_amount"]').fill("1000");
-      await page.locator("[data-cashflow-setup-form] button[type='submit']").click();
-      await page.waitForSelector("[data-cashflow-page]", { state: "visible" });
-    }
+    await completeSetupIfNeeded(page);
 
     await page.locator("[data-cashflow-page]").waitFor({ state: "visible" });
     await assert.match(await page.locator("body").textContent(), /Cashflow/);
@@ -165,6 +214,7 @@ async function runBrowserSmoke(baseUrl) {
     await assertTab(page, "flex", "[data-cashflow-flex-tab]", /Flex[\s\S]*Add flex/);
     await assertTab(page, "priority", "[data-cashflow-priority-tab]", /Operating priority[\s\S]*Goal priority/);
     await assertTab(page, "settings", "[data-cashflow-settings-tab]", /Settings[\s\S]*General[\s\S]*Currency & Exchange/);
+    await assertModalUsesSelectedUser(page);
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});

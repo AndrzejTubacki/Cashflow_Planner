@@ -279,6 +279,7 @@ export default {
     "Failed to load admin options": "Nie udało się wczytać opcji administratora",
     "Failed to load session": "Nie udało się wczytać sesji",
     "Failed to save admin options": "Nie udało się zapisać opcji administratora",
+    "Failed to select user": "Nie udało się wybrać użytkownika",
     "First-run setup": "Konfiguracja początkowa",
     "Global options": "Opcje globalne",
     "Global options saved": "Opcje globalne zapisane",

@@ -41,6 +41,7 @@ function createCashflowModule({
   // Resolve all per-user file paths: planning DB, yearly ledger DBs, and backup folders.
   const {
     backupRootDir,
+    cashflowUserStorageExists,
     directorySizeBytes,
     ledgerDbPath,
     listCashflowUserIds,
@@ -173,8 +174,11 @@ function createCashflowModule({
     getGlobalOptions,
     listUsers,
     resolveSession,
+    selectUser,
+    userExists,
     updateGlobalOptions
   } = createCashflowGlobalService({
+    cashflowUserStorageExists,
     dataDir,
     listCashflowUserIds,
     normalizeLocale,
@@ -371,6 +375,7 @@ function createCashflowModule({
       regenerateProjectionsWithFxRefresh,
       resolveRequestUser,
       resolveSession,
+      selectUser,
       restoreBackup,
       importFullData,
       importOneOffCsv,
@@ -458,8 +463,15 @@ function createCashflowModule({
 
   function resolveRequestUser(req) {
     // The standalone UI uses local; API clients can select another user with this header.
-    const userId = req.headers["x-cashflow-user-id"] || "local";
-    return String(userId).trim() || "local";
+    const hasUserHeader = Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-user-id");
+    const userId = hasUserHeader ? req.headers["x-cashflow-user-id"] : "local";
+    const normalizedId = hasUserHeader ? String(userId).trim() : "local";
+    if (!userExists(normalizedId) || !cashflowUserStorageExists(normalizedId)) {
+      const error = new Error(`User not found: ${normalizedId}`);
+      error.status = 404;
+      throw error;
+    }
+    return normalizedId;
   }
 
   // Schedule recurring maintenance: midnight transitions, FX refresh, notifications, backups.

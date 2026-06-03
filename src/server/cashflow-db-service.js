@@ -9,6 +9,7 @@ import {
   applyPlanningMigrations
 } from "./cashflow-migrations.js";
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
+import { userNotFoundError } from "./cashflow-user-utils.js";
 
 function initPragmas(db) {
   db.pragma("foreign_keys = ON");
@@ -28,9 +29,13 @@ export function createCashflowDbService({
   planningDbPath,
   userDataDir
 }) {
-  function openPlanningDb(userId) {
-    const dbPath = planningDbPath(userId);
+  function openPlanningDb(userId, options = {}) {
+    const { create = true } = options;
+    const dbPath = planningDbPath(userId, { create });
     const isNew = !fs.existsSync(dbPath);
+    if (!create && isNew) {
+      throw userNotFoundError(userId);
+    }
     const db = new Database(dbPath);
     initPragmas(db);
 
@@ -43,9 +48,13 @@ export function createCashflowDbService({
     return db;
   }
 
-  function openLedgerDb(userId, year) {
-    const dbPath = ledgerDbPath(userId, year);
+  function openLedgerDb(userId, year, options = {}) {
+    const { create = true } = options;
+    const dbPath = ledgerDbPath(userId, year, { create });
     const isNew = !fs.existsSync(dbPath);
+    if (!create && isNew) {
+      throw userNotFoundError(userId);
+    }
     const db = new Database(dbPath);
     initPragmas(db);
 
@@ -59,7 +68,7 @@ export function createCashflowDbService({
   }
 
   function listLedgerYears(userId) {
-    const dir = userDataDir(userId);
+    const dir = userDataDir(userId, { create: false });
     if (!fs.existsSync(dir)) return [];
 
     return fs.readdirSync(dir)

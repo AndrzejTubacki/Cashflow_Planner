@@ -1,38 +1,75 @@
 import fs from "fs";
 import path from "path";
+import { createHttpError, normalizeUserId } from "./cashflow-user-utils.js";
 
 export function createCashflowStoragePaths(dataDir) {
-  function userDataDir(userId) {
-    const dir = path.join(dataDir, userId);
-    if (!fs.existsSync(dir)) {
+  const rootDir = path.resolve(dataDir);
+
+  function containedPath(...parts) {
+    const resolved = path.resolve(rootDir, ...parts);
+    if (resolved !== rootDir && !resolved.startsWith(`${rootDir}${path.sep}`)) {
+      throw createHttpError("Resolved Cashflow path escaped DATA_DIR", 400);
+    }
+    return resolved;
+  }
+
+  function userDataDir(userId, options = {}) {
+    const { create = true } = options;
+    const normalizedId = normalizeUserId(userId);
+    const dir = containedPath(normalizedId);
+    if (create && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
     return dir;
   }
 
-  function planningDbPath(userId) {
-    return path.join(userDataDir(userId), "planning.sqlite");
+  function planningDbPath(userId, options = {}) {
+    return path.join(userDataDir(userId, options), "planning.sqlite");
   }
 
-  function ledgerDbPath(userId, year) {
-    return path.join(userDataDir(userId), `ledger_${year}.sqlite`);
+  function ledgerDbPath(userId, year, options = {}) {
+    return path.join(userDataDir(userId, options), `ledger_${year}.sqlite`);
   }
 
-  function backupDir(userId) {
-    const dir = path.join(userDataDir(userId), "backups");
-    if (!fs.existsSync(dir)) {
+  function backupDir(userId, options = {}) {
+    const { create = true } = options;
+    const dir = path.join(userDataDir(userId, options), "backups");
+    if (create && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
     return dir;
+  }
+
+  function planningDbExists(userId) {
+    return fs.existsSync(planningDbPath(userId, { create: false }));
+  }
+
+  function cashflowUserStorageExists(userId) {
+    const dir = userDataDir(userId, { create: false });
+    if (!fs.existsSync(dir)) return false;
+    if (fs.existsSync(path.join(dir, "planning.sqlite"))) return true;
+
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .some(entry => entry.isFile() && /^ledger_\d{4}\.sqlite$/.test(entry.name));
+  }
+
+  function userDataDirExists(userId) {
+    return fs.existsSync(userDataDir(userId, { create: false }));
   }
 
   function listCashflowUserIds() {
-    if (!fs.existsSync(dataDir)) return [];
+    if (!fs.existsSync(rootDir)) return [];
 
-    return fs.readdirSync(dataDir, { withFileTypes: true })
+    return fs.readdirSync(rootDir, { withFileTypes: true })
       .filter(entry => entry.isDirectory())
       .map(entry => entry.name)
-      .filter(userId => fs.existsSync(planningDbPath(userId)));
+      .filter(userId => {
+        try {
+          return cashflowUserStorageExists(userId);
+        } catch {
+          return false;
+        }
+      });
   }
 
   function directorySizeBytes(dir) {
@@ -52,24 +89,28 @@ export function createCashflowStoragePaths(dataDir) {
   }
 
   function backupRootDir(userId, settings = null) {
+    const normalizedId = normalizeUserId(userId);
     const configured = settings?.backup_location && String(settings.backup_location).trim();
 
     if (configured) {
-      const dir = path.join(configured, userId, "cashflow");
+      const dir = path.join(configured, normalizedId, "cashflow");
       fs.mkdirSync(dir, { recursive: true });
       return dir;
     }
 
-    return backupDir(userId);
+    return backupDir(normalizedId);
   }
 
   return {
     backupDir,
     backupRootDir,
+    cashflowUserStorageExists,
     directorySizeBytes,
     ledgerDbPath,
     listCashflowUserIds,
     planningDbPath,
+    planningDbExists,
+    userDataDirExists,
     userDataDir
   };
 }

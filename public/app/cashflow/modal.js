@@ -232,8 +232,9 @@ export function openCashflowModal({ cashflow, entityType, action = "create", id 
       const payload = coerceCashflowModalPayload(entityType, form);
       const url = cashflowApiForEntity(entityType, action === "edit" ? id : null);
       const method = action === "edit" ? "PUT" : "POST";
+      const fetchFn = window.cashflowFetch || fetch;
 
-      const response = await fetch(url, {
+      const response = await fetchFn(url, {
         method,
         headers: {
           "Content-Type": "application/json"
