@@ -120,7 +120,7 @@ test("flex min_amount greater than max_amount is rejected on create and update",
   assert.match(updateResult.body.error, /min amount/i);
 }));
 
-test("confirmed goal flex and one-off sources cannot be deleted", async () => withHarness(async harness => {
+test("confirmed goal and flex sources cannot be deleted while confirmed one-offs can be edited or uncoupled", async () => withHarness(async harness => {
   await configure(harness);
   await seedConfirmedIncome(harness);
 
@@ -195,16 +195,114 @@ test("confirmed goal flex and one-off sources cannot be deleted", async () => wi
     });
   }
 
+  const lowerAmount = await harness.request(`/api/one-off/${encodeURIComponent(oneOff.id)}`, {
+    method: "PUT",
+    body: {
+      name: "Too low",
+      currency: "PLN",
+      amount: 40,
+      type: "expense",
+      date: "2026-01-02"
+    }
+  });
+  const changeCurrency = await harness.request(`/api/one-off/${encodeURIComponent(oneOff.id)}`, {
+    method: "PUT",
+    body: {
+      currency: "EUR",
+      amount: 60
+    }
+  });
+  const increaseAmount = await harness.request(`/api/one-off/${encodeURIComponent(oneOff.id)}`, {
+    method: "PUT",
+    body: {
+      name: "Confirmed one-off source updated",
+      currency: "PLN",
+      amount: 60,
+      type: "expense",
+      date: "2026-01-05"
+    }
+  });
   const deleteOneOff = await harness.request(`/api/one-off/${encodeURIComponent(oneOff.id)}`, { method: "DELETE" });
   const deleteGoal = await harness.request(`/api/goals/${encodeURIComponent(goal.id)}`, { method: "DELETE" });
   const deleteFlex = await harness.request(`/api/flex/${encodeURIComponent(flex.id)}`, { method: "DELETE" });
 
-  assert.equal(deleteOneOff.response.status, 400);
-  assert.match(deleteOneOff.body.error, /confirmed one-off/i);
+  assert.equal(lowerAmount.response.status, 400);
+  assert.match(lowerAmount.body.error, /already confirmed amount/i);
+  assert.equal(changeCurrency.response.status, 400);
+  assert.match(changeCurrency.body.error, /currency/i);
+  assert.equal(increaseAmount.response.status, 200);
+  assert.equal(increaseAmount.body.amount, 60);
+  assert.equal(deleteOneOff.response.status, 200);
+  {
+    const ledgerDb = harness.openLedgerDb("2026");
+    try {
+      const row = ledgerDb.prepare("SELECT source_one_off_id FROM confirmed_transactions WHERE name = ?").get("Confirmed one-off source");
+      assert.equal(row.source_one_off_id, null);
+    } finally {
+      ledgerDb.close();
+    }
+  }
   assert.equal(deleteGoal.response.status, 400);
   assert.match(deleteGoal.body.error, /confirmed goal/i);
   assert.equal(deleteFlex.response.status, 400);
   assert.match(deleteFlex.body.error, /confirmed flex/i);
+}));
+
+test("budget period income setting is cleared when selected income is disabled or deleted", async () => withHarness(async harness => {
+  await configure(harness);
+
+  const income = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Period salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      period_setting: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 1,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  assert.equal(snapshot.settings.budget_period_income_id, income.id);
+
+  await harness.api(`/api/recurring-incomes/${encodeURIComponent(income.id)}`, {
+    method: "PUT",
+    body: {
+      ...income,
+      active: 0,
+      period_setting: 1
+    }
+  });
+
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.settings.budget_period_income_id, null);
+
+  const secondIncome = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Second salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      period_setting: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 1,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  await harness.api(`/api/recurring-incomes/${encodeURIComponent(secondIncome.id)}`, { method: "DELETE" });
+
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.settings.budget_period_income_id, null);
+  assert.ok(snapshot.periodSummaries.every(period => /^\d{4}-\d{2}$/.test(period.period)));
 }));
 
 test("deleting non-confirmed one-off goal and flex removes generated future and pending rows", async () => withHarness(async harness => {

@@ -204,9 +204,11 @@ function createCashflowModule({
     updateRecurringExpense,
     updateRecurringIncome
   } = createCashflowPlanMutationService({
+    listLedgerYears,
     loadAllConfirmedTransactions,
     newestConfirmedTransactionDate,
     normalizeRecurringInput,
+    openLedgerDb,
     openPlanningDb,
     recalculatePlanningRunningBalances,
     requireStartMonthYearIfNeeded,
@@ -451,11 +453,13 @@ function createCashflowModule({
     collectCurrenciesForFxSnapshot,
     ensureFxCacheForMutation,
     getCachedFxSnapshot,
+    latestConfirmedBalance,
     listCashflowUserIds,
     logCashflowError,
     logError,
     logServerEvent,
     openPlanningDb,
+    pendingNetBalance,
     refreshNbpFxCacheForUser,
     regenerateProjections,
     safeGetCurrentFxSnapshot

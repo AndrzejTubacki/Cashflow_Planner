@@ -362,7 +362,8 @@ export function attachCashflowHandlers(root, props = {}) {
         "notify_income_missing",
         "notify_pending_summary",
         "notify_goal_funded",
-        "notify_fx_changed"
+        "notify_fx_changed",
+        "minimum_reserve_enabled"
       ];
 
       checkboxNames.forEach(name => {
@@ -370,6 +371,7 @@ export function attachCashflowHandlers(root, props = {}) {
       });
 
       updates.future_periods = Number(updates.future_periods || 11);
+      updates.minimum_reserve_amount = Number(updates.minimum_reserve_amount || 0);
       updates.fx_buffer_percent = Number(updates.fx_buffer_percent || 0);
       updates.necessary_underfunded_repeat_days = Number(updates.necessary_underfunded_repeat_days || 1);
       updates.fx_used_currencies = selectedOptionValues(selectedCurrencies);

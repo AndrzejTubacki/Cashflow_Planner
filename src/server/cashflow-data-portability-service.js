@@ -1,4 +1,4 @@
-import { requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
+import { requireHolidayCountry, requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
@@ -229,6 +229,7 @@ function normalizeExportPayload(payload) {
 function validateExportPayloadRows(exportData) {
   const settings = exportData.planning.settings[0] || {};
   requireSupportedCurrency(settings.ledger_currency || "PLN", "settings.ledger_currency");
+  requireHolidayCountry(settings.holiday_country || "PL", "settings.holiday_country");
 
   for (const tableName of ["recurring_expenses", "recurring_incomes", "goals", "flex_transactions", "one_off_transactions", "pending_transactions"]) {
     for (const row of exportData.planning[tableName] || []) {
@@ -246,6 +247,9 @@ function validateExportPayloadRows(exportData) {
       }
       if (row.start_month_year) {
         requireIsoMonth(row.start_month_year, `${tableName}.start_month_year`);
+      }
+      if (row.anchor_holiday_country) {
+        requireHolidayCountry(row.anchor_holiday_country, `${tableName}.anchor_holiday_country`);
       }
     }
   }
@@ -278,7 +282,10 @@ function sampleExport() {
         ledger_currency: "PLN",
         timezone: "Europe/Warsaw",
         locale: "en",
+        holiday_country: "PL",
         future_periods: 4,
+        minimum_reserve_enabled: 1,
+        minimum_reserve_amount: 500,
         budget_period_income_id: "sample-income-salary",
         fx_buffer_percent: 0,
         fx_provider: "manual",

@@ -50,11 +50,17 @@ test("planning migration from version 8 adds locale and preserves valid settings
   const columns = db.prepare("PRAGMA table_info(settings)").all().map(column => column.name);
   const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
 
-  assert.equal(version, 13);
+  assert.equal(version, 14);
   assert.equal(columns.includes("locale"), true);
   assert.equal(columns.includes("setup_completed"), true);
   assert.equal(columns.includes("setup_completed_at"), true);
+  assert.equal(columns.includes("holiday_country"), true);
+  assert.equal(columns.includes("minimum_reserve_enabled"), true);
+  assert.equal(columns.includes("minimum_reserve_amount"), true);
   assert.equal(settings.locale, "en");
+  assert.equal(settings.holiday_country, "PL");
+  assert.equal(settings.minimum_reserve_enabled, 0);
+  assert.equal(settings.minimum_reserve_amount, 0);
   assert.equal(settings.setup_completed, 0);
   assert.equal(settings.fx_provider, "manual");
   assert.equal(settings.fx_used_currencies, '["EUR"]');
@@ -99,7 +105,7 @@ test("planning migration from version 9 adds prediction fallback fields", () => 
   const expense = db.prepare("SELECT * FROM recurring_expenses WHERE id = 'exp-1'").get();
   const income = db.prepare("SELECT * FROM recurring_incomes WHERE id = 'inc-1'").get();
 
-  assert.equal(version, 13);
+  assert.equal(version, 14);
   assert.equal(expenseColumns.includes("prediction_substitute_missing"), true);
   assert.equal(incomeColumns.includes("prediction_substitute_missing"), true);
   assert.equal(expenseColumns.includes("prediction_min_recorded_months"), true);

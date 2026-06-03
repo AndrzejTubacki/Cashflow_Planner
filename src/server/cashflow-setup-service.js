@@ -1,5 +1,5 @@
 import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
+import { todayInTimezone, normalizeTimezone, requireHolidayCountry } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { badRequest } from "./cashflow-user-utils.js";
@@ -49,6 +49,7 @@ export function createCashflowSetupService({
     const ledgerCurrency = requireSupportedCurrency(input.ledger_currency || input.currency || "PLN", "ledger_currency");
     const locale = normalizeLocale(input.locale || "en");
     const timezone = normalizeTimezone(input.timezone || DEFAULT_TIMEZONE);
+    const holidayCountry = requireHolidayCountry(input.holiday_country || "PL", "holiday_country");
     const futurePeriods = Math.max(1, Math.min(60, Number(input.future_periods) || DEFAULT_FUTURE_PERIODS));
     const today = todayInTimezone(timezone);
     const openingBalanceRaw = Number(input.opening_balance || 0);
@@ -78,12 +79,13 @@ export function createCashflowSetupService({
           SET ledger_currency = ?,
               locale = ?,
               timezone = ?,
+              holiday_country = ?,
               future_periods = ?,
               setup_completed = 1,
               setup_completed_at = datetime('now'),
               updated_at = datetime('now')
           WHERE id = 1
-        `).run(ledgerCurrency, locale, timezone, futurePeriods);
+        `).run(ledgerCurrency, locale, timezone, holidayCountry, futurePeriods);
 
         if (Math.abs(openingBalance) > 0.0001) {
           const id = generateId("pending-opening-balance");
@@ -122,8 +124,8 @@ export function createCashflowSetupService({
               repeat_every_months, start_month_year, anchor_type, anchor_day_of_month,
               anchor_offset_days, anchor_business_day_adjustment, anchor_holiday_country,
               period_setting, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'fixed', 1, 1, ?, 'day_of_month', ?, 0, 'none', 'PL', 1, datetime('now'), datetime('now'))
-          `).run(id, incomeName, ledgerCurrency, incomeAmount, monthKey(today), incomeAnchorDay);
+            ) VALUES (?, ?, ?, ?, 'fixed', 1, 1, ?, 'day_of_month', ?, 0, 'none', ?, 1, datetime('now'), datetime('now'))
+          `).run(id, incomeName, ledgerCurrency, incomeAmount, monthKey(today), incomeAnchorDay, holidayCountry);
 
           db.prepare(`
             UPDATE settings

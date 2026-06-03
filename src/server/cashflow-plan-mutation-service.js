@@ -1,5 +1,5 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
+import { requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { nullablePositiveAmount } from "./cashflow-money-utils.js";
@@ -9,8 +9,10 @@ import { reorderPriorityDomain, updatePlannedPriority } from "./cashflow-priorit
 
 export function createCashflowPlanMutationService({
   loadAllConfirmedTransactions,
+  listLedgerYears,
   newestConfirmedTransactionDate,
   normalizeRecurringInput,
+  openLedgerDb,
   openPlanningDb,
   recalculatePlanningRunningBalances,
   requireStartMonthYearIfNeeded,
@@ -23,6 +25,55 @@ export function createCashflowPlanMutationService({
 
   function requireDateOrDefault(value, fallback, fieldName = "date") {
     return requireIsoDate(value || fallback, fieldName);
+  }
+
+  function defaultHolidayCountry(db) {
+    const settings = db.prepare("SELECT holiday_country FROM settings WHERE id = 1").get() || {};
+    return requireHolidayCountry(settings.holiday_country || "PL", "holiday_country");
+  }
+
+  function normalizeAnchorHolidayCountry(db, value, existing = null) {
+    return requireHolidayCountry(value || existing || defaultHolidayCountry(db), "anchor_holiday_country");
+  }
+
+  function clearBudgetPeriodIncomeIfSelected(db, incomeId) {
+    db.prepare(`
+      UPDATE settings
+      SET budget_period_income_id = NULL,
+          updated_at = datetime('now')
+      WHERE id = 1
+        AND budget_period_income_id = ?
+    `).run(incomeId);
+  }
+
+  function confirmedOneOffRows(userId, oneOffId) {
+    return loadAllConfirmedTransactions(userId)
+      .filter(tx => tx.source_one_off_id === oneOffId);
+  }
+
+  function confirmedOneOffOriginalAmount(userId, oneOffId, currency, type) {
+    return confirmedOneOffRows(userId, oneOffId)
+      .filter(tx =>
+        String(tx.currency || "").toUpperCase() === String(currency || "").toUpperCase() &&
+        String(tx.type || "") === String(type || "")
+      )
+      .reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
+  }
+
+  function uncoupleConfirmedOneOffRows(userId, oneOffId) {
+    for (const year of listLedgerYears(userId)) {
+      const ledgerDb = openLedgerDb(userId, year);
+      try {
+        ledgerDb.prepare(`
+          UPDATE confirmed_transactions
+          SET source_one_off_id = NULL,
+              updated_at = datetime('now')
+          WHERE source_one_off_id = ?
+        `).run(oneOffId);
+      } finally {
+        ledgerDb.close();
+      }
+    }
   }
 
   function normalizePredictionSubstituteMissing(strategy, value) {
@@ -95,7 +146,7 @@ export function createCashflowPlanMutationService({
           input.anchor_day_of_month || null,
           Number(input.anchor_offset_days) || 0,
           input.anchor_business_day_adjustment || "none",
-          (input.anchor_holiday_country || "PL").toUpperCase(),
+          normalizeAnchorHolidayCountry(db, input.anchor_holiday_country),
           plannedTxId
         );
 
@@ -168,7 +219,7 @@ export function createCashflowPlanMutationService({
           merged.anchor_day_of_month || null,
           Number(merged.anchor_offset_days) || 0,
           merged.anchor_business_day_adjustment || "none",
-          String(merged.anchor_holiday_country || "PL").toUpperCase(),
+          normalizeAnchorHolidayCountry(db, merged.anchor_holiday_country, existing.anchor_holiday_country),
           id
         );
 
@@ -217,7 +268,8 @@ export function createCashflowPlanMutationService({
       result = db.transaction(() => {
         const id = input.id || generateId("rec-inc");
         const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
-        const periodSetting = input.period_setting ? 1 : 0;
+        const active = input.active !== false ? 1 : 0;
+        const periodSetting = active === 1 && input.period_setting ? 1 : 0;
 
         db.prepare(`
           INSERT INTO recurring_incomes (
@@ -235,14 +287,14 @@ export function createCashflowPlanMutationService({
           ["fixed", "12month_min"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
           normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
           normalizePredictionMinRecordedMonths(input.prediction_min_recorded_months),
-          input.active !== false ? 1 : 0,
+          active,
           repeatEveryMonths,
           input.start_month_year || null,
           ["day_of_month", "month_end"].includes(input.anchor_type) ? input.anchor_type : "month_end",
           input.anchor_day_of_month || null,
           Number(input.anchor_offset_days) || 0,
           input.anchor_business_day_adjustment || "none",
-          String(input.anchor_holiday_country || "PL").toUpperCase(),
+          normalizeAnchorHolidayCountry(db, input.anchor_holiday_country),
           periodSetting
         );
 
@@ -285,6 +337,8 @@ export function createCashflowPlanMutationService({
         if (!existing) throw notFound("Recurring income not found");
 
         const merged = normalizeRecurringInput(existing, input || {});
+        const nextActive = merged.active === false || Number(merged.active) === 0 ? 0 : 1;
+        const nextPeriodSetting = nextActive === 1 && merged.period_setting ? 1 : 0;
 
         db.prepare(`
           UPDATE recurring_incomes SET
@@ -312,19 +366,19 @@ export function createCashflowPlanMutationService({
           ["fixed", "12month_min"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
           normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
           normalizePredictionMinRecordedMonths(merged.prediction_min_recorded_months),
-          merged.active === false || Number(merged.active) === 0 ? 0 : 1,
+          nextActive,
           merged.repeat_every_months,
           merged.start_month_year || null,
           ["day_of_month", "month_end"].includes(merged.anchor_type) ? merged.anchor_type : "month_end",
           merged.anchor_day_of_month || null,
           Number(merged.anchor_offset_days) || 0,
           merged.anchor_business_day_adjustment || "none",
-          String(merged.anchor_holiday_country || "PL").toUpperCase(),
-          merged.period_setting ? 1 : 0,
+          normalizeAnchorHolidayCountry(db, merged.anchor_holiday_country, existing.anchor_holiday_country),
+          nextPeriodSetting,
           id
         );
 
-        if (merged.period_setting) {
+        if (nextPeriodSetting) {
           db.prepare(`
             UPDATE settings
             SET budget_period_income_id = ?, updated_at = datetime('now')
@@ -335,6 +389,8 @@ export function createCashflowPlanMutationService({
             UPDATE recurring_incomes
             SET period_setting = CASE WHEN id = ? THEN 1 ELSE 0 END
           `).run(id);
+        } else {
+          clearBudgetPeriodIncomeIfSelected(db, id);
         }
 
         return db.prepare("SELECT * FROM recurring_incomes WHERE id = ?").get(id);
@@ -353,7 +409,10 @@ export function createCashflowPlanMutationService({
         const existing = db.prepare("SELECT * FROM recurring_incomes WHERE id = ?").get(id);
         if (!existing) throw notFound("Recurring income not found");
 
+        db.prepare("DELETE FROM pending_transactions WHERE source_recurring_income_id = ?").run(id);
+        db.prepare("DELETE FROM future_transactions WHERE source_recurring_income_id = ?").run(id);
         db.prepare("DELETE FROM recurring_incomes WHERE id = ?").run(id);
+        clearBudgetPeriodIncomeIfSelected(db, id);
       })();
     } finally {
       db.close();
@@ -802,6 +861,29 @@ export function createCashflowPlanMutationService({
         const existing = db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
         if (!existing) throw notFound("One-off transaction not found");
 
+        const confirmedRows = confirmedOneOffRows(userId, id);
+        const nextCurrency = requireSupportedCurrency(input.currency || existing.currency || "PLN");
+        const nextType = ["income", "expense"].includes(input.type) ? input.type : existing.type;
+        const nextAmount = Math.abs(Number(input.amount ?? existing.amount) || 0);
+
+        if (confirmedRows.length) {
+          const existingCurrency = requireSupportedCurrency(existing.currency || "PLN");
+          const existingType = ["income", "expense"].includes(existing.type) ? existing.type : "expense";
+
+          if (nextCurrency !== existingCurrency) {
+            throw badRequest("Cannot change currency for a one-off transaction with confirmed ledger history");
+          }
+
+          if (nextType !== existingType) {
+            throw badRequest("Cannot change type for a one-off transaction with confirmed ledger history");
+          }
+
+          const confirmedAmount = confirmedOneOffOriginalAmount(userId, id, existingCurrency, existingType);
+          if (nextAmount + 0.0001 < confirmedAmount) {
+            throw badRequest("One-off transaction amount cannot be lower than the already confirmed amount");
+          }
+        }
+
         db.prepare(`
           UPDATE one_off_transactions SET
             name = ?,
@@ -813,9 +895,9 @@ export function createCashflowPlanMutationService({
           WHERE id = ?
         `).run(
           input.name || existing.name || "Unnamed",
-          requireSupportedCurrency(input.currency || existing.currency || "PLN"),
-          Math.abs(Number(input.amount ?? existing.amount) || 0),
-          ["income", "expense"].includes(input.type) ? input.type : existing.type,
+          nextCurrency,
+          nextAmount,
+          nextType,
           requireDateOrDefault(input.date || existing.date, todayForUser(db)),
           id
         );
@@ -830,19 +912,19 @@ export function createCashflowPlanMutationService({
   }
 
   function deleteOneOffTransaction(userId, id) {
-    const isConfirmed = loadAllConfirmedTransactions(userId)
-      .some(tx => tx.source_one_off_id === id);
-
-    if (isConfirmed) {
-      throw badRequest("Cannot delete confirmed one-off transaction");
+    let db = openPlanningDb(userId);
+    try {
+      const existing = db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
+      if (!existing) throw notFound("One-off transaction not found");
+    } finally {
+      db.close();
     }
 
-    const db = openPlanningDb(userId);
+    uncoupleConfirmedOneOffRows(userId, id);
+
+    db = openPlanningDb(userId);
     try {
       db.transaction(() => {
-        const existing = db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
-        if (!existing) throw notFound("One-off transaction not found");
-
         db.prepare("DELETE FROM pending_transactions WHERE source_one_off_id = ?").run(id);
         db.prepare("DELETE FROM future_transactions WHERE source_one_off_id = ?").run(id);
         db.prepare("DELETE FROM one_off_transactions WHERE id = ?").run(id);

@@ -6,7 +6,7 @@ import {
   DEFAULT_FX_BUFFER_PERCENT,
   DEFAULT_TIMEZONE
 } from "./cashflow-constants.js";
-import { normalizeTimezone } from "./cashflow-date-utils.js";
+import { normalizeHolidayCountry, normalizeTimezone, requireHolidayCountry } from "./cashflow-date-utils.js";
 import {
   normalizeFxProvider,
   normalizeSupportedCurrency,
@@ -64,6 +64,7 @@ export function createCashflowGlobalService({
         ledger_currency TEXT NOT NULL DEFAULT 'PLN',
         locale TEXT NOT NULL DEFAULT 'en',
         timezone TEXT NOT NULL DEFAULT 'Europe/Warsaw',
+        holiday_country TEXT NOT NULL DEFAULT 'PL',
         future_periods INTEGER NOT NULL DEFAULT ${DEFAULT_FUTURE_PERIODS},
         fx_provider TEXT NOT NULL DEFAULT 'nbp',
         fx_buffer_percent REAL NOT NULL DEFAULT ${DEFAULT_FX_BUFFER_PERCENT},
@@ -73,6 +74,18 @@ export function createCashflowGlobalService({
       INSERT OR IGNORE INTO global_options (id, updated_at)
       VALUES (1, datetime('now'));
     `);
+    const globalColumns = db.prepare("PRAGMA table_info(global_options)").all().map(row => row.name);
+    if (!globalColumns.includes("holiday_country")) {
+      db.exec("ALTER TABLE global_options ADD COLUMN holiday_country TEXT NOT NULL DEFAULT 'PL'");
+    }
+    db.prepare(`
+      UPDATE global_options
+      SET holiday_country = CASE
+            WHEN UPPER(COALESCE(holiday_country, 'PL')) IN ('PL', 'DE') THEN UPPER(COALESCE(holiday_country, 'PL'))
+            ELSE 'PL'
+          END
+      WHERE id = 1
+    `).run();
     return db;
   }
 
@@ -133,6 +146,7 @@ export function createCashflowGlobalService({
         SET ledger_currency = ?,
             locale = ?,
             timezone = ?,
+            holiday_country = ?,
             future_periods = ?,
             fx_provider = ?,
             fx_buffer_percent = ?,
@@ -143,6 +157,7 @@ export function createCashflowGlobalService({
         normalizeSupportedCurrency(defaults?.ledger_currency || "PLN"),
         normalizeLocale(defaults?.locale || "en"),
         normalizeTimezone(defaults?.timezone || DEFAULT_TIMEZONE),
+        normalizeHolidayCountry(defaults?.holiday_country || "PL"),
         Math.max(1, Math.min(60, Number(defaults?.future_periods) || DEFAULT_FUTURE_PERIODS)),
         normalizeFxProvider(defaults?.fx_provider || "nbp"),
         Math.max(0, Math.min(100, Number(defaults?.fx_buffer_percent) || DEFAULT_FX_BUFFER_PERCENT))
@@ -271,6 +286,7 @@ export function createCashflowGlobalService({
       ledger_currency: requireSupportedCurrency(updates.ledger_currency || current.ledger_currency || "PLN", "ledger_currency"),
       locale: normalizeLocale(updates.locale || current.locale || "en"),
       timezone: normalizeTimezone(updates.timezone || current.timezone || DEFAULT_TIMEZONE),
+      holiday_country: requireHolidayCountry(updates.holiday_country || current.holiday_country || "PL", "holiday_country"),
       future_periods: Math.max(1, Math.min(60, Number(updates.future_periods ?? current.future_periods) || DEFAULT_FUTURE_PERIODS)),
       fx_provider: normalizeFxProvider(updates.fx_provider || current.fx_provider || "nbp"),
       fx_buffer_percent: Math.max(0, Math.min(100, Number(updates.fx_buffer_percent ?? current.fx_buffer_percent) || 0))
@@ -283,6 +299,7 @@ export function createCashflowGlobalService({
         SET ledger_currency = ?,
             locale = ?,
             timezone = ?,
+            holiday_country = ?,
             future_periods = ?,
             fx_provider = ?,
             fx_buffer_percent = ?,
@@ -292,6 +309,7 @@ export function createCashflowGlobalService({
         safe.ledger_currency,
         safe.locale,
         safe.timezone,
+        safe.holiday_country,
         safe.future_periods,
         safe.fx_provider,
         safe.fx_buffer_percent

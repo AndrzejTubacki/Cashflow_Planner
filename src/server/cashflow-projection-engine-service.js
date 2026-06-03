@@ -48,6 +48,10 @@ export function createCashflowProjectionEngineService({
       const fxRatesChanged = previousFxJson !== null && previousFxJson !== currentFxJson;
 
       const futurePeriods = Number(settings?.future_periods) || DEFAULT_FUTURE_PERIODS;
+      const reserveFloor = Number(settings?.minimum_reserve_enabled || 0) === 1
+        ? Math.max(0, Number(settings?.minimum_reserve_amount || 0))
+        : 0;
+      const spendableBalance = (period) => Math.max(0, Number(period.available || 0) - reserveFloor);
 
       const recurringExpenses = db.prepare(`
         SELECT r.*, pt.operating_priority AS priority
@@ -156,7 +160,8 @@ export function createCashflowProjectionEngineService({
               SELECT COALESCE(SUM(ledger_amount), 0) AS v
               FROM future_transactions
               WHERE source_goal_id = ?
-            `).get(goal.id).v;
+                AND COALESCE(ledger_currency, 'PLN') = ?
+            `).get(goal.id, ledgerCurrency).v;
 
             const total =
               Number(confirmedGoalFunding.get(goal.id) || 0) +
@@ -339,6 +344,17 @@ export function createCashflowProjectionEngineService({
         currentPeriod.available = 0;
       }
 
+      function carryDebtToNextPeriod(periodIndex) {
+        const currentPeriod = periods[periodIndex];
+        const nextPeriod = periods[periodIndex + 1];
+
+        if (!currentPeriod || !nextPeriod) return;
+        if (Number(currentPeriod.available || 0) >= 0) return;
+
+        nextPeriod.available += Number(currentPeriod.available || 0);
+        currentPeriod.available = 0;
+      }
+
       db.transaction(() => {
         db.prepare("DELETE FROM future_transactions").run();
 
@@ -351,7 +367,7 @@ export function createCashflowProjectionEngineService({
         }
 
         if (periods.length) {
-          periods[0].available += Math.max(0, planningOpeningBalance(db, userId));
+          periods[0].available += planningOpeningBalance(db, userId);
         }
 
         db.prepare(`
@@ -411,7 +427,7 @@ export function createCashflowProjectionEngineService({
               continue;
             }
 
-            if (period.available < requestedLedger) {
+            if (spendableBalance(period) < requestedLedger) {
               insertTx({
                 name: oneOff.name,
                 currency: oneOff.currency,
@@ -449,7 +465,10 @@ export function createCashflowProjectionEngineService({
             period.available -= inserted.ledgerAmount;
           }
 
-          if (period.blocked) continue;
+          if (period.blocked) {
+            carryDebtToNextPeriod(periodIndex);
+            continue;
+          }
 
           for (const expense of recurringExpenses.filter(e => e.necessary)) {
             for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
@@ -457,7 +476,7 @@ export function createCashflowProjectionEngineService({
               const converted = convert(predictedExpenseAmount, expense.currency, "expense");
               const requestedLedger = converted.ledgerAmount;
 
-              if (period.available <= 0) {
+              if (spendableBalance(period) <= 0) {
                 insertTx({
                   name: expense.name,
                   currency: expense.currency,
@@ -482,7 +501,7 @@ export function createCashflowProjectionEngineService({
                 continue;
               }
 
-              const fundedLedger = Math.min(period.available, requestedLedger);
+              const fundedLedger = Math.min(spendableBalance(period), requestedLedger);
               const fundedOriginal = fundedLedger / converted.buffered;
               const status = fundedLedger < requestedLedger ? "partial" : "funded";
               const missingOriginal = Math.max(0, predictedExpenseAmount - fundedOriginal);
@@ -517,6 +536,8 @@ export function createCashflowProjectionEngineService({
           if (periodIndex === 0) {
             carryCurrentSurplusToNextPeriod();
           }
+
+          carryDebtToNextPeriod(periodIndex);
         }
 
         for (const goal of goals) {
@@ -535,10 +556,10 @@ export function createCashflowProjectionEngineService({
 
           for (const period of eligiblePeriods) {
             if (remainingLedger <= 0) break;
-            if (period.available <= 0) continue;
+            if (spendableBalance(period) <= 0) continue;
 
             const converted = convert(1, goal.currency, "expense");
-            const fundedLedger = Math.min(remainingLedger, period.available);
+            const fundedLedger = Math.min(remainingLedger, spendableBalance(period));
             const fundedOriginal = fundedLedger / converted.buffered;
             const requestedOriginal = remainingLedger / converted.buffered;
             const allocationDate = goal.due_date < period.end ? goal.due_date : period.end;
@@ -615,18 +636,18 @@ export function createCashflowProjectionEngineService({
           if (period.blocked) continue;
 
           for (const entry of discretionaryOperatingItems) {
-            if (period.available <= 0) break;
+            if (spendableBalance(period) <= 0) break;
 
             if (entry.kind === "recurring_expense") {
               const expense = entry.item;
 
               for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
-                if (period.available <= 0) break;
+                if (spendableBalance(period) <= 0) break;
 
                 const predictedExpenseAmount = predictedAmountForRecurringExpense(userId, expense, today, date);
                 const converted = convert(predictedExpenseAmount, expense.currency, "expense");
                 const requestedLedger = converted.ledgerAmount;
-                const fundedLedger = Math.min(period.available, requestedLedger);
+                const fundedLedger = Math.min(spendableBalance(period), requestedLedger);
 
                 if (fundedLedger <= 0) continue;
 
@@ -675,13 +696,13 @@ export function createCashflowProjectionEngineService({
                 ? Number(flex.max_amount || 0) * converted.buffered
                 : remainingLedger;
 
-              fundedLedger = Math.min(period.available, remainingLedger, maxLedger);
+              fundedLedger = Math.min(spendableBalance(period), remainingLedger, maxLedger);
 
               if (fundedLedger < minLedger) {
                 fundedLedger = 0;
               }
             } else {
-              fundedLedger = period.available >= remainingLedger ? remainingLedger : 0;
+              fundedLedger = spendableBalance(period) >= remainingLedger ? remainingLedger : 0;
             }
 
             if (fundedLedger <= 0) continue;
@@ -722,7 +743,8 @@ export function createCashflowProjectionEngineService({
             SELECT COALESCE(SUM(ledger_amount), 0) AS v
             FROM future_transactions
             WHERE source_goal_id = ?
-          `).get(goal.id).v;
+              AND COALESCE(ledger_currency, 'PLN') = ?
+          `).get(goal.id, ledgerCurrency).v;
 
           const totalFundedLedger = alreadyFundedLedger + Number(futureAllocatedLedger || 0);
 

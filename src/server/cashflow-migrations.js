@@ -545,5 +545,27 @@ export function applyPlanningMigrations(db) {
 
       db.pragma("user_version = 13");
     }
+
+    if (currentVersion < 14) {
+      if (tableExists("settings")) {
+        addColumnIfMissing("settings", "holiday_country", "holiday_country TEXT NOT NULL DEFAULT 'PL'");
+        addColumnIfMissing("settings", "minimum_reserve_enabled", "minimum_reserve_enabled INTEGER NOT NULL DEFAULT 0");
+        addColumnIfMissing("settings", "minimum_reserve_amount", "minimum_reserve_amount REAL NOT NULL DEFAULT 0");
+
+        db.prepare(`
+          UPDATE settings
+          SET holiday_country = CASE
+                WHEN UPPER(COALESCE(holiday_country, 'PL')) IN ('PL', 'DE') THEN UPPER(COALESCE(holiday_country, 'PL'))
+                ELSE 'PL'
+              END,
+              minimum_reserve_enabled = CASE WHEN COALESCE(minimum_reserve_enabled, 0) = 1 THEN 1 ELSE 0 END,
+              minimum_reserve_amount = MAX(0, COALESCE(minimum_reserve_amount, 0)),
+              updated_at = datetime('now')
+          WHERE id = 1
+        `).run();
+      }
+
+      db.pragma("user_version = 14");
+    }
   })();
 }

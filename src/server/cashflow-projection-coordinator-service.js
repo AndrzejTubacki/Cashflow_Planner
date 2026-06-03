@@ -5,11 +5,13 @@ export function createCashflowProjectionCoordinatorService({
   collectCurrenciesForFxSnapshot,
   ensureFxCacheForMutation,
   getCachedFxSnapshot,
+  latestConfirmedBalance,
   listCashflowUserIds,
   logCashflowError,
   logError,
   logServerEvent,
   openPlanningDb,
+  pendingNetBalance,
   refreshNbpFxCacheForUser,
   regenerateProjections,
   safeGetCurrentFxSnapshot
@@ -84,7 +86,7 @@ export function createCashflowProjectionCoordinatorService({
       fxRefresh = await refreshNbpFxCacheForUser(userId, date);
     }
 
-    regenerateProjections(userId);
+    regenerateProjectionsAfterClearingNegativePending(userId);
 
     return {
       projection_ok: true,
@@ -95,7 +97,7 @@ export function createCashflowProjectionCoordinatorService({
 
   function regenerateProjectionsAfterMutation(userId) {
     try {
-      regenerateProjections(userId);
+      regenerateProjectionsAfterClearingNegativePending(userId);
 
       return {
         projection_ok: true,
@@ -124,6 +126,39 @@ export function createCashflowProjectionCoordinatorService({
         projection_error: cashflowErrorMessage(error)
       };
     }
+  }
+
+  function clearPendingIfItCausesNegativeOpeningBalance(userId) {
+    if (typeof latestConfirmedBalance !== "function" || typeof pendingNetBalance !== "function") {
+      return null;
+    }
+
+    const db = openPlanningDb(userId);
+    try {
+      const confirmedBalance = Number(latestConfirmedBalance(userId) || 0);
+      const pendingBalance = Number(pendingNetBalance(db) || 0);
+      const openingBalance = confirmedBalance + pendingBalance;
+
+      if (confirmedBalance >= 0 && pendingBalance < 0 && openingBalance < 0) {
+        const result = db.prepare("DELETE FROM pending_transactions").run();
+        logServerEvent("cashflow_pending_cleared_negative_opening_balance", {
+          userId,
+          confirmedBalance,
+          pendingBalance,
+          deletedPendingCount: result.changes || 0
+        });
+        return result.changes || 0;
+      }
+
+      return null;
+    } finally {
+      db.close();
+    }
+  }
+
+  function regenerateProjectionsAfterClearingNegativePending(userId) {
+    clearPendingIfItCausesNegativeOpeningBalance(userId);
+    return regenerateProjections(userId);
   }
 
   function recordProjectionFailure(db, userId, error, fxSnapshot = null) {

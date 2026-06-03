@@ -14,6 +14,10 @@ const SUPPORTED_FX_CURRENCIES = [
   "NOK", "NZD", "PHP", "PLN", "RON", "SEK", "SGD", "THB", "TRY", "USD", "ZAR"
 ];
 const DEFAULT_TIMEZONE = "Europe/Warsaw";
+const HOLIDAY_COUNTRIES = [
+  { code: "PL", labelKey: "Poland" },
+  { code: "DE", labelKey: "Germany" }
+];
 
 function parseArraySetting(value) {
   if (Array.isArray(value)) return value;
@@ -137,6 +141,7 @@ export function renderSettingsTab(locale, cashflow) {
   const recurringIncomes = cashflow?.budgetPeriodIncomeOptions || cashflow?.recurringIncomes || [];
   const fxProvider = String(settings.fx_provider || "nbp");
   const ledgerCurrency = String(settings.ledger_currency || "PLN").toUpperCase();
+  const holidayCountry = String(settings.holiday_country || "PL").toUpperCase();
   const storedFxCurrencies = parseArraySetting(settings.fx_used_currencies);
   const selectedFxCurrencies = storedFxCurrencies.length
     ? storedFxCurrencies.filter(currency => currency !== ledgerCurrency)
@@ -214,6 +219,17 @@ export function renderSettingsTab(locale, cashflow) {
     </label>
 
     <label>
+      <span>${escapeHtml(t(locale, "Default holiday country"))}</span>
+      <select name="holiday_country">
+        ${HOLIDAY_COUNTRIES.map(country => `
+          <option value="${escapeHtml(country.code)}"${country.code === holidayCountry ? " selected" : ""}>
+            ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+
+    <label>
       <span>${escapeHtml(t(locale, "FX buffer (%)"))}</span>
       <input type="number" name="fx_buffer_percent" value="${escapeHtml(String(settings.fx_buffer_percent ?? 0))}" min="0" max="100" step="0.5">
     </label>
@@ -258,6 +274,13 @@ export function renderSettingsTab(locale, cashflow) {
     <label>
       <span>${escapeHtml(t(locale, "Periods to generate"))}</span>
       <input type="number" name="future_periods" value="${escapeHtml(String(settings.future_periods ?? 11))}" min="1" max="60" step="1">
+    </label>
+
+    ${checkbox("minimum_reserve_enabled", t(locale, "Protect minimum reserve"), settings.minimum_reserve_enabled)}
+
+    <label>
+      <span>${escapeHtml(t(locale, "Minimum reserve"))}</span>
+      <input type="number" name="minimum_reserve_amount" value="${escapeHtml(String(settings.minimum_reserve_amount ?? 0))}" min="0" step="0.01">
     </label>
   `;
 

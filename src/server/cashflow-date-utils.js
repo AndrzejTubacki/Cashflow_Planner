@@ -4,6 +4,20 @@ import { badRequest } from "./cashflow-user-utils.js";
 let testTodayOverride = null;
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTH_PATTERN = /^(\d{4})-(\d{2})$/;
+export const SUPPORTED_HOLIDAY_COUNTRIES = ["PL", "DE"];
+
+export function normalizeHolidayCountry(value, fallback = "PL") {
+  const normalized = String(value || fallback || "PL").trim().toUpperCase();
+  return SUPPORTED_HOLIDAY_COUNTRIES.includes(normalized) ? normalized : fallback;
+}
+
+export function requireHolidayCountry(value, fieldName = "holiday_country") {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (!SUPPORTED_HOLIDAY_COUNTRIES.includes(normalized)) {
+    throw badRequest(`${fieldName} must be one of ${SUPPORTED_HOLIDAY_COUNTRIES.join(", ")}`);
+  }
+  return normalized;
+}
 
 export function setTodayOverrideForTests(dateString = null) {
   // Integration tests pin the app calendar without monkey-patching Date or changing production defaults.

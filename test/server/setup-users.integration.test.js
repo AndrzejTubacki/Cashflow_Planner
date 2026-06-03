@@ -44,6 +44,7 @@ test("admin global options apply to newly created users", async () => withHarnes
       ledger_currency: "USD",
       locale: "pl",
       timezone: "UTC",
+      holiday_country: "DE",
       future_periods: 5,
       fx_provider: "manual",
       fx_buffer_percent: 2
@@ -71,6 +72,7 @@ test("admin global options apply to newly created users", async () => withHarnes
   assert.equal(snapshot.settings.ledger_currency, "USD");
   assert.equal(snapshot.settings.locale, "pl");
   assert.equal(snapshot.settings.timezone, "UTC");
+  assert.equal(snapshot.settings.holiday_country, "DE");
   assert.equal(snapshot.settings.future_periods, 5);
   assert.equal(snapshot.settings.fx_provider, "manual");
   assert.equal(snapshot.settings.fx_buffer_percent, 2);
@@ -101,6 +103,7 @@ test("first-run setup marks setup complete and creates opening balance plus recu
       ledger_currency: "EUR",
       locale: "en",
       timezone: "Europe/London",
+      holiday_country: "DE",
       future_periods: 7,
       opening_balance: 123.45,
       income_enabled: 1,
@@ -113,10 +116,12 @@ test("first-run setup marks setup complete and creates opening balance plus recu
   assert.equal(after.setup_required, false);
   assert.equal(after.settings.setup_completed, 1);
   assert.equal(after.settings.ledger_currency, "EUR");
+  assert.equal(after.settings.holiday_country, "DE");
   assert.equal(after.recurringIncomes.length, 1);
   assert.equal(after.recurringIncomes[0].name, "Salary");
   assert.equal(after.recurringIncomes[0].currency, "EUR");
   assert.equal(after.recurringIncomes[0].period_setting, 1);
+  assert.equal(after.recurringIncomes[0].anchor_holiday_country, "DE");
   assert.equal(after.pendingTransactions.length, 1);
   assert.equal(after.pendingTransactions[0].name, "Opening balance");
   assert.equal(after.pendingTransactions[0].type, "income");

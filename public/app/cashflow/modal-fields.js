@@ -51,8 +51,8 @@ function nextAvailablePriority(cashflow, entityType) {
   return Math.max(...priorities) + 1;
 }
 
-function renderHolidayCountrySelect(locale, item = {}) {
-  const selected = String(item?.anchor_holiday_country || "PL").toUpperCase();
+function renderHolidayCountrySelect(locale, item = {}, cashflow = null) {
+  const selected = String(item?.anchor_holiday_country || cashflow?.settings?.holiday_country || "PL").toUpperCase();
 
   const countries = [
     { code: "PL", labelKey: "Poland" },
@@ -166,7 +166,7 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
       </select>
     </label>
 
-    ${renderHolidayCountrySelect(locale, item)}
+    ${renderHolidayCountrySelect(locale, item, cashflow)}
 
     <label>
       <span>${escapeHtml(t(locale, "Repeat every X months"))}</span>

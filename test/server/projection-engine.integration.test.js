@@ -26,6 +26,76 @@ async function configureManualFx(harness, extra = {}) {
   });
 }
 
+function insertPendingRow(harness, row) {
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare(`
+      INSERT INTO pending_transactions (
+        id, name, currency, amount, type, date,
+        fx_rate, buffered_fx_rate, ledger_currency, status,
+        funded_amount, requested_amount, ledger_amount,
+        occurrence_key, created_at, updated_at
+      ) VALUES (?, ?, 'PLN', ?, ?, ?, 1, 1, 'PLN', 'pending', ?, ?, ?, ?, datetime('now'), datetime('now'))
+    `).run(
+      row.id,
+      row.name,
+      row.amount,
+      row.type,
+      row.date,
+      row.amount,
+      row.amount,
+      row.amount,
+      row.occurrenceKey || row.id
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function insertOldLedgerAllocationRows(harness, { goalId, flexId }) {
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare(`
+      INSERT INTO pending_transactions (
+        id, name, currency, amount, type, date,
+        source_goal_id, fx_rate, buffered_fx_rate, ledger_currency, status,
+        funded_amount, requested_amount, ledger_amount, occurrence_key, created_at, updated_at
+      ) VALUES ('old-ledger-goal-pending', 'Old goal', 'EUR', 100, 'goal_allocation', '2026-05-21',
+        ?, 1, 1, 'EUR', 'pending', 100, 100, 100, 'old-goal', datetime('now'), datetime('now'))
+    `).run(goalId);
+
+    db.prepare(`
+      INSERT INTO future_transactions (
+        id, name, currency, amount, type, date, period,
+        source_flex_id, fx_rate, buffered_fx_rate, ledger_currency, status,
+        funded_amount, requested_amount, ledger_amount, occurrence_key, generation_timestamp, created_at
+      ) VALUES ('old-ledger-flex-future', 'Old flex', 'EUR', 100, 'expense', '2026-05-22', '2026-05',
+        ?, 1, 1, 'EUR', 'funded', 100, 100, 100, 'old-flex', datetime('now'), datetime('now'))
+    `).run(flexId);
+  } finally {
+    db.close();
+  }
+}
+
+async function seedConfirmedIncome(harness, amount = 100) {
+  insertPendingRow(harness, {
+    id: `pending-income-${amount}`,
+    name: `Income ${amount}`,
+    amount,
+    type: "income",
+    date: "2026-05-20",
+    occurrenceKey: `income-${amount}`
+  });
+
+  await harness.api(`/api/pending/${encodeURIComponent(`pending-income-${amount}`)}/confirm`, {
+    method: "POST",
+    body: {
+      amount,
+      confirmed_date: "2026-05-20"
+    }
+  });
+}
+
 test("projection buffers only foreign-currency transactions", async () => withHarness(async harness => {
   await configureManualFx(harness);
 
@@ -71,6 +141,168 @@ test("projection buffers only foreign-currency transactions", async () => withHa
   assert.equal(bySource.get(eurExpense.id).ledger_amount, 44);
   assert.equal(bySource.get(eurExpense.id).fx_rate, 4);
   assert.equal(bySource.get(eurExpense.id).buffered_fx_rate, 4.4);
+}));
+
+test("minimum reserve protects balance from necessary expenses and flex", async () => withHarness(async harness => {
+  await configureManualFx(harness, {
+    future_periods: 2,
+    fx_buffer_percent: 0,
+    minimum_reserve_enabled: 1,
+    minimum_reserve_amount: 500
+  });
+
+  await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Reserve income",
+      currency: "PLN",
+      amount: 1000,
+      type: "income",
+      date: "2026-05-20"
+    }
+  });
+
+  const expense = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Reserve rent",
+      currency: "PLN",
+      amount: 800,
+      prediction_strategy: "fixed",
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 21,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  const flex = await harness.api("/api/flex", {
+    method: "POST",
+    body: {
+      name: "Reserve flex",
+      currency: "PLN",
+      amount: 600,
+      active: 1,
+      allow_split: 0,
+      priority: 2
+    }
+  });
+
+  const snapshot = await harness.api("/api");
+  const expenseRow = snapshot.futureTransactions.find(tx => tx.source_recurring_expense_id === expense.id);
+
+  assert.equal(expenseRow.status, "partial");
+  assert.equal(expenseRow.funded_amount, 500);
+  assert.equal(snapshot.futureTransactions.some(tx => tx.source_flex_id === flex.id), false);
+}));
+
+test("disabled reserve preserves existing allocation behavior", async () => withHarness(async harness => {
+  await configureManualFx(harness, {
+    future_periods: 2,
+    fx_buffer_percent: 0,
+    minimum_reserve_enabled: 0,
+    minimum_reserve_amount: 500
+  });
+
+  await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "No reserve income",
+      currency: "PLN",
+      amount: 1000,
+      type: "income",
+      date: "2026-05-20"
+    }
+  });
+
+  const expense = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "No reserve rent",
+      currency: "PLN",
+      amount: 800,
+      prediction_strategy: "fixed",
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 21,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  const snapshot = await harness.api("/api");
+  const expenseRow = snapshot.futureTransactions.find(tx => tx.source_recurring_expense_id === expense.id);
+
+  assert.equal(expenseRow.status, "funded");
+  assert.equal(expenseRow.funded_amount, 800);
+}));
+
+test("pending rows that would make opening balance negative are cleared before regeneration", async () => withHarness(async harness => {
+  await configureManualFx(harness, { future_periods: 2, fx_buffer_percent: 0 });
+  await seedConfirmedIncome(harness, 100);
+
+  insertPendingRow(harness, {
+    id: "pending-too-large-expense",
+    name: "Too large pending expense",
+    amount: 150,
+    type: "expense",
+    date: "2026-05-21",
+    occurrenceKey: "too-large-pending"
+  });
+
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: { future_periods: 2 }
+  });
+
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.pendingTransactions.length, 0);
+  assert.ok(harness.events.some(event => event.kind === "cashflow_pending_cleared_negative_opening_balance"));
+}));
+
+test("goal and flex summaries ignore old-ledger pending and future allocations", async () => withHarness(async harness => {
+  await configureManualFx(harness, { future_periods: 2, fx_buffer_percent: 0 });
+
+  const goal = await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Ledger goal",
+      currency: "PLN",
+      amount: 500,
+      due_date: "2026-06-01",
+      priority: 1,
+      active: 1
+    }
+  });
+
+  const flex = await harness.api("/api/flex", {
+    method: "POST",
+    body: {
+      name: "Ledger flex",
+      currency: "PLN",
+      amount: 500,
+      priority: 1,
+      active: 1,
+      allow_split: 1,
+      min_amount: 0
+    }
+  });
+
+  insertOldLedgerAllocationRows(harness, { goalId: goal.id, flexId: flex.id });
+
+  const snapshot = await harness.api("/api");
+  const goalSummary = snapshot.goals.find(row => row.id === goal.id);
+  const flexSummary = snapshot.flexTransactions.find(row => row.id === flex.id);
+
+  assert.equal(goalSummary.pending_allocated_ledger, 0);
+  assert.equal(goalSummary.future_allocated_ledger, 0);
+  assert.equal(flexSummary.pending_allocated_ledger, 0);
+  assert.equal(flexSummary.future_allocated_ledger, 0);
 }));
 
 test("recurring transactions generate one occurrence per eligible period", async () => withHarness(async harness => {

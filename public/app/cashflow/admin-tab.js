@@ -19,6 +19,11 @@ const TIMEZONE_OPTIONS = [
   "Asia/Tokyo"
 ];
 
+const HOLIDAY_COUNTRIES = [
+  { code: "PL", labelKey: "Poland" },
+  { code: "DE", labelKey: "Germany" }
+];
+
 function renderCurrencyOptions(selected) {
   return SUPPORTED_FX_CURRENCIES.map(currency => `
     <option value="${escapeHtml(currency)}"${currency === selected ? " selected" : ""}>
@@ -35,6 +40,7 @@ export function renderAdminTab(locale, cashflow = null) {
   const selectedCurrency = String(options.ledger_currency || "PLN").toUpperCase();
   const selectedLocale = String(options.locale || "en");
   const selectedProvider = String(options.fx_provider || "nbp");
+  const selectedHolidayCountry = String(options.holiday_country || "PL").toUpperCase();
 
   return `
     <div class="cashflow-tab-content">
@@ -63,6 +69,16 @@ export function renderAdminTab(locale, cashflow = null) {
             <datalist id="cashflow-admin-timezones">
               ${TIMEZONE_OPTIONS.map(timezone => `<option value="${escapeHtml(timezone)}"></option>`).join("")}
             </datalist>
+          </label>
+          <label>
+            <span>${escapeHtml(t(locale, "Default holiday country"))}</span>
+            <select name="holiday_country">
+              ${HOLIDAY_COUNTRIES.map(country => `
+                <option value="${escapeHtml(country.code)}"${country.code === selectedHolidayCountry ? " selected" : ""}>
+                  ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
+                </option>
+              `).join("")}
+            </select>
           </label>
           <label>
             <span>${escapeHtml(t(locale, "Default projection horizon"))}</span>

@@ -70,6 +70,7 @@ test("admin tab renders global options controls", async () => {
         ledger_currency: "EUR",
         locale: "pl",
         timezone: "UTC",
+        holiday_country: "DE",
         future_periods: 9,
         fx_provider: "manual",
         fx_buffer_percent: 3
@@ -85,6 +86,8 @@ test("admin tab renders global options controls", async () => {
   assert.match(html, /name="ledger_currency"/);
   assert.match(html, /value="EUR" selected/);
   assert.match(html, /name="fx_provider"/);
+  assert.match(html, /name="holiday_country"/);
+  assert.match(html, /value="DE" selected/);
   assert.match(html, /Save global options/);
   assertNoMojibake(html);
 });
@@ -96,6 +99,9 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
     settings: {
       locale: "pl",
       ledger_currency: "PLN",
+      holiday_country: "PL",
+      minimum_reserve_enabled: 1,
+      minimum_reserve_amount: 250,
       future_periods: 11,
       fx_provider: "manual",
       fx_used_currencies: ["EUR"],
@@ -114,6 +120,9 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
   assert.match(html, />Waluta i kurs</);
   assert.match(html, />Strefa czasowa</);
   assert.match(html, />Przenoszenie danych</);
+  assert.match(html, /name="holiday_country"/);
+  assert.match(html, /name="minimum_reserve_enabled"/);
+  assert.match(html, /name="minimum_reserve_amount" value="250"/);
   assert.match(html, /data-cashflow-download-full-export/);
   assert.match(html, /data-cashflow-import-full/);
   assert.match(html, /data-cashflow-import-oneoff-csv/);

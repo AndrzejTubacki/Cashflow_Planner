@@ -22,7 +22,7 @@ export function createCashflowSnapshotService({
   safeGetCurrentFxSnapshot,
   sumConfirmedFunding
 }) {
-  function latestFundingDate(db, sourceColumn, sourceId) {
+  function latestFundingDate(db, sourceColumn, sourceId, ledgerCurrency = "PLN") {
     if (!["source_flex_id", "source_goal_id"].includes(sourceColumn)) {
       return null;
     }
@@ -34,6 +34,7 @@ export function createCashflowSnapshotService({
         FROM future_transactions
         WHERE ${sourceColumn} = ?
           AND COALESCE(ledger_amount, 0) > 0
+          AND COALESCE(ledger_currency, 'PLN') = ?
 
         UNION ALL
 
@@ -41,14 +42,15 @@ export function createCashflowSnapshotService({
         FROM pending_transactions
         WHERE ${sourceColumn} = ?
           AND COALESCE(ledger_amount, 0) > 0
+          AND COALESCE(ledger_currency, 'PLN') = ?
       )
-    `).get(sourceId, sourceId);
+    `).get(sourceId, ledgerCurrency, sourceId, ledgerCurrency);
 
     return row?.funded_by_date || null;
   }
 
-  function latestFlexFundingDate(db, flexId) {
-    return latestFundingDate(db, "source_flex_id", flexId);
+  function latestFlexFundingDate(db, flexId, ledgerCurrency = "PLN") {
+    return latestFundingDate(db, "source_flex_id", flexId, ledgerCurrency);
   }
 
   function summarizeRecurringExpenseOccurrences(db, expense, periods, today) {
@@ -290,13 +292,15 @@ export function createCashflowSnapshotService({
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
           FROM future_transactions
           WHERE source_goal_id = ?
-        `).get(goal.id).v;
+            AND COALESCE(ledger_currency, 'PLN') = ?
+        `).get(goal.id, ledgerCurrency).v;
 
         const pendingAllocatedLedger = db.prepare(`
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
           FROM pending_transactions
           WHERE source_goal_id = ?
-        `).get(goal.id).v;
+            AND COALESCE(ledger_currency, 'PLN') = ?
+        `).get(goal.id, ledgerCurrency).v;
 
         const impossible = db.prepare(`
           SELECT details
@@ -312,7 +316,7 @@ export function createCashflowSnapshotService({
           Number(pendingAllocatedLedger || 0);
 
         const targetLedger = target.ok ? target.value : null;
-        const fundedByDate = latestFundingDate(db, "source_goal_id", goal.id);
+        const fundedByDate = latestFundingDate(db, "source_goal_id", goal.id, ledgerCurrency);
 
         return {
           ...goal,
@@ -343,13 +347,15 @@ export function createCashflowSnapshotService({
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
           FROM future_transactions
           WHERE source_flex_id = ?
-        `).get(flex.id).v;
+            AND COALESCE(ledger_currency, 'PLN') = ?
+        `).get(flex.id, ledgerCurrency).v;
 
         const pendingAllocatedLedger = db.prepare(`
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
           FROM pending_transactions
           WHERE source_flex_id = ?
-        `).get(flex.id).v;
+            AND COALESCE(ledger_currency, 'PLN') = ?
+        `).get(flex.id, ledgerCurrency).v;
 
         const totalPlannedLedger =
           Number(alreadyFundedLedger || 0) +
@@ -357,7 +363,7 @@ export function createCashflowSnapshotService({
           Number(pendingAllocatedLedger || 0);
 
         const targetLedger = target.ok ? target.value : null;
-        const fundedByDate = latestFlexFundingDate(db, flex.id);
+        const fundedByDate = latestFlexFundingDate(db, flex.id, ledgerCurrency);
 
         return {
           ...flex,

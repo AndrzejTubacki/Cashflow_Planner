@@ -17,6 +17,11 @@ const TIMEZONE_OPTIONS = [
   "Asia/Tokyo"
 ];
 
+const HOLIDAY_COUNTRIES = [
+  { code: "PL", labelKey: "Poland" },
+  { code: "DE", labelKey: "Germany" }
+];
+
 function renderMessage(error = "", message = "") {
   if (error) return `<div class="detail-note cashflow-warning">${escapeHtml(error)}</div>`;
   if (message) return `<div class="detail-note">${escapeHtml(message)}</div>`;
@@ -99,6 +104,7 @@ export function renderSetupPage({ cashflow = null, error = "", message = "" } = 
   const locale = settings.locale || "en";
   const availableLocales = Array.isArray(cashflow?.availableLocales) ? cashflow.availableLocales : [];
   const ledgerCurrency = String(settings.ledger_currency || "PLN").toUpperCase();
+  const holidayCountry = String(settings.holiday_country || "PL").toUpperCase();
 
   return `
     <div class="cashflow-page cashflow-shell" data-cashflow-setup>
@@ -142,6 +148,16 @@ export function renderSetupPage({ cashflow = null, error = "", message = "" } = 
             </datalist>
           </label>
           <label>
+            <span>${escapeHtml(t(locale, "Default holiday country"))}</span>
+            <select name="holiday_country">
+              ${HOLIDAY_COUNTRIES.map(country => `
+                <option value="${escapeHtml(country.code)}"${country.code === holidayCountry ? " selected" : ""}>
+                  ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
+                </option>
+              `).join("")}
+            </select>
+          </label>
+          <label>
             <span>${escapeHtml(t(locale, "Projection horizon"))}</span>
             <input type="number" name="future_periods" value="${escapeHtml(String(settings.future_periods || 11))}" min="1" max="60">
           </label>
@@ -175,4 +191,3 @@ export function renderSetupPage({ cashflow = null, error = "", message = "" } = 
     </div>
   `;
 }
-

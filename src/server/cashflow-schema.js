@@ -5,7 +5,7 @@ import {
 } from "./cashflow-constants.js";
 export function initializePlanningSchema(db) {
   db.exec(`
-    PRAGMA user_version = 13;
+    PRAGMA user_version = 14;
 
     CREATE TABLE fx_rates_cache (
       base_currency TEXT NOT NULL,
@@ -30,7 +30,10 @@ export function initializePlanningSchema(db) {
       ledger_currency TEXT NOT NULL DEFAULT 'PLN',
       timezone TEXT NOT NULL DEFAULT 'Europe/Warsaw',
       locale TEXT NOT NULL DEFAULT 'en',
+      holiday_country TEXT NOT NULL DEFAULT 'PL',
       future_periods INTEGER NOT NULL DEFAULT ${DEFAULT_FUTURE_PERIODS},
+      minimum_reserve_enabled INTEGER NOT NULL DEFAULT 0,
+      minimum_reserve_amount REAL NOT NULL DEFAULT 0 CHECK (minimum_reserve_amount >= 0),
       budget_period_income_id TEXT,
       fx_buffer_percent REAL NOT NULL DEFAULT ${DEFAULT_FX_BUFFER_PERCENT},
       fx_provider TEXT NOT NULL DEFAULT 'nbp'

@@ -3,11 +3,13 @@ import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
 export function buildPeriodSummariesFromDefinitions(settings, recurringIncomes, futureTransactions) {
     const today = todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
     const futurePeriods = Number(settings?.future_periods) || DEFAULT_FUTURE_PERIODS;
+    const ledgerCurrency = settings?.ledger_currency || "PLN";
     const periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods);
 
     const txsByPeriod = new Map();
 
     for (const tx of futureTransactions || []) {
+      if (String(tx.ledger_currency || "PLN") !== ledgerCurrency) continue;
       const key = tx.period;
       if (!txsByPeriod.has(key)) txsByPeriod.set(key, []);
       txsByPeriod.get(key).push(tx);
@@ -40,7 +42,7 @@ export function buildPeriodSummariesFromDefinitions(settings, recurringIncomes, 
         end_date: period.end,
         income,
         expenses,
-        available_balance: Math.max(0, income - expenses),
+        available_balance: income - expenses,
         warning_count: warningCount,
         transaction_count: txs.length
       };
@@ -48,7 +50,11 @@ export function buildPeriodSummariesFromDefinitions(settings, recurringIncomes, 
   }
 
 export function buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods) {
-    const selectedIncome = recurringIncomes.find(i => i.id === settings?.budget_period_income_id);
+    const selectedIncome = recurringIncomes.find(i =>
+      i.id === settings?.budget_period_income_id &&
+      Number(i.active) === 1 &&
+      Number(i.period_setting) === 1
+    );
 
     if (!selectedIncome) {
       const periods = [];

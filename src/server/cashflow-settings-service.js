@@ -1,6 +1,6 @@
 ﻿import path from "path";
 import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
+import { requireHolidayCountry, todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
 import {
   normalizeFxCurrencyList,
   normalizeFxProvider,
@@ -49,6 +49,9 @@ export function createCashflowSettingsService({
       "locale",
       "ledger_currency",
       "timezone",
+      "holiday_country",
+      "minimum_reserve_enabled",
+      "minimum_reserve_amount",
       "budget_period_income_id",
       "fx_buffer_percent",
       "fx_provider",
@@ -127,6 +130,18 @@ export function createCashflowSettingsService({
         safeUpdates.timezone = normalizeTimezone(safeUpdates.timezone || DEFAULT_TIMEZONE);
       }
 
+      if (safeUpdates.holiday_country !== undefined) {
+        safeUpdates.holiday_country = requireHolidayCountry(safeUpdates.holiday_country, "holiday_country");
+      }
+
+      if (safeUpdates.minimum_reserve_enabled !== undefined) {
+        safeUpdates.minimum_reserve_enabled = safeUpdates.minimum_reserve_enabled ? 1 : 0;
+      }
+
+      if (safeUpdates.minimum_reserve_amount !== undefined) {
+        safeUpdates.minimum_reserve_amount = Math.max(0, Number(safeUpdates.minimum_reserve_amount) || 0);
+      }
+
       if (safeUpdates.fx_buffer_percent !== undefined) {
         safeUpdates.fx_buffer_percent = Math.max(0, Math.min(100, Number(safeUpdates.fx_buffer_percent) || 0));
       }
@@ -161,13 +176,17 @@ export function createCashflowSettingsService({
 
       if (safeUpdates.budget_period_income_id) {
         const income = db.prepare(`
-          SELECT id
+          SELECT id, period_setting, active
           FROM recurring_incomes
           WHERE id = ?
         `).get(safeUpdates.budget_period_income_id);
 
         if (!income) {
           throw badRequest("Selected budget period income does not exist");
+        }
+
+        if (Number(income.active) !== 1) {
+          throw badRequest("Selected budget period income must be active");
         }
       }
 
