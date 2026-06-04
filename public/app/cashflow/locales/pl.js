@@ -293,6 +293,8 @@ export default {
     "Minimum reserve": "Minimalna rezerwa",
     "No users yet": "Brak użytkowników",
     "Opening balance": "Saldo początkowe",
+    "Opening balance must be a non-negative number": "Saldo początkowe musi być liczbą nieujemną",
+    "Confirm or clear the pending ledger currency conversion before changing ledger currency again": "Potwierdź lub usuń oczekujące przeliczenie waluty księgi przed ponowną zmianą waluty",
     "Protect minimum reserve": "Chroń minimalną rezerwę",
     "Projection horizon": "Horyzont projekcji",
     "Save global options": "Zapisz opcje globalne",

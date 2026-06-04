@@ -265,6 +265,165 @@ test("pending rows that would make opening balance negative are cleared before r
   assert.ok(harness.events.some(event => event.kind === "cashflow_pending_cleared_negative_opening_balance"));
 }));
 
+test("partially confirmed one-offs project unique due-aware remainders", async () => withHarness(async harness => {
+  await configureManualFx(harness, { future_periods: 3, fx_buffer_percent: 0 });
+  await seedConfirmedIncome(harness, 1000);
+
+  const oneOff = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Installment expense",
+      currency: "PLN",
+      amount: 300,
+      type: "expense",
+      date: "2026-06-01"
+    }
+  });
+
+  async function confirmProjected(amount, date = "2026-06-01") {
+    const before = await harness.api("/api");
+    const projected = [
+      ...before.futureTransactions,
+      ...before.pendingTransactions
+    ].find(tx => tx.source_one_off_id === oneOff.id);
+    assert.ok(projected);
+
+    let pending = projected;
+    if (before.futureTransactions.some(tx => tx.id === projected.id)) {
+      const moved = await harness.api(`/api/future/${encodeURIComponent(projected.id)}/move-to-pending`, {
+        method: "POST",
+        body: { occurrenceKey: projected.occurrence_key }
+      });
+      pending = moved.pendingTransactions.find(tx => tx.occurrence_key === projected.occurrence_key);
+    }
+
+    await harness.api(`/api/pending/${encodeURIComponent(pending.id)}/confirm`, {
+      method: "POST",
+      body: {
+        amount,
+        confirmed_date: date
+      }
+    });
+  }
+
+  await confirmProjected(100);
+  let snapshot = await harness.api("/api");
+  let remainder = snapshot.futureTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+  assert.equal(remainder.amount, 200);
+  assert.equal(remainder.requested_amount, 200);
+  assert.equal(remainder.occurrence_key, `one_off_remainder:${oneOff.id}:2`);
+
+  await confirmProjected(50);
+  snapshot = await harness.api("/api");
+  remainder = snapshot.futureTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+  assert.equal(remainder.amount, 150);
+  assert.equal(remainder.occurrence_key, `one_off_remainder:${oneOff.id}:3`);
+
+  await harness.api(`/api/one-off/${encodeURIComponent(oneOff.id)}`, {
+    method: "PUT",
+    body: {
+      name: oneOff.name,
+      currency: oneOff.currency,
+      amount: 400,
+      type: oneOff.type,
+      date: "2026-05-19"
+    }
+  });
+
+  snapshot = await harness.api("/api");
+  remainder = snapshot.pendingTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+  assert.equal(remainder.amount, 250);
+  assert.equal(remainder.date, "2026-05-19");
+  assert.equal(remainder.occurrence_key, `one_off_remainder:${oneOff.id}:3`);
+  assert.equal(snapshot.futureTransactions.some(tx => tx.source_one_off_id === oneOff.id), false);
+
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: { future_periods: 3 }
+  });
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.pendingTransactions.filter(tx => tx.source_one_off_id === oneOff.id).length, 1);
+  assert.equal(snapshot.pendingTransactions.find(tx => tx.source_one_off_id === oneOff.id).amount, 250);
+
+  await harness.api(`/api/one-off/${encodeURIComponent(oneOff.id)}`, {
+    method: "PUT",
+    body: {
+      name: oneOff.name,
+      currency: oneOff.currency,
+      amount: 400,
+      type: oneOff.type,
+      date: "2026-06-04"
+    }
+  });
+  snapshot = await harness.api("/api");
+  remainder = snapshot.futureTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+  assert.equal(snapshot.pendingTransactions.some(tx => tx.source_one_off_id === oneOff.id), false);
+  assert.equal(remainder.amount, 250);
+  assert.equal(remainder.date, "2026-06-04");
+  assert.equal(remainder.occurrence_key, `one_off_remainder:${oneOff.id}:3`);
+
+  await confirmProjected(250, "2026-05-20");
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.pendingTransactions.some(tx => tx.source_one_off_id === oneOff.id), false);
+  assert.equal(snapshot.futureTransactions.some(tx => tx.source_one_off_id === oneOff.id), false);
+}));
+
+test("partial income and foreign-currency one-offs project remaining original amounts", async () => withHarness(async harness => {
+  await configureManualFx(harness, { future_periods: 3, fx_buffer_percent: 0 });
+  await seedConfirmedIncome(harness, 1000);
+
+  async function confirmFirstInstallment(oneOff, amount) {
+    const snapshot = await harness.api("/api");
+    const future = snapshot.futureTransactions.find(tx => tx.source_one_off_id === oneOff.id);
+    const moved = await harness.api(`/api/future/${encodeURIComponent(future.id)}/move-to-pending`, {
+      method: "POST",
+      body: { occurrenceKey: future.occurrence_key }
+    });
+    const pending = moved.pendingTransactions.find(tx => tx.occurrence_key === future.occurrence_key);
+    await harness.api(`/api/pending/${encodeURIComponent(pending.id)}/confirm`, {
+      method: "POST",
+      body: {
+        amount,
+        confirmed_date: future.date
+      }
+    });
+  }
+
+  const income = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Partial bonus",
+      currency: "PLN",
+      amount: 100,
+      type: "income",
+      date: "2026-06-02"
+    }
+  });
+  const eurExpense = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Partial EUR expense",
+      currency: "EUR",
+      amount: 20,
+      type: "expense",
+      date: "2026-06-03"
+    }
+  });
+
+  await confirmFirstInstallment(income, 40);
+  await confirmFirstInstallment(eurExpense, 5);
+
+  const snapshot = await harness.api("/api");
+  const incomeRemainder = snapshot.futureTransactions.find(tx => tx.source_one_off_id === income.id);
+  const expenseRemainder = snapshot.futureTransactions.find(tx => tx.source_one_off_id === eurExpense.id);
+
+  assert.equal(incomeRemainder.amount, 60);
+  assert.equal(incomeRemainder.type, "income");
+  assert.equal(expenseRemainder.amount, 15);
+  assert.equal(expenseRemainder.fx_rate, 4);
+  assert.equal(expenseRemainder.ledger_amount, 60);
+}));
+
 test("goal and flex summaries ignore old-ledger pending and future allocations", async () => withHarness(async harness => {
   await configureManualFx(harness, { future_periods: 2, fx_buffer_percent: 0 });
 
@@ -677,7 +836,6 @@ test("projection allocates goals before same-priority discretionary operating it
   const flexA = await harness.api("/api/flex", {
     method: "POST",
     body: {
-      id: "flex-a",
       name: "Flex A",
       currency: "PLN",
       amount: 100,
@@ -690,7 +848,6 @@ test("projection allocates goals before same-priority discretionary operating it
   const flexB = await harness.api("/api/flex", {
     method: "POST",
     body: {
-      id: "flex-b",
       name: "Flex B",
       currency: "PLN",
       amount: 100,
@@ -709,14 +866,14 @@ test("projection allocates goals before same-priority discretionary operating it
       WHERE id IN (
         SELECT planned_transaction_id
         FROM flex_transactions
-        WHERE id IN ('flex-a', 'flex-b')
+        WHERE id IN (?, ?)
       )
-    `).run();
+    `).run(flexA.id, flexB.id);
     db.prepare(`
       UPDATE flex_transactions
       SET created_at = '2026-01-01T00:00:00.000Z'
-      WHERE id IN ('flex-a', 'flex-b')
-    `).run();
+      WHERE id IN (?, ?)
+    `).run(flexA.id, flexB.id);
   } finally {
     db.close();
   }

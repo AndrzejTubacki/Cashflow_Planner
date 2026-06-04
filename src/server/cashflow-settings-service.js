@@ -1,29 +1,13 @@
-﻿import path from "path";
-import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { requireHolidayCountry, todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
+﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { todayInTimezone } from "./cashflow-date-utils.js";
 import {
-  normalizeFxCurrencyList,
   normalizeFxProvider,
   normalizeManualFxPairs,
-  normalizeManualFxRates,
-  normalizeSupportedCurrency,
-  requireSupportedCurrency
+  normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
-import { badRequest } from "./cashflow-user-utils.js";
-
-function configuredBackupAllowedRoots() {
-  return String(process.env.CASHFLOW_BACKUP_ALLOWED_ROOTS || "")
-    .split(",")
-    .map(root => root.trim())
-    .filter(Boolean)
-    .map(root => path.resolve(root));
-}
-
-function isPathInside(candidate, root) {
-  const resolved = path.resolve(candidate);
-  return resolved === root || resolved.startsWith(`${root}${path.sep}`);
-}
+import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
+import { badRequest, conflict } from "./cashflow-user-utils.js";
 
 export function createCashflowSettingsService({
   fetchProviderRate = null,
@@ -44,135 +28,15 @@ export function createCashflowSettingsService({
   }
 
   async function updateSettings(userId, updates) {
-    const allowedKeys = new Set([
-      "future_periods",
-      "locale",
-      "ledger_currency",
-      "timezone",
-      "holiday_country",
-      "minimum_reserve_enabled",
-      "minimum_reserve_amount",
-      "budget_period_income_id",
-      "fx_buffer_percent",
-      "fx_provider",
-      "fx_used_currencies",
-      "manual_fx_rates",
-      "auto_backup_enabled",
-      "backup_interval_minutes",
-      "backup_retention_count",
-      "backup_location",
-      "ntfy_url",
-      "notification_delivery_time",
-      "notify_goal_impossible",
-      "notify_necessary_underfunded",
-      "notify_funding_shortfall",
-      "notify_income_missing",
-      "notify_pending_summary",
-      "notify_goal_funded",
-      "notify_fx_changed",
-      "ntfy_priority_goal_impossible",
-      "ntfy_priority_necessary_underfunded",
-      "ntfy_priority_funding_shortfall",
-      "ntfy_priority_income_missing",
-      "ntfy_priority_pending_summary",
-      "ntfy_priority_goal_funded",
-      "ntfy_priority_fx_changed",
-      "necessary_underfunded_repeat_days"
-    ]);
-
-    const safeUpdates = Object.fromEntries(
-      Object.entries(updates || {}).filter(([key]) => allowedKeys.has(key))
-    );
-
     const db = openPlanningDb(userId);
 
     try {
       const currentSettings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
-
-      if (safeUpdates.backup_location !== undefined && safeUpdates.backup_location !== null && safeUpdates.backup_location !== "") {
-        const backupLocation = String(safeUpdates.backup_location).trim();
-
-        if (!path.isAbsolute(backupLocation)) {
-          throw badRequest("backup_location must be an absolute path");
-        }
-
-        const allowedRoots = configuredBackupAllowedRoots();
-        if (!allowedRoots.length || !allowedRoots.some(root => isPathInside(backupLocation, root))) {
-          throw badRequest("backup_location must be under an allowed backup root");
-        }
-
-        safeUpdates.backup_location = path.resolve(backupLocation);
-      }
-
-      if (safeUpdates.ntfy_url !== undefined && safeUpdates.ntfy_url !== null && safeUpdates.ntfy_url !== "") {
-        const ntfyUrl = String(safeUpdates.ntfy_url).trim();
-
-        if (!/^https?:\/\//i.test(ntfyUrl)) {
-          throw badRequest("ntfy_url must be a full http(s) URL, for example https://ntfy.example.com/topic");
-        }
-
-        safeUpdates.ntfy_url = ntfyUrl;
-      }
-
-      if (safeUpdates.future_periods !== undefined) {
-        safeUpdates.future_periods = Math.max(1, Math.min(60, Number(safeUpdates.future_periods) || DEFAULT_FUTURE_PERIODS));
-      }
-
-      if (safeUpdates.locale !== undefined) {
-        safeUpdates.locale = normalizeLocale(safeUpdates.locale);
-      }
-
-      if (safeUpdates.ledger_currency !== undefined) {
-        safeUpdates.ledger_currency = requireSupportedCurrency(safeUpdates.ledger_currency, "ledger_currency");
-      }
-
-      if (safeUpdates.timezone !== undefined) {
-        safeUpdates.timezone = normalizeTimezone(safeUpdates.timezone || DEFAULT_TIMEZONE);
-      }
-
-      if (safeUpdates.holiday_country !== undefined) {
-        safeUpdates.holiday_country = requireHolidayCountry(safeUpdates.holiday_country, "holiday_country");
-      }
-
-      if (safeUpdates.minimum_reserve_enabled !== undefined) {
-        safeUpdates.minimum_reserve_enabled = safeUpdates.minimum_reserve_enabled ? 1 : 0;
-      }
-
-      if (safeUpdates.minimum_reserve_amount !== undefined) {
-        safeUpdates.minimum_reserve_amount = Math.max(0, Number(safeUpdates.minimum_reserve_amount) || 0);
-      }
-
-      if (safeUpdates.fx_buffer_percent !== undefined) {
-        safeUpdates.fx_buffer_percent = Math.max(0, Math.min(100, Number(safeUpdates.fx_buffer_percent) || 0));
-      }
-
-      if (safeUpdates.fx_provider !== undefined) {
-        safeUpdates.fx_provider = normalizeFxProvider(safeUpdates.fx_provider);
-      }
-
-      if (safeUpdates.fx_used_currencies !== undefined) {
-        const ledgerCurrency = safeUpdates.ledger_currency || currentSettings?.ledger_currency || "PLN";
-        safeUpdates.fx_used_currencies = JSON.stringify(normalizeFxCurrencyList(
-          safeUpdates.fx_used_currencies,
-          ledgerCurrency
-        ));
-      }
-
-      if (safeUpdates.manual_fx_rates !== undefined) {
-        const ledgerCurrency = safeUpdates.ledger_currency || currentSettings?.ledger_currency || "PLN";
-        safeUpdates.manual_fx_rates = JSON.stringify({
-          ...normalizeManualFxRates(safeUpdates.manual_fx_rates),
-          ...normalizeManualFxPairs(safeUpdates.manual_fx_rates, ledgerCurrency)
-        });
-      }
-
-      if (safeUpdates.necessary_underfunded_repeat_days !== undefined) {
-        safeUpdates.necessary_underfunded_repeat_days = Math.max(1, Number(safeUpdates.necessary_underfunded_repeat_days) || 1);
-      }
-
-      if (safeUpdates.budget_period_income_id === "") {
-        safeUpdates.budget_period_income_id = null;
-      }
+      const safeUpdates = validateAndNormalizeSettings(updates, {
+        allowedKeysOnly: true,
+        currentSettings,
+        normalizeLocale
+      });
 
       if (safeUpdates.budget_period_income_id) {
         const income = db.prepare(`
@@ -196,6 +60,23 @@ export function createCashflowSettingsService({
       let ledgerSwitch = null;
 
       if (ledgerCurrencyChanged) {
+        const unresolvedConversion = db.prepare(`
+          SELECT id, ledger_currency
+          FROM pending_transactions
+          WHERE occurrence_key LIKE 'ledger_currency_conversion:%'
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1
+        `).get();
+
+        if (unresolvedConversion) {
+          throw conflict("Confirm or clear the pending ledger currency conversion before changing ledger currency again", [{
+            field: "ledger_currency",
+            reason: "pending_conversion",
+            pendingConversionId: unresolvedConversion.id,
+            ledgerCurrency: unresolvedConversion.ledger_currency
+          }]);
+        }
+
         const rateDate = todayInTimezone(currentSettings?.timezone || DEFAULT_TIMEZONE);
         const pendingManualRates = safeUpdates.manual_fx_rates !== undefined
           ? safeUpdates.manual_fx_rates

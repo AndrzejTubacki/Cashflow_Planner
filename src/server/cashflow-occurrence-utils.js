@@ -5,7 +5,8 @@ export function makeOccurrenceKey({
   sourceRecurringIncomeId = null,
   sourceOneOffId = null,
   sourceFlexId = null,
-  sourceGoalId = null
+  sourceGoalId = null,
+  rowId = null
 }) {
   const source =
     sourceRecurringExpenseId ? `recurring_expense:${sourceRecurringExpenseId}` :
@@ -13,7 +14,7 @@ export function makeOccurrenceKey({
     sourceOneOffId ? `one_off:${sourceOneOffId}` :
     sourceFlexId ? `flex:${sourceFlexId}` :
     sourceGoalId ? `goal:${sourceGoalId}` :
-    "manual";
+    `manual:${rowId || "generated"}`;
 
   return `${source}:${type}:${date}`;
 }
@@ -26,6 +27,7 @@ export function occurrenceKeyFromRow(row) {
     sourceRecurringIncomeId: row.source_recurring_income_id || null,
     sourceOneOffId: row.source_one_off_id || null,
     sourceFlexId: row.source_flex_id || null,
-    sourceGoalId: row.source_goal_id || null
+    sourceGoalId: row.source_goal_id || null,
+    rowId: row.id || null
   });
 }

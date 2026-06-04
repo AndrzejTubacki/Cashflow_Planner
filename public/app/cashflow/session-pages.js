@@ -158,7 +158,7 @@ export function renderSetupPage({ cashflow = null, error = "", message = "" } = 
           </label>
           <label>
             <span>${escapeHtml(t(locale, "Opening balance"))}</span>
-            <input type="number" name="opening_balance" value="0" step="0.01">
+            <input type="number" name="opening_balance" value="0" min="0" step="0.01">
           </label>
           <label>
             <span>${escapeHtml(t(locale, "Monthly income"))}</span>

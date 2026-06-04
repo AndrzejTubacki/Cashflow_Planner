@@ -64,8 +64,8 @@ deployment notes.
 - configurable app timezone for date-sensitive planning and scheduled jobs
 - separate user profiles for different household or demo datasets
 - user-selection shell with auth-ready session and permission boundaries
-- first-run setup for currency, locale, timezone, opening balance, income, and
-  projection horizon
+- first-run setup for currency, locale, timezone, non-negative opening balance,
+  income, and projection horizon
 - admin defaults for newly created profiles
 - data portability tools for full JSON export/import, one-off CSV import,
   confirmed-ledger CSV export, and sample data

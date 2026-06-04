@@ -21,7 +21,9 @@ import { createCashflowPendingConfirmationService } from "./server/cashflow-pend
 import { createCashflowConfirmedFxService } from "./server/cashflow-confirmed-fx-service.js";
 import { createCashflowProjectionEngineService } from "./server/cashflow-projection-engine-service.js";
 import { createCashflowProjectionCoordinatorService } from "./server/cashflow-projection-coordinator-service.js";
+import { createCashflowRecoveryService } from "./server/cashflow-recovery-service.js";
 import { createCashflowLocaleService } from "./server/cashflow-locale-utils.js";
+import { validatePlanMutationInput } from "./server/cashflow-plan-input-validation.js";
 import { generateId } from "./server/cashflow-id-utils.js";
 import {
   buildBudgetPeriods,
@@ -34,6 +36,7 @@ function createCashflowModule({
   localeDir,
   getCurrentFxSnapshot,
   getFxSnapshotForDate = null,
+  recoverableMutationHook = null,
   logError,
   logServerEvent,
   appendApiLogLine
@@ -82,6 +85,7 @@ function createCashflowModule({
     getCachedFxRate,
     getCachedFxSnapshot,
     getFxProviderSettings,
+    getProviderPairRate,
     refreshNbpFxCacheForAllUsers,
     refreshNbpFxCacheForUser,
     safeGetCurrentFxSnapshot,
@@ -128,7 +132,7 @@ function createCashflowModule({
   // Keep planning-table state coherent: pending rows, running balances, and occurrence keys.
   const {
     confirmedOccurrenceKeys,
-    confirmedOneOffSourceIds,
+    confirmedOneOffProgress,
     deletePendingOccurrence,
     findConfirmedOccurrence,
     normalizePendingStatus,
@@ -146,6 +150,15 @@ function createCashflowModule({
     loadAllConfirmedTransactions,
     openLedgerDb
   });
+
+  let recoveryService = null;
+
+  function runRecoverableUserMutation(userId, operation, work) {
+    if (!recoveryService) {
+      throw new Error("Cashflow recovery service is not initialized");
+    }
+    return recoveryService.runRecoverableUserMutation(userId, operation, work);
+  }
 
   // Move generated future rows into pending when they become actionable.
   const {
@@ -214,6 +227,7 @@ function createCashflowModule({
     openPlanningDb,
     recalculatePlanningRunningBalances,
     requireStartMonthYearIfNeeded,
+    runRecoverableUserMutation,
     withProjectionStatus
   });
 
@@ -228,6 +242,7 @@ function createCashflowModule({
     openLedgerDb,
     openPlanningDb,
     recalculateLedgerRunningBalance,
+    runRecoverableUserMutation,
     withProjectionStatus,
     wouldLedgerGoNegativeAfterInsert
   });
@@ -301,6 +316,14 @@ function createCashflowModule({
     regenerateProjectionsAfterMutation
   });
 
+  recoveryService = createCashflowRecoveryService({
+    afterWork: recoverableMutationHook,
+    createBackup,
+    logError,
+    logServerEvent,
+    restoreBackupFromPath
+  });
+
   const {
     exportConfirmedLedgerCsv,
     exportFullData,
@@ -313,6 +336,7 @@ function createCashflowModule({
     generateId,
     listLedgerYears,
     loadAllConfirmedTransactions,
+    normalizeLocale,
     openLedgerDb,
     openPlanningDb,
     recalculateLedgerRunningBalance,
@@ -362,11 +386,11 @@ function createCashflowModule({
       exportConfirmedLedgerCsv,
       exportFullData,
       exportSampleData,
-      fetchProviderRate,
       fetchNbpFxSnapshot,
       fetchNbpRate,
       getCachedFxSnapshot,
       getGlobalOptions,
+      getProviderPairRate,
       getSnapshot,
       listUsers,
       listAvailableLocales,
@@ -393,6 +417,7 @@ function createCashflowModule({
       updateRecurringIncome,
       updateSettings,
       updateGlobalOptions,
+      validatePlanMutationInput,
       completeSetup,
       setupRequired,
       translateLocale,
@@ -432,7 +457,7 @@ function createCashflowModule({
   // Generate future transactions and allocation projections for one user.
   projectionEngine = createCashflowProjectionEngineService({
     confirmedOccurrenceKeys,
-    confirmedOneOffSourceIds,
+    confirmedOneOffProgress,
     deletePendingOccurrence,
     getCachedFxSnapshot,
     logServerEvent,

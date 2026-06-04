@@ -22,11 +22,11 @@ export function registerCashflowRoutes(app, {
   exportConfirmedLedgerCsv,
   exportFullData,
   exportSampleData,
-  fetchProviderRate,
   fetchNbpFxSnapshot,
   fetchNbpRate,
   getCachedFxSnapshot,
   getGlobalOptions = null,
+  getProviderPairRate,
   getSnapshot,
   listAvailableLocales = () => [{ id: "en", label: "English" }],
   listUsers = null,
@@ -54,6 +54,7 @@ export function registerCashflowRoutes(app, {
   updateRecurringIncome,
   updateSettings,
   updateGlobalOptions = null,
+  validatePlanMutationInput,
   translateLocale = async (_locale, key, params = {}) => String(key || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => params?.[name] ?? ""),
   validateCashflowData,
   withProjectionStatus
@@ -376,30 +377,22 @@ export function registerCashflowRoutes(app, {
     });
 
     app.get("/api/fx/rate/:base/:quote", async (req, res) => {
-      let db = null;
       try {
-        db = openPlanningDb(resolveRequestUser(req));
-        const settings = db.prepare("SELECT fx_provider, timezone FROM settings WHERE id = 1").get() || {};
-        const rate = await fetchProviderRate(settings.fx_provider || "nbp", req.params.base, req.query.date || null, req.params.quote, settings.timezone);
+        const userId = resolveRequestUser(req);
+        const rate = await getProviderPairRate(userId, req.params.base, req.params.quote, req.query.date || null);
         res.json(rate);
       } catch (error) {
         await fail(req, res, error, "Failed to fetch FX rates", "cashflow_pair_fx_current_failed");
-      } finally {
-        db?.close();
       }
     });
 
     app.get("/api/fx/rate/:base/:quote/:date", async (req, res) => {
-      let db = null;
       try {
-        db = openPlanningDb(resolveRequestUser(req));
-        const settings = db.prepare("SELECT fx_provider, timezone FROM settings WHERE id = 1").get() || {};
-        const rate = await fetchProviderRate(settings.fx_provider || "nbp", req.params.base, req.params.date, req.params.quote, settings.timezone);
+        const userId = resolveRequestUser(req);
+        const rate = await getProviderPairRate(userId, req.params.base, req.params.quote, req.params.date);
         res.json(rate);
       } catch (error) {
         await fail(req, res, error, "Failed to fetch FX rates", "cashflow_pair_fx_historical_failed");
-      } finally {
-        db?.close();
       }
     });
 
@@ -514,8 +507,9 @@ export function registerCashflowRoutes(app, {
     app.post("/api/recurring-expenses", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(createRecurringExpense(userId, req.body));
+        const input = validatePlanMutationInput("recurring-expense", req.body, { create: true });
+        await ensureFxCacheForMutation(userId, input);
+        res.json(createRecurringExpense(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create recurring expense", "cashflow_recurring_expense_create_failed");
       }
@@ -524,8 +518,9 @@ export function registerCashflowRoutes(app, {
     app.put("/api/recurring-expenses/:id", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(updateRecurringExpense(userId, req.params.id, req.body));
+        const input = validatePlanMutationInput("recurring-expense", req.body);
+        await ensureFxCacheForMutation(userId, input);
+        res.json(updateRecurringExpense(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update recurring expense", "cashflow_recurring_expense_update_failed");
       }
@@ -543,8 +538,9 @@ export function registerCashflowRoutes(app, {
     app.post("/api/recurring-incomes", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(createRecurringIncome(userId, req.body));
+        const input = validatePlanMutationInput("recurring-income", req.body, { create: true });
+        await ensureFxCacheForMutation(userId, input);
+        res.json(createRecurringIncome(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create recurring income", "cashflow_recurring_income_create_failed");
       }
@@ -553,8 +549,9 @@ export function registerCashflowRoutes(app, {
     app.put("/api/recurring-incomes/:id", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(updateRecurringIncome(userId, req.params.id, req.body));
+        const input = validatePlanMutationInput("recurring-income", req.body);
+        await ensureFxCacheForMutation(userId, input);
+        res.json(updateRecurringIncome(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update recurring income", "cashflow_recurring_income_update_failed");
       }
@@ -572,8 +569,9 @@ export function registerCashflowRoutes(app, {
     app.post("/api/goals", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(createGoal(userId, req.body));
+        const input = validatePlanMutationInput("goal", req.body, { create: true });
+        await ensureFxCacheForMutation(userId, input);
+        res.json(createGoal(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create goal", "cashflow_goal_create_failed");
       }
@@ -582,8 +580,9 @@ export function registerCashflowRoutes(app, {
     app.put("/api/goals/:id", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(updateGoal(userId, req.params.id, req.body));
+        const input = validatePlanMutationInput("goal", req.body);
+        await ensureFxCacheForMutation(userId, input);
+        res.json(updateGoal(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update goal", "cashflow_goal_update_failed");
       }
@@ -601,8 +600,9 @@ export function registerCashflowRoutes(app, {
     app.post("/api/flex", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(createFlexTransaction(userId, req.body));
+        const input = validatePlanMutationInput("flex", req.body, { create: true });
+        await ensureFxCacheForMutation(userId, input);
+        res.json(createFlexTransaction(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create flex transaction", "cashflow_flex_create_failed");
       }
@@ -611,8 +611,9 @@ export function registerCashflowRoutes(app, {
     app.put("/api/flex/:id", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(updateFlexTransaction(userId, req.params.id, req.body));
+        const input = validatePlanMutationInput("flex", req.body);
+        await ensureFxCacheForMutation(userId, input);
+        res.json(updateFlexTransaction(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update flex transaction", "cashflow_flex_update_failed");
       }
@@ -630,8 +631,9 @@ export function registerCashflowRoutes(app, {
     app.post("/api/one-off", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(createOneOffTransaction(userId, req.body));
+        const input = validatePlanMutationInput("one-off", req.body, { create: true });
+        await ensureFxCacheForMutation(userId, input);
+        res.json(createOneOffTransaction(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create one-off transaction", "cashflow_oneoff_create_failed");
       }
@@ -640,8 +642,9 @@ export function registerCashflowRoutes(app, {
     app.put("/api/one-off/:id", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        await ensureFxCacheForMutation(userId, req.body);
-        res.json(updateOneOffTransaction(userId, req.params.id, req.body));
+        const input = validatePlanMutationInput("one-off", req.body);
+        await ensureFxCacheForMutation(userId, input);
+        res.json(updateOneOffTransaction(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update one-off transaction", "cashflow_oneoff_update_failed");
       }
@@ -650,7 +653,7 @@ export function registerCashflowRoutes(app, {
     app.delete("/api/one-off/:id", async (req, res) => {
       try {
         const userId = resolveRequestUser(req);
-        res.json(deleteOneOffTransaction(userId, req.params.id));
+        res.json(await deleteOneOffTransaction(userId, req.params.id));
       } catch (error) {
         await fail(req, res, error, "Failed to delete one-off transaction", "cashflow_oneoff_delete_failed");
       }

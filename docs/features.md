@@ -37,8 +37,8 @@ The core workflow is:
 - configurable ledger currency with FX conversion
 - configurable app timezone for date-sensitive planning and scheduled jobs
 - user selection screen for separate planner profiles
-- first-run setup for currency, locale, timezone, opening balance, recurring
-  income, and projection horizon
+- first-run setup for currency, locale, timezone, non-negative opening balance,
+  recurring income, and projection horizon
 - admin tab for global defaults applied to newly created users
 - FX conversion with disabled, manual, NBP, and Frankfurter provider options
 - Docker support

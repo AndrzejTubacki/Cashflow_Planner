@@ -78,6 +78,26 @@ test("admin global options apply to newly created users", async () => withHarnes
   assert.equal(snapshot.settings.fx_buffer_percent, 2);
 }));
 
+test("admin global options reject malformed values without changing defaults", async () => withHarness(async harness => {
+  const before = await harness.api("/api/admin/options");
+  const invalid = [
+    { future_periods: "abc" },
+    { future_periods: 1.5 },
+    { fx_buffer_percent: -1 },
+    { fx_provider: "unknown" },
+    { timezone: "Not/A_Timezone" },
+    { unsupported_option: true }
+  ];
+
+  for (const body of invalid) {
+    const result = await harness.request("/api/admin/options", { method: "PUT", body });
+    assert.equal(result.response.status, 400, JSON.stringify(body));
+  }
+
+  const after = await harness.api("/api/admin/options");
+  assert.deepEqual(after.options, before.options);
+}));
+
 test("first-run setup marks setup complete and creates opening balance plus recurring income", async () => withHarness(async harness => {
   await harness.api("/api/users", {
     method: "POST",
@@ -130,6 +150,110 @@ test("first-run setup marks setup complete and creates opening balance plus recu
   assert.equal(after.pendingTransactions[0].ledger_currency, "EUR");
   assert.equal(after.pendingTransactions[0].fx_rate, 1);
   assert.equal(after.pendingTransactions[0].buffered_fx_rate, 1);
+}));
+
+test("first-run setup rejects negative opening balances without changing profile state", async () => withHarness(async harness => {
+  await harness.api("/api/users", {
+    method: "POST",
+    body: {
+      userId: "negative_setup_user"
+    }
+  });
+
+  const result = await harness.request("/api/setup", {
+    method: "POST",
+    headers: {
+      "x-cashflow-user-id": "negative_setup_user"
+    },
+    body: {
+      ledger_currency: "PLN",
+      locale: "en",
+      timezone: "UTC",
+      holiday_country: "PL",
+      future_periods: 4,
+      opening_balance: -25
+    }
+  });
+
+  assert.equal(result.response.status, 400);
+  assert.ok(result.body.details.some(detail =>
+    detail.field === "opening_balance" && detail.reason === "must_be_non_negative"
+  ));
+
+  const snapshot = await harness.api("/api", {
+    headers: {
+      "x-cashflow-user-id": "negative_setup_user"
+    }
+  });
+  assert.equal(snapshot.setup_required, true);
+  assert.equal(snapshot.settings.setup_completed, 0);
+  assert.equal(snapshot.pendingTransactions.length, 0);
+  assert.equal(snapshot.recurringIncomes.length, 0);
+}));
+
+test("first-run setup accepts a zero opening balance without creating an opening row", async () => withHarness(async harness => {
+  await harness.api("/api/users", {
+    method: "POST",
+    body: {
+      userId: "zero_setup_user"
+    }
+  });
+
+  const result = await harness.api("/api/setup", {
+    method: "POST",
+    headers: {
+      "x-cashflow-user-id": "zero_setup_user"
+    },
+    body: {
+      ledger_currency: "PLN",
+      locale: "en",
+      timezone: "UTC",
+      holiday_country: "PL",
+      future_periods: 4,
+      opening_balance: 0
+    }
+  });
+
+  assert.equal(result.setup_required, false);
+  assert.equal(result.settings.setup_completed, 1);
+  assert.equal(result.pendingTransactions.length, 0);
+}));
+
+test("first-run setup rejects malformed numeric and boolean values before writes", async () => withHarness(async harness => {
+  await harness.api("/api/users", {
+    method: "POST",
+    body: { userId: "strict_setup_user" }
+  });
+
+  const invalid = [
+    { future_periods: "abc" },
+    { income_enabled: "yes" },
+    { income_amount: -1 },
+    { income_anchor_day: 1.5 },
+    { opening_balance: "not-a-number" }
+  ];
+
+  for (const extra of invalid) {
+    const result = await harness.request("/api/setup", {
+      method: "POST",
+      headers: { "x-cashflow-user-id": "strict_setup_user" },
+      body: {
+        ledger_currency: "PLN",
+        locale: "en",
+        timezone: "UTC",
+        holiday_country: "PL",
+        ...extra
+      }
+    });
+    assert.equal(result.response.status, 400, JSON.stringify(extra));
+  }
+
+  const snapshot = await harness.api("/api", {
+    headers: { "x-cashflow-user-id": "strict_setup_user" }
+  });
+  assert.equal(snapshot.setup_required, true);
+  assert.equal(snapshot.pendingTransactions.length, 0);
+  assert.equal(snapshot.recurringIncomes.length, 0);
 }));
 
 test("confirmed-only users are treated as already set up", async () => withHarness(async harness => {

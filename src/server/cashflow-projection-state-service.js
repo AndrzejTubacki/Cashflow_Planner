@@ -1,5 +1,6 @@
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
 import { requireIsoMonth } from "./cashflow-date-utils.js";
+import { requireNumber } from "./cashflow-input-validation.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
 export function createCashflowProjectionStateService({
@@ -13,7 +14,9 @@ export function createCashflowProjectionStateService({
   }
 
   function requireStartMonthYearIfNeeded(input) {
-    const repeatEveryMonths = Math.max(1, Math.min(12, Number(input.repeat_every_months) || 1));
+    const repeatEveryMonths = input.repeat_every_months === undefined
+      ? 1
+      : requireNumber(input.repeat_every_months, "repeat_every_months", { min: 1, max: 12, integer: true });
 
     if (repeatEveryMonths > 1 && !input.start_month_year) {
       throw badRequest("start_month_year is required when repeat_every_months is greater than 1");
@@ -32,7 +35,11 @@ export function createCashflowProjectionStateService({
       ...input
     };
 
-    merged.repeat_every_months = Math.max(1, Math.min(12, Number(merged.repeat_every_months) || 1));
+    merged.repeat_every_months = requireNumber(merged.repeat_every_months, "repeat_every_months", {
+      min: 1,
+      max: 12,
+      integer: true
+    });
 
     if (merged.repeat_every_months > 1 && !merged.start_month_year) {
       throw badRequest("start_month_year is required when repeat_every_months is greater than 1");
@@ -68,12 +75,31 @@ export function createCashflowProjectionStateService({
     );
   }
 
-  function confirmedOneOffSourceIds(userId) {
-    return new Set(
-      loadAllConfirmedTransactions(userId)
-        .map(row => row.source_one_off_id)
-        .filter(Boolean)
-    );
+  function confirmedOneOffProgress(userId) {
+    // Track installments in original transaction units so projection can generate only the unconfirmed remainder.
+    const progress = new Map();
+
+    for (const row of loadAllConfirmedTransactions(userId)) {
+      const sourceId = row.source_one_off_id;
+      if (!sourceId) continue;
+
+      const currency = String(row.currency || "").toUpperCase();
+      const type = String(row.type || "");
+      const key = `${sourceId}:${type}:${currency}`;
+      const current = progress.get(key) || {
+        sourceId,
+        type,
+        currency,
+        confirmedAmount: 0,
+        confirmedCount: 0
+      };
+
+      current.confirmedAmount += Number(row.amount || 0);
+      current.confirmedCount += 1;
+      progress.set(key, current);
+    }
+
+    return progress;
   }
 
   function findConfirmedOccurrence(userId, occurrenceKey) {
@@ -277,7 +303,7 @@ export function createCashflowProjectionStateService({
 
   return {
     confirmedOccurrenceKeys,
-    confirmedOneOffSourceIds,
+    confirmedOneOffProgress,
     deletePendingOccurrence,
     findConfirmedOccurrence,
     normalizePendingStatus,

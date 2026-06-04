@@ -14,7 +14,10 @@ export function normalizeHolidayCountry(value, fallback = "PL") {
 export function requireHolidayCountry(value, fieldName = "holiday_country") {
   const normalized = String(value || "").trim().toUpperCase();
   if (!SUPPORTED_HOLIDAY_COUNTRIES.includes(normalized)) {
-    throw badRequest(`${fieldName} must be one of ${SUPPORTED_HOLIDAY_COUNTRIES.join(", ")}`);
+    throw badRequest(`${fieldName} must be one of ${SUPPORTED_HOLIDAY_COUNTRIES.join(", ")}`, [{
+      field: fieldName,
+      reason: "unsupported_holiday_country"
+    }]);
   }
   return normalized;
 }
@@ -66,7 +69,10 @@ export function requireIsoDate(value, fieldName = "date") {
   const normalized = String(value || "").trim();
   const match = normalized.match(DATE_PATTERN);
   if (!match) {
-    throw badRequest(`${fieldName} must be a valid YYYY-MM-DD value`);
+    throw badRequest(`${fieldName} must be a valid YYYY-MM-DD value`, [{
+      field: fieldName,
+      reason: "invalid_date"
+    }]);
   }
 
   const [, yearRaw, monthRaw, dayRaw] = match;
@@ -80,7 +86,10 @@ export function requireIsoDate(value, fieldName = "date") {
     date.getUTCMonth() !== month - 1 ||
     date.getUTCDate() !== day
   ) {
-    throw badRequest(`${fieldName} must be a valid YYYY-MM-DD value`);
+    throw badRequest(`${fieldName} must be a valid YYYY-MM-DD value`, [{
+      field: fieldName,
+      reason: "invalid_date"
+    }]);
   }
 
   return normalized;
@@ -90,7 +99,10 @@ export function requireIsoMonth(value, fieldName = "start_month_year") {
   const normalized = String(value || "").trim();
   const match = normalized.match(MONTH_PATTERN);
   if (!match) {
-    throw badRequest(`${fieldName} must be a valid YYYY-MM value`);
+    throw badRequest(`${fieldName} must be a valid YYYY-MM value`, [{
+      field: fieldName,
+      reason: "invalid_month"
+    }]);
   }
 
   const [, yearRaw, monthRaw] = match;
@@ -98,7 +110,10 @@ export function requireIsoMonth(value, fieldName = "start_month_year") {
   const month = Number(monthRaw);
 
   if (year < 1 || month < 1 || month > 12) {
-    throw badRequest(`${fieldName} must be a valid YYYY-MM value`);
+    throw badRequest(`${fieldName} must be a valid YYYY-MM value`, [{
+      field: fieldName,
+      reason: "invalid_month"
+    }]);
   }
 
   return normalized;

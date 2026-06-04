@@ -3,8 +3,8 @@ import test from "node:test";
 
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 
-async function withHarness(fn) {
-  const harness = await createCashflowTestHarness();
+async function withHarness(fn, options = {}) {
+  const harness = await createCashflowTestHarness(options);
   try {
     return await fn(harness);
   } finally {
@@ -32,7 +32,7 @@ function insertPending(harness, row) {
       row.amount,
       row.amount,
       row.amount,
-      row.occurrenceKey
+      row.occurrenceKey ?? null
     );
   } finally {
     db.close();
@@ -384,3 +384,185 @@ test("changing ledger currency with a non-zero balance requires an FX rate", asy
   assert.equal(result.response.status, 400);
   assert.match(result.body.error, /Missing FX rate for PLN\/USD/);
 }));
+
+test("pending edits and confirmations reject negative or malformed amounts", async () => withHarness(async harness => {
+  insertPending(harness, {
+    id: "strict-pending",
+    name: "Strict pending",
+    type: "income",
+    amount: 100,
+    date: "2026-05-20",
+    occurrenceKey: "strict-pending"
+  });
+
+  for (const amount of [-1, "abc", ""]) {
+    const edit = await harness.request("/api/pending/strict-pending", {
+      method: "PUT",
+      body: { amount }
+    });
+    assert.equal(edit.response.status, 400, `edit ${JSON.stringify(amount)}`);
+
+    const confirm = await harness.request("/api/pending/strict-pending/confirm", {
+      method: "POST",
+      body: { amount, confirmed_date: "2026-05-20" }
+    });
+    assert.equal(confirm.response.status, 400, `confirm ${JSON.stringify(amount)}`);
+  }
+
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.pendingTransactions.some(row => row.id === "strict-pending"), true);
+  assert.equal(snapshot.confirmedTransactions.some(row => row.id === "strict-pending"), false);
+}));
+
+test("source-less pending rows with matching type and date confirm independently", async () => withHarness(async harness => {
+  for (const id of ["manual-pending-a", "manual-pending-b"]) {
+    insertPending(harness, {
+      id,
+      name: id,
+      type: "income",
+      amount: 10,
+      date: "2026-05-20"
+    });
+  }
+
+  await harness.api("/api/pending/manual-pending-a/confirm", {
+    method: "POST",
+    body: { amount: 10, confirmed_date: "2026-05-20" }
+  });
+  await harness.api("/api/pending/manual-pending-b/confirm", {
+    method: "POST",
+    body: { amount: 10, confirmed_date: "2026-05-20" }
+  });
+
+  const snapshot = await harness.api("/api");
+  const rows = snapshot.confirmedTransactions.filter(row => row.id.startsWith("manual-pending-"));
+  assert.equal(rows.length, 2);
+  assert.equal(new Set(rows.map(row => row.occurrence_key)).size, 2);
+  assert.ok(rows.every(row => row.occurrence_key.startsWith(`manual:${row.id}:income:2026-05-20`)));
+  assert.equal(snapshot.pendingTransactions.some(row => row.id.startsWith("manual-pending-")), false);
+}));
+
+test("a second ledger currency switch is blocked until the pending conversion is resolved", async () => withHarness(async harness => {
+  insertPending(harness, {
+    id: "switch-seed",
+    name: "Switch seed",
+    type: "income",
+    amount: 100,
+    date: "2026-05-20",
+    occurrenceKey: "switch-seed"
+  });
+  await harness.api("/api/pending/switch-seed/confirm", {
+    method: "POST",
+    body: { amount: 100, confirmed_date: "2026-05-20" }
+  });
+
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      ledger_currency: "USD",
+      fx_provider: "manual",
+      manual_fx_rates: { "PLN/USD": 0.25 }
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const firstConversion = snapshot.pendingTransactions.find(row =>
+    String(row.occurrence_key || "").startsWith("ledger_currency_conversion:")
+  );
+  assert.ok(firstConversion);
+  const beforeEventCount = (() => {
+    const db = harness.openPlanningDb();
+    try {
+      return db.prepare("SELECT COUNT(*) AS count FROM ledger_currency_events").get().count;
+    } finally {
+      db.close();
+    }
+  })();
+
+  const blocked = await harness.request("/api/settings", {
+    method: "PUT",
+    body: {
+      ledger_currency: "EUR",
+      fx_provider: "manual",
+      manual_fx_rates: { "USD/EUR": 0.9 }
+    }
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.ok(blocked.body.details.some(detail => detail.reason === "pending_conversion"));
+
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.settings.ledger_currency, "USD");
+  assert.equal(snapshot.pendingTransactions.filter(row =>
+    String(row.occurrence_key || "").startsWith("ledger_currency_conversion:")
+  ).length, 1);
+  const blockedDb = harness.openPlanningDb();
+  try {
+    assert.equal(blockedDb.prepare("SELECT COUNT(*) AS count FROM ledger_currency_events").get().count, beforeEventCount);
+  } finally {
+    blockedDb.close();
+  }
+
+  await harness.api(`/api/pending/${encodeURIComponent(firstConversion.id)}/confirm`, {
+    method: "POST",
+    body: { amount: firstConversion.amount, confirmed_date: "2026-05-20" }
+  });
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      ledger_currency: "EUR",
+      fx_provider: "manual",
+      manual_fx_rates: { "USD/EUR": 0.9 }
+    }
+  });
+
+  const eventDb = harness.openPlanningDb();
+  try {
+    const latest = eventDb.prepare(`
+      SELECT old_currency, new_currency, old_balance, converted_opening_balance
+      FROM ledger_currency_events
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get();
+    assert.equal(latest.old_currency, "USD");
+    assert.equal(latest.new_currency, "EUR");
+    assert.equal(latest.old_balance, 25);
+    assert.equal(latest.converted_opening_balance, 22.5);
+  } finally {
+    eventDb.close();
+  }
+}));
+
+test("failed cross-database pending confirmation restores pending and ledger state", async () => {
+  let failConfirmation = false;
+  await withHarness(async harness => {
+    insertPending(harness, {
+      id: "rollback-confirmation",
+      name: "Rollback confirmation",
+      type: "income",
+      amount: 100,
+      date: "2026-05-20",
+      occurrenceKey: "rollback-confirmation"
+    });
+
+    failConfirmation = true;
+    const failed = await harness.request("/api/pending/rollback-confirmation/confirm", {
+      method: "POST",
+      body: { amount: 100, confirmed_date: "2026-05-20" }
+    });
+    assert.equal(failed.response.status, 500);
+
+    const snapshot = await harness.api("/api");
+    assert.equal(snapshot.pendingTransactions.some(row => row.id === "rollback-confirmation"), true);
+    assert.equal(snapshot.confirmedTransactions.some(row => row.id === "rollback-confirmation"), false);
+    assert.ok(harness.events.some(event =>
+      event.kind === "cashflow_recoverable_mutation_rolled_back"
+      && event.details.operation === "confirm_pending_transaction"
+    ));
+  }, {
+    recoverableMutationHook: ({ operation }) => {
+      if (failConfirmation && operation === "confirm_pending_transaction") {
+        throw new Error("forced confirmation failure");
+      }
+    }
+  });
+});

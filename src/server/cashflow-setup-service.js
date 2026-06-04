@@ -1,14 +1,9 @@
 import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { todayInTimezone, normalizeTimezone, requireHolidayCountry } from "./cashflow-date-utils.js";
-import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
+import { todayInTimezone } from "./cashflow-date-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
+import { hasOwn, requireBoolean, requireNumber } from "./cashflow-input-validation.js";
+import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 import { badRequest } from "./cashflow-user-utils.js";
-
-function asNonNegativeNumber(value, fallback = 0) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(0, number);
-}
 
 function monthKey(dateString) {
   return String(dateString || "").slice(0, 7);
@@ -46,18 +41,38 @@ export function createCashflowSetupService({
   }
 
   function completeSetup(userId, input = {}) {
-    const ledgerCurrency = requireSupportedCurrency(input.ledger_currency || input.currency || "PLN", "ledger_currency");
-    const locale = normalizeLocale(input.locale || "en");
-    const timezone = normalizeTimezone(input.timezone || DEFAULT_TIMEZONE);
-    const holidayCountry = requireHolidayCountry(input.holiday_country || "PL", "holiday_country");
-    const futurePeriods = Math.max(1, Math.min(60, Number(input.future_periods) || DEFAULT_FUTURE_PERIODS));
+    const setupSettings = validateAndNormalizeSettings({
+      ledger_currency: input.ledger_currency ?? input.currency ?? "PLN",
+      locale: input.locale ?? "en",
+      timezone: input.timezone ?? DEFAULT_TIMEZONE,
+      holiday_country: input.holiday_country ?? "PL",
+      future_periods: input.future_periods ?? DEFAULT_FUTURE_PERIODS
+    }, { normalizeLocale });
+    const ledgerCurrency = setupSettings.ledger_currency;
+    const locale = setupSettings.locale;
+    const timezone = setupSettings.timezone;
+    const holidayCountry = setupSettings.holiday_country;
+    const futurePeriods = setupSettings.future_periods;
     const today = todayInTimezone(timezone);
-    const openingBalanceRaw = Number(input.opening_balance || 0);
-    const openingBalance = Number.isFinite(openingBalanceRaw) ? openingBalanceRaw : 0;
-    const incomeEnabled = input.income_enabled === true || input.income_enabled === 1 || input.income_enabled === "1";
-    const incomeAmount = asNonNegativeNumber(input.income_amount, 0);
+    const openingBalance = hasOwn(input, "opening_balance")
+      ? requireNumber(input.opening_balance, "opening_balance")
+      : 0;
+    if (openingBalance < 0) {
+      throw badRequest("Opening balance must be a non-negative number", [{
+        field: "opening_balance",
+        reason: "must_be_non_negative"
+      }]);
+    }
+    const incomeEnabled = hasOwn(input, "income_enabled")
+      ? requireBoolean(input.income_enabled, "income_enabled") === 1
+      : false;
+    const incomeAmount = hasOwn(input, "income_amount")
+      ? requireNumber(input.income_amount, "income_amount", { min: 0 })
+      : 0;
     const incomeName = String(input.income_name || "Income").trim() || "Income";
-    const incomeAnchorDay = Math.max(1, Math.min(31, Number(input.income_anchor_day) || 1));
+    const incomeAnchorDay = hasOwn(input, "income_anchor_day")
+      ? requireNumber(input.income_anchor_day, "income_anchor_day", { min: 1, max: 31, integer: true })
+      : 1;
 
     const db = openPlanningDb(userId);
     const created = {

@@ -85,6 +85,10 @@ export function requireSupportedCurrency(value, fieldName = "currency") {
   if (!SUPPORTED_FX_CURRENCIES.includes(normalized)) {
     const error = new Error(`${fieldName} must be one of the supported currencies`);
     error.status = 400;
+    error.details = [{
+      field: fieldName,
+      reason: "unsupported_currency"
+    }];
     throw error;
   }
 

@@ -148,6 +148,134 @@ test("invalid currencies and impossible dates are rejected before writes", async
   assert.equal(invalidFullImport.response.status, 400);
 }));
 
+test("normal planning creates reject caller IDs and malformed numeric or boolean values", async () => withHarness(async harness => {
+  const createCases = [
+    ["/api/recurring-expenses", { id: "caller-expense", name: "Expense", currency: "PLN", amount: 1 }],
+    ["/api/recurring-incomes", { id: "caller-income", name: "Income", currency: "PLN", amount: 1 }],
+    ["/api/goals", { id: "caller-goal", name: "Goal", currency: "PLN", amount: 1, due_date: "2026-06-01" }],
+    ["/api/flex", { id: "caller-flex", name: "Flex", currency: "PLN", amount: 1 }],
+    ["/api/one-off", { id: "caller-oneoff", name: "One-off", currency: "PLN", amount: 1, type: "expense", date: "2026-06-01" }]
+  ];
+
+  for (const [pathname, body] of createCases) {
+    const result = await harness.request(pathname, { method: "POST", body });
+    assert.equal(result.response.status, 400, pathname);
+    assert.ok(result.body.details.some(detail => detail.field === "id" && detail.reason === "server_generated"));
+  }
+
+  const malformedCases = [
+    ["/api/one-off", { name: "Bad", currency: "PLN", amount: "abc", type: "expense", date: "2026-06-01" }],
+    ["/api/recurring-expenses", { name: "Bad", currency: "PLN", amount: -1 }],
+    ["/api/recurring-incomes", { name: "Bad", currency: "PLN", amount: 1, active: "false" }],
+    ["/api/goals", { name: "Bad", currency: "PLN", amount: 1, priority: 1.5, due_date: "2026-06-01" }],
+    ["/api/flex", { name: "Bad", currency: "PLN", amount: 1, allow_split: "yes" }]
+  ];
+
+  for (const [pathname, body] of malformedCases) {
+    const result = await harness.request(pathname, { method: "POST", body });
+    assert.equal(result.response.status, 400, `${pathname}: ${JSON.stringify(body)}`);
+  }
+
+  const oneOff = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Valid update target",
+      currency: "PLN",
+      amount: 10,
+      type: "expense",
+      date: "2026-06-01"
+    }
+  });
+  const invalidUpdate = await harness.request(`/api/one-off/${encodeURIComponent(oneOff.id)}`, {
+    method: "PUT",
+    body: { amount: -1 }
+  });
+  assert.equal(invalidUpdate.response.status, 400);
+
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.recurringExpenses.length, 0);
+  assert.equal(snapshot.recurringIncomes.length, 0);
+  assert.equal(snapshot.goals.length, 0);
+  assert.equal(snapshot.flexTransactions.length, 0);
+  assert.equal(snapshot.oneOffs.length, 1);
+  assert.equal(snapshot.oneOffs[0].amount, 10);
+}));
+
+test("pair-rate routes respect manual and disabled provider semantics", async () => withHarness(async harness => {
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      fx_provider: "manual",
+      manual_fx_rates: {
+        "EUR/USD": 1.25,
+        "GBP/PLN": 5,
+        "USD/PLN": 4
+      }
+    }
+  });
+
+  const direct = await harness.api("/api/fx/rate/EUR/USD");
+  const inverse = await harness.api("/api/fx/rate/USD/EUR");
+  const derived = await harness.api("/api/fx/rate/GBP/USD");
+  const same = await harness.api("/api/fx/rate/EUR/EUR");
+  assert.equal(direct.rate, 1.25);
+  assert.equal(inverse.rate, 0.8);
+  assert.equal(derived.rate, 1.25);
+  assert.equal(same.rate, 1);
+  assert.equal(same.source, "same-currency");
+  const invalidDate = await harness.request("/api/fx/rate/EUR/USD/2026-02-31");
+  assert.equal(invalidDate.response.status, 400);
+
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: { fx_provider: "disabled" }
+  });
+  const disabled = await harness.request("/api/fx/rate/EUR/USD");
+  assert.equal(disabled.response.status, 400);
+  assert.match(disabled.body.error, /disabled/i);
+}));
+
+test("settings updates strictly reject malformed supported fields", async () => withHarness(async harness => {
+  const invalidUpdates = [
+    [{ future_periods: 0 }, "future_periods"],
+    [{ future_periods: 1.5 }, "future_periods"],
+    [{ future_periods: true }, "future_periods"],
+    [{ future_periods: " " }, "future_periods"],
+    [{ minimum_reserve_enabled: "yes" }, "minimum_reserve_enabled"],
+    [{ minimum_reserve_amount: -1 }, "minimum_reserve_amount"],
+    [{ fx_buffer_percent: 101 }, "fx_buffer_percent"],
+    [{ fx_provider: "unknown" }, "fx_provider"],
+    [{ fx_used_currencies: null }, "fx_used_currencies"],
+    [{ fx_used_currencies: ["XXX"] }, "fx_used_currencies"],
+    [{ manual_fx_rates: null }, "manual_fx_rates"],
+    [{ manual_fx_rates: { "EUR/USD": 0 } }, "manual_fx_rates"],
+    [{ manual_fx_rates: { PLN: 0 } }, "manual_fx_rates"],
+    [{ manual_fx_rates: { "EUR/USD": true } }, "manual_fx_rates"],
+    [{ manual_fx_rates: { "EUR/EUR": 1 } }, "manual_fx_rates"],
+    [{ manual_fx_rates: "{bad" }, "manual_fx_rates"],
+    [{ locale: "xx" }, "locale"],
+    [{ timezone: "Not/A_Timezone" }, "timezone"],
+    [{ holiday_country: "XX" }, "holiday_country"],
+    [{ ntfy_url: "ftp://example.com/topic" }, "ntfy_url"],
+    [{ notification_delivery_time: "25:00" }, "notification_delivery_time"],
+    [{ ntfy_priority_income_missing: "extreme" }, "ntfy_priority_income_missing"],
+    [{ backup_interval_minutes: 0 }, "backup_interval_minutes"],
+    [{ backup_retention_count: 0 }, "backup_retention_count"],
+    [{ necessary_underfunded_repeat_days: 0 }, "necessary_underfunded_repeat_days"],
+    [{ unsupported_setting: "ignored-before" }, "unsupported_setting"]
+  ];
+
+  for (const [body, field] of invalidUpdates) {
+    const result = await harness.request("/api/settings", {
+      method: "PUT",
+      body
+    });
+
+    assert.equal(result.response.status, 400, JSON.stringify(body));
+    assert.ok(result.body.details.some(detail => detail.field === field), JSON.stringify(result.body));
+  }
+}));
+
 test("backup_location is constrained by CASHFLOW_BACKUP_ALLOWED_ROOTS", async () => withHarness(async harness => {
   const previous = process.env.CASHFLOW_BACKUP_ALLOWED_ROOTS;
   const allowedRoot = path.join(harness.dataDir, "allowed-backups");

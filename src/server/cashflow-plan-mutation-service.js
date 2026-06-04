@@ -2,9 +2,9 @@ import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
-import { nullablePositiveAmount } from "./cashflow-money-utils.js";
 import { badRequest, notFound } from "./cashflow-user-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
+import { validatePlanMutationInput } from "./cashflow-plan-input-validation.js";
 import { reorderPriorityDomain, updatePlannedPriority } from "./cashflow-priority-utils.js";
 
 export function createCashflowPlanMutationService({
@@ -16,6 +16,7 @@ export function createCashflowPlanMutationService({
   openPlanningDb,
   recalculatePlanningRunningBalances,
   requireStartMonthYearIfNeeded,
+  runRecoverableUserMutation,
   withProjectionStatus
 }) {
   function todayForUser(db) {
@@ -113,12 +114,13 @@ export function createCashflowPlanMutationService({
   }
 
   function createRecurringExpense(userId, input) {
+    input = validatePlanMutationInput("recurring-expense", input, { create: true });
     let result;
 
     const db = openPlanningDb(userId);
     try {
       result = db.transaction(() => {
-        const id = input.id || generateId("rec-exp");
+        const id = generateId("rec-exp");
         const plannedTxId = insertPlannedTransaction(db, "recurring_expense", input.priority);
         const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
 
@@ -134,17 +136,17 @@ export function createCashflowPlanMutationService({
           id,
           input.name || "Unnamed",
           requireSupportedCurrency(input.currency || "PLN"),
-          Math.max(0, Number(input.amount) || 0),
+          input.amount ?? 0,
           ["fixed", "12month_max"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
           normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
           normalizePredictionMinRecordedMonths(input.prediction_min_recorded_months),
-          input.necessary ? 1 : 0,
-          input.active !== false ? 1 : 0,
+          input.necessary ?? 0,
+          input.active ?? 1,
           repeatEveryMonths,
           input.start_month_year || null,
           ["day_of_month", "month_end"].includes(input.anchor_type) ? input.anchor_type : "month_end",
-          input.anchor_day_of_month || null,
-          Number(input.anchor_offset_days) || 0,
+          input.anchor_day_of_month ?? null,
+          input.anchor_offset_days ?? 0,
           input.anchor_business_day_adjustment || "none",
           normalizeAnchorHolidayCountry(db, input.anchor_holiday_country),
           plannedTxId
@@ -165,6 +167,7 @@ export function createCashflowPlanMutationService({
   }
 
   function updateRecurringExpense(userId, id, input) {
+    input = validatePlanMutationInput("recurring-expense", input);
     let result;
 
     const db = openPlanningDb(userId);
@@ -207,17 +210,17 @@ export function createCashflowPlanMutationService({
         `).run(
           merged.name || "Unnamed",
           requireSupportedCurrency(merged.currency || "PLN"),
-          Math.max(0, Number(merged.amount) || 0),
+          merged.amount,
           ["fixed", "12month_max"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
           normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
           normalizePredictionMinRecordedMonths(merged.prediction_min_recorded_months),
-          merged.necessary ? 1 : 0,
-          merged.active === false || Number(merged.active) === 0 ? 0 : 1,
+          merged.necessary,
+          merged.active,
           merged.repeat_every_months,
           merged.start_month_year || null,
           ["day_of_month", "month_end"].includes(merged.anchor_type) ? merged.anchor_type : "month_end",
-          merged.anchor_day_of_month || null,
-          Number(merged.anchor_offset_days) || 0,
+          merged.anchor_day_of_month ?? null,
+          merged.anchor_offset_days,
           merged.anchor_business_day_adjustment || "none",
           normalizeAnchorHolidayCountry(db, merged.anchor_holiday_country, existing.anchor_holiday_country),
           id
@@ -249,8 +252,12 @@ export function createCashflowPlanMutationService({
 
         if (!expense) throw notFound("Recurring expense not found");
 
+        // Generated rows retain foreign keys to the source, so remove them before deleting the plan.
+        db.prepare("DELETE FROM pending_transactions WHERE source_recurring_expense_id = ?").run(id);
+        db.prepare("DELETE FROM future_transactions WHERE source_recurring_expense_id = ?").run(id);
         db.prepare("DELETE FROM recurring_expenses WHERE id = ?").run(id);
         db.prepare("DELETE FROM planned_transactions WHERE id = ?").run(expense.planned_transaction_id);
+        recalculatePlanningRunningBalances(db, userId);
       })();
     } finally {
       db.close();
@@ -260,16 +267,17 @@ export function createCashflowPlanMutationService({
   }
 
   function createRecurringIncome(userId, input) {
+    input = validatePlanMutationInput("recurring-income", input, { create: true });
     let result;
 
     const db = openPlanningDb(userId);
 
     try {
       result = db.transaction(() => {
-        const id = input.id || generateId("rec-inc");
+        const id = generateId("rec-inc");
         const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
-        const active = input.active !== false ? 1 : 0;
-        const periodSetting = active === 1 && input.period_setting ? 1 : 0;
+        const active = input.active ?? 1;
+        const periodSetting = active === 1 && input.period_setting === 1 ? 1 : 0;
 
         db.prepare(`
           INSERT INTO recurring_incomes (
@@ -283,7 +291,7 @@ export function createCashflowPlanMutationService({
           id,
           input.name || "Unnamed",
           requireSupportedCurrency(input.currency || "PLN"),
-          Math.max(0, Number(input.amount) || 0),
+          input.amount ?? 0,
           ["fixed", "12month_min"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
           normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
           normalizePredictionMinRecordedMonths(input.prediction_min_recorded_months),
@@ -291,8 +299,8 @@ export function createCashflowPlanMutationService({
           repeatEveryMonths,
           input.start_month_year || null,
           ["day_of_month", "month_end"].includes(input.anchor_type) ? input.anchor_type : "month_end",
-          input.anchor_day_of_month || null,
-          Number(input.anchor_offset_days) || 0,
+          input.anchor_day_of_month ?? null,
+          input.anchor_offset_days ?? 0,
           input.anchor_business_day_adjustment || "none",
           normalizeAnchorHolidayCountry(db, input.anchor_holiday_country),
           periodSetting
@@ -322,6 +330,7 @@ export function createCashflowPlanMutationService({
   }
 
   function updateRecurringIncome(userId, id, input) {
+    input = validatePlanMutationInput("recurring-income", input);
     let result;
 
     const db = openPlanningDb(userId);
@@ -337,8 +346,8 @@ export function createCashflowPlanMutationService({
         if (!existing) throw notFound("Recurring income not found");
 
         const merged = normalizeRecurringInput(existing, input || {});
-        const nextActive = merged.active === false || Number(merged.active) === 0 ? 0 : 1;
-        const nextPeriodSetting = nextActive === 1 && merged.period_setting ? 1 : 0;
+        const nextActive = merged.active;
+        const nextPeriodSetting = nextActive === 1 && merged.period_setting === 1 ? 1 : 0;
 
         db.prepare(`
           UPDATE recurring_incomes SET
@@ -362,7 +371,7 @@ export function createCashflowPlanMutationService({
         `).run(
           merged.name || "Unnamed",
           requireSupportedCurrency(merged.currency || "PLN"),
-          Math.max(0, Number(merged.amount) || 0),
+          merged.amount,
           ["fixed", "12month_min"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
           normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
           normalizePredictionMinRecordedMonths(merged.prediction_min_recorded_months),
@@ -370,8 +379,8 @@ export function createCashflowPlanMutationService({
           merged.repeat_every_months,
           merged.start_month_year || null,
           ["day_of_month", "month_end"].includes(merged.anchor_type) ? merged.anchor_type : "month_end",
-          merged.anchor_day_of_month || null,
-          Number(merged.anchor_offset_days) || 0,
+          merged.anchor_day_of_month ?? null,
+          merged.anchor_offset_days,
           merged.anchor_business_day_adjustment || "none",
           normalizeAnchorHolidayCountry(db, merged.anchor_holiday_country, existing.anchor_holiday_country),
           nextPeriodSetting,
@@ -422,6 +431,7 @@ export function createCashflowPlanMutationService({
   }
 
   function updatePendingTransaction(userId, id, input = {}) {
+    input = validatePlanMutationInput("pending", input);
     const db = openPlanningDb(userId);
 
     try {
@@ -435,11 +445,7 @@ export function createCashflowPlanMutationService({
       }
 
       const nextDate = requireIsoDate(input.date || pending.date);
-      const nextAmount = Math.abs(Number(input.amount ?? pending.amount) || 0);
-
-      if (!Number.isFinite(nextAmount) || nextAmount < 0) {
-        throw badRequest("Pending transaction amount must be a non-negative number");
-      }
+      const nextAmount = input.amount ?? pending.amount;
 
       if (pending.source_recurring_income_id) {
         const income = db.prepare(`
@@ -472,7 +478,8 @@ export function createCashflowPlanMutationService({
         sourceRecurringIncomeId: pending.source_recurring_income_id || null,
         sourceOneOffId: pending.source_one_off_id || null,
         sourceFlexId: pending.source_flex_id || null,
-        sourceGoalId: pending.source_goal_id || null
+        sourceGoalId: pending.source_goal_id || null,
+        rowId: pending.id
       });
 
       const existingOccurrence = db.prepare(`
@@ -523,14 +530,15 @@ export function createCashflowPlanMutationService({
   }
 
   function createGoal(userId, input) {
+    input = validatePlanMutationInput("goal", input, { create: true });
     let result;
 
     const db = openPlanningDb(userId);
     try {
       result = db.transaction(() => {
-        const id = input.id || generateId("goal");
+        const id = generateId("goal");
         const plannedTxId = insertPlannedTransaction(db, "goal", input.priority);
-        const amount = Math.max(0.01, Number(input.amount) || 0);
+        const amount = input.amount ?? 0.01;
 
         db.prepare(`
           INSERT INTO goals (
@@ -541,7 +549,7 @@ export function createCashflowPlanMutationService({
           input.name || "Unnamed",
           requireSupportedCurrency(input.currency || "PLN"),
           amount,
-          input.active !== false ? 1 : 0,
+          input.active ?? 1,
           requireDateOrDefault(input.due_date, todayForUser(db), "due_date"),
           plannedTxId
         );
@@ -561,6 +569,7 @@ export function createCashflowPlanMutationService({
   }
 
   function updateGoal(userId, id, input) {
+    input = validatePlanMutationInput("goal", input);
     let result;
 
     const db = openPlanningDb(userId);
@@ -596,8 +605,8 @@ export function createCashflowPlanMutationService({
         `).run(
           merged.name || "Unnamed",
           requireSupportedCurrency(merged.currency || "PLN"),
-          Math.max(0.01, Number(merged.amount) || 0),
-          merged.active === false || Number(merged.active) === 0 ? 0 : 1,
+          merged.amount,
+          merged.active,
           requireDateOrDefault(merged.due_date, todayForUser(db), "due_date"),
           id
         );
@@ -649,18 +658,19 @@ export function createCashflowPlanMutationService({
   }
 
   function createFlexTransaction(userId, input) {
+    input = validatePlanMutationInput("flex", input, { create: true });
     let result;
 
     const db = openPlanningDb(userId);
 
     try {
       result = db.transaction(() => {
-        const id = input.id || generateId("flex");
+        const id = generateId("flex");
         const plannedTxId = insertPlannedTransaction(db, "flex", input.priority);
 
-        const allowSplit = Number(input.allow_split) === 1 || input.allow_split === true ? 1 : 0;
-        const minAmount = allowSplit ? nullablePositiveAmount(input.min_amount) : null;
-        const maxAmount = allowSplit ? nullablePositiveAmount(input.max_amount) : null;
+        const allowSplit = input.allow_split ?? 0;
+        const minAmount = allowSplit ? input.min_amount ?? null : null;
+        const maxAmount = allowSplit ? input.max_amount ?? null : null;
 
         if (allowSplit && minAmount !== null && maxAmount !== null && minAmount > maxAmount) {
           throw badRequest("Flex min amount cannot be greater than max amount");
@@ -684,8 +694,8 @@ export function createCashflowPlanMutationService({
           id,
           input.name || "Unnamed",
           requireSupportedCurrency(input.currency || "PLN"),
-          Math.max(0, Number(input.amount) || 0),
-          input.active === false || Number(input.active) === 0 ? 0 : 1,
+          input.amount ?? 0,
+          input.active ?? 1,
           allowSplit,
           minAmount,
           maxAmount,
@@ -707,6 +717,7 @@ export function createCashflowPlanMutationService({
   }
 
   function updateFlexTransaction(userId, id, input = {}) {
+    input = validatePlanMutationInput("flex", input);
     let result;
 
     const db = openPlanningDb(userId);
@@ -732,7 +743,7 @@ export function createCashflowPlanMutationService({
           updatePlannedPriority(db, existing.planned_transaction_id, "operating", input.priority);
         }
 
-        const allowSplit = Number(merged.allow_split) === 1 || merged.allow_split === true ? 1 : 0;
+        const allowSplit = merged.allow_split;
 
         // Important:
         // If allow_split is true, use the values supplied in the request, even if they are empty strings.
@@ -745,8 +756,8 @@ export function createCashflowPlanMutationService({
           ? input.max_amount
           : existing.max_amount;
 
-        const minAmount = allowSplit ? nullablePositiveAmount(minSource) : null;
-        const maxAmount = allowSplit ? nullablePositiveAmount(maxSource) : null;
+        const minAmount = allowSplit ? minSource ?? null : null;
+        const maxAmount = allowSplit ? maxSource ?? null : null;
 
         if (allowSplit && minAmount !== null && maxAmount !== null && minAmount > maxAmount) {
           throw badRequest("Flex min amount cannot be greater than max amount");
@@ -766,8 +777,8 @@ export function createCashflowPlanMutationService({
         `).run(
           merged.name || "Unnamed",
           requireSupportedCurrency(merged.currency || "PLN"),
-          Math.max(0, Number(merged.amount) || 0),
-          merged.active === false || Number(merged.active) === 0 ? 0 : 1,
+          merged.amount,
+          merged.active,
           allowSplit,
           minAmount,
           maxAmount,
@@ -821,13 +832,14 @@ export function createCashflowPlanMutationService({
   }
 
   function createOneOffTransaction(userId, input) {
+    input = validatePlanMutationInput("one-off", input, { create: true });
     let result;
 
     const db = openPlanningDb(userId);
 
     try {
       result = db.transaction(() => {
-        const id = input.id || generateId("oneoff");
+        const id = generateId("oneoff");
 
         db.prepare(`
           INSERT INTO one_off_transactions (
@@ -837,8 +849,8 @@ export function createCashflowPlanMutationService({
           id,
           input.name || "Unnamed",
           requireSupportedCurrency(input.currency || "PLN"),
-          Math.abs(Number(input.amount) || 0),
-          ["income", "expense"].includes(input.type) ? input.type : "expense",
+          input.amount ?? 0,
+          input.type || "expense",
           requireDateOrDefault(input.date, todayForUser(db))
         );
 
@@ -852,6 +864,7 @@ export function createCashflowPlanMutationService({
   }
 
   function updateOneOffTransaction(userId, id, input) {
+    input = validatePlanMutationInput("one-off", input);
     let result;
 
     const db = openPlanningDb(userId);
@@ -863,8 +876,8 @@ export function createCashflowPlanMutationService({
 
         const confirmedRows = confirmedOneOffRows(userId, id);
         const nextCurrency = requireSupportedCurrency(input.currency || existing.currency || "PLN");
-        const nextType = ["income", "expense"].includes(input.type) ? input.type : existing.type;
-        const nextAmount = Math.abs(Number(input.amount ?? existing.amount) || 0);
+        const nextType = input.type || existing.type;
+        const nextAmount = input.amount ?? existing.amount;
 
         if (confirmedRows.length) {
           const existingCurrency = requireSupportedCurrency(existing.currency || "PLN");
@@ -911,29 +924,41 @@ export function createCashflowPlanMutationService({
     return withProjectionStatus(userId, result);
   }
 
-  function deleteOneOffTransaction(userId, id) {
-    let db = openPlanningDb(userId);
-    try {
-      const existing = db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
-      if (!existing) throw notFound("One-off transaction not found");
-    } finally {
-      db.close();
-    }
-
-    uncoupleConfirmedOneOffRows(userId, id);
-
-    db = openPlanningDb(userId);
+  function deleteOneOffPlanningSource(userId, id) {
+    const db = openPlanningDb(userId);
     try {
       db.transaction(() => {
         db.prepare("DELETE FROM pending_transactions WHERE source_one_off_id = ?").run(id);
         db.prepare("DELETE FROM future_transactions WHERE source_one_off_id = ?").run(id);
         db.prepare("DELETE FROM one_off_transactions WHERE id = ?").run(id);
+        recalculatePlanningRunningBalances(db, userId);
       })();
     } finally {
       db.close();
     }
+  }
 
-    return withProjectionStatus(userId, { ok: true });
+  async function deleteOneOffTransaction(userId, id) {
+    const db = openPlanningDb(userId);
+    let confirmedRows = [];
+    try {
+      const existing = db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
+      if (!existing) throw notFound("One-off transaction not found");
+      confirmedRows = confirmedOneOffRows(userId, id);
+    } finally {
+      db.close();
+    }
+
+    if (!confirmedRows.length) {
+      deleteOneOffPlanningSource(userId, id);
+      return withProjectionStatus(userId, { ok: true });
+    }
+
+    return runRecoverableUserMutation(userId, "delete_confirmed_one_off", async () => {
+      uncoupleConfirmedOneOffRows(userId, id);
+      deleteOneOffPlanningSource(userId, id);
+      return withProjectionStatus(userId, { ok: true });
+    });
   }
 
   return {

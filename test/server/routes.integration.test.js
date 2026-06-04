@@ -217,7 +217,7 @@ test("core route flow validates after settings and job regeneration", async () =
   assert.deepEqual(validation.warnings, []);
 }));
 
-test("settings route stores configurable timezone and falls back for invalid values", async () => withHarness(async harness => {
+test("settings route stores configurable timezone and rejects invalid values", async () => withHarness(async harness => {
   const updated = await harness.api("/api/settings", {
     method: "PUT",
     body: {
@@ -227,12 +227,16 @@ test("settings route stores configurable timezone and falls back for invalid val
 
   assert.equal(updated.timezone, "America/New_York");
 
-  const fallback = await harness.api("/api/settings", {
+  const rejected = await harness.request("/api/settings", {
     method: "PUT",
     body: {
       timezone: "bad/timezone"
     }
   });
 
-  assert.equal(fallback.timezone, "Europe/Warsaw");
+  assert.equal(rejected.response.status, 400);
+  assert.ok(rejected.body.details.some(detail => detail.field === "timezone"));
+
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.settings.timezone, "America/New_York");
 }));

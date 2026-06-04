@@ -59,7 +59,7 @@ test("session and setup pages render auth-ready controls", async () => {
   assert.match(setupHtml, /data-cashflow-setup/);
   assert.match(setupHtml, /data-cashflow-setup-form/);
   assert.match(setupHtml, /data-cashflow-logout/);
-  assert.match(setupHtml, /name="opening_balance"/);
+  assert.match(setupHtml, /name="opening_balance" value="0" min="0"/);
   assert.match(setupHtml, /name="income_amount"/);
   assert.match(setupHtml, /Complete setup/);
   assertNoMojibake(userHtml);

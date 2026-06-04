@@ -293,6 +293,8 @@ export default {
     "Minimum reserve": "Minimum reserve",
     "No users yet": "No users yet",
     "Opening balance": "Opening balance",
+    "Opening balance must be a non-negative number": "Opening balance must be a non-negative number",
+    "Confirm or clear the pending ledger currency conversion before changing ledger currency again": "Confirm or clear the pending ledger currency conversion before changing ledger currency again",
     "Protect minimum reserve": "Protect minimum reserve",
     "Projection horizon": "Projection horizon",
     "Save global options": "Save global options",

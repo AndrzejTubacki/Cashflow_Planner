@@ -1,5 +1,9 @@
 import { requireHolidayCountry, requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
+import {
+  OPERATIONAL_SETTINGS_COLUMNS,
+  validateAndNormalizeSettings
+} from "./cashflow-settings-validation.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
 const EXPORT_FORMAT = "cashflow-full-export";
@@ -57,30 +61,6 @@ const ID_TABLES = [
 ];
 
 const ONE_OFF_CSV_COLUMNS = ["name", "type", "amount", "currency", "date"];
-const OPERATIONAL_SETTINGS_COLUMNS = new Set([
-  "backup_location",
-  "auto_backup_enabled",
-  "backup_interval_minutes",
-  "backup_retention_count",
-  "ntfy_url",
-  "notification_delivery_time",
-  "notify_goal_impossible",
-  "notify_necessary_underfunded",
-  "notify_funding_shortfall",
-  "notify_income_missing",
-  "notify_pending_summary",
-  "notify_goal_funded",
-  "notify_fx_changed",
-  "ntfy_priority_goal_impossible",
-  "ntfy_priority_necessary_underfunded",
-  "ntfy_priority_funding_shortfall",
-  "ntfy_priority_income_missing",
-  "ntfy_priority_pending_summary",
-  "ntfy_priority_goal_funded",
-  "ntfy_priority_fx_changed",
-  "necessary_underfunded_repeat_days"
-]);
-
 const SETTINGS_COMPAT_DEFAULTS = {
   holiday_country: "PL",
   minimum_reserve_enabled: 0,
@@ -295,7 +275,12 @@ function hasFunctionalRows(exportData) {
     || Object.values(exportData?.ledgers || {}).some(rows => Array.isArray(rows) && rows.length > 0);
 }
 
-function prepareExportDataForImport(exportData, { includeOperationalSettings = false } = {}) {
+function prepareExportDataForImport(exportData, options = {}) {
+  const {
+    includeOperationalSettings = false,
+    normalizeLocale = value => String(value || "en").trim().toLowerCase(),
+    validateSettings = true
+  } = options;
   const prepared = cloneExportData(exportData);
   const settings = { ...(prepared.planning.settings[0] || {}) };
   const hasData = hasFunctionalRows(prepared);
@@ -319,7 +304,15 @@ function prepareExportDataForImport(exportData, { includeOperationalSettings = f
     settings.updated_at = setupTimestamp;
   }
 
-  prepared.planning.settings = [includeOperationalSettings ? settings : stripOperationalSettings(settings)];
+  const importSettings = includeOperationalSettings ? settings : stripOperationalSettings(settings);
+  prepared.planning.settings = [
+    validateSettings
+      ? validateAndNormalizeSettings(importSettings, {
+          includeOperationalSettings,
+          normalizeLocale
+        })
+      : stripOperationalSettings(importSettings)
+  ];
   return prepared;
 }
 
@@ -381,8 +374,6 @@ function normalizeExportPayload(payload) {
 
 function validateExportPayloadRows(exportData) {
   const settings = exportData.planning.settings[0] || {};
-  requireSupportedCurrency(settings.ledger_currency || "PLN", "settings.ledger_currency");
-  requireHolidayCountry(settings.holiday_country || "PL", "settings.holiday_country");
 
   for (const tableName of ["recurring_expenses", "recurring_incomes", "goals", "flex_transactions", "one_off_transactions", "pending_transactions"]) {
     for (const row of exportData.planning[tableName] || []) {
@@ -637,6 +628,7 @@ export function createCashflowDataPortabilityService({
   loadAllConfirmedTransactions,
   openLedgerDb,
   openPlanningDb,
+  normalizeLocale = value => String(value || "en").trim().toLowerCase(),
   recalculateLedgerRunningBalance,
   regenerateProjectionsAfterMutation,
   restoreBackupFromPath
@@ -846,11 +838,17 @@ export function createCashflowDataPortabilityService({
   }
 
   function importFullData(userId, payload, mode = "replace", options = {}) {
+    const normalizedMode = mode === "merge" ? "merge" : "replace";
+    const includeOperationalSettings = normalizedMode === "replace"
+      && Boolean(options.includeOperationalSettings);
     const exportData = prepareExportDataForImport(
       normalizeExportPayload(payload),
-      { includeOperationalSettings: Boolean(options.includeOperationalSettings) }
+      {
+        includeOperationalSettings,
+        normalizeLocale,
+        validateSettings: normalizedMode === "replace"
+      }
     );
-    const normalizedMode = mode === "merge" ? "merge" : "replace";
 
     if (normalizedMode === "merge") {
       const conflicts = collectMergeConflicts(userId, exportData);

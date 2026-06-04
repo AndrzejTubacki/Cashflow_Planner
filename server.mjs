@@ -181,7 +181,7 @@ app.use((req, res, next) => {
 cashflow.startBackgroundJobs();
 
 try {
-  // Optional private routes live in ignored local/dev.mjs and are not part of published builds.
+  // Optional operator-owned routes live in ignored local/dev.mjs and remain outside published APIs.
   const localDev = await import("./local/dev.mjs");
   if (typeof localDev.registerLocalDevRoutes === "function") {
     localDev.registerLocalDevRoutes(app, {

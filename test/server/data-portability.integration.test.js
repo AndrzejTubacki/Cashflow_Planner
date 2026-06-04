@@ -258,6 +258,83 @@ test("full import ignores operational settings by default and restores them by o
   assert.equal(optInImport.settings.notify_income_missing, 0);
 }));
 
+test("full replace import validates opted-in operational settings before creating a backup", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
+  exported.planning.settings[0].backup_location = "/outside/allowed/backup-root";
+  exported.planning.settings[0].notification_delivery_time = "25:00";
+  const beforeBackups = backupCount(harness);
+
+  const rejected = await harness.request("/api/import/full", {
+    method: "POST",
+    body: {
+      mode: "replace",
+      export: exported,
+      includeOperationalSettings: true
+    }
+  });
+
+  assert.equal(rejected.response.status, 400);
+  assert.ok(rejected.body.details.some(detail => detail.field === "backup_location"));
+  assert.equal(backupCount(harness), beforeBackups);
+
+  const ignored = await harness.api("/api/import/full", {
+    method: "POST",
+    body: {
+      mode: "replace",
+      export: exported,
+      includeOperationalSettings: false
+    }
+  });
+  assert.equal(ignored.import.ok, true);
+  assert.equal(ignored.settings.backup_location, null);
+  assert.equal(ignored.settings.notification_delivery_time, "08:00");
+}));
+
+test("full replace import validates functional settings before creating a backup", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
+  const beforeBackups = backupCount(harness);
+  const invalidSettings = [
+    ["ledger_currency", "XXX"],
+    ["locale", "xx"],
+    ["timezone", "Not/A_Timezone"],
+    ["holiday_country", "XX"],
+    ["future_periods", 0],
+    ["minimum_reserve_enabled", "yes"],
+    ["minimum_reserve_amount", -1],
+    ["fx_buffer_percent", 101],
+    ["fx_provider", "unsupported-provider"],
+    ["fx_used_currencies", null],
+    ["manual_fx_rates", null],
+    ["auto_backup_enabled", "yes"],
+    ["backup_interval_minutes", 0],
+    ["backup_retention_count", 0],
+    ["backup_location", "relative/path"],
+    ["ntfy_url", "ftp://example.com/topic"],
+    ["notification_delivery_time", "25:00"],
+    ["notify_income_missing", "yes"],
+    ["ntfy_priority_income_missing", "extreme"],
+    ["necessary_underfunded_repeat_days", 0]
+  ];
+
+  for (const [field, value] of invalidSettings) {
+    const candidate = structuredClone(exported);
+    candidate.planning.settings[0][field] = value;
+    const rejected = await harness.request("/api/import/full", {
+      method: "POST",
+      body: {
+        mode: "replace",
+        export: candidate,
+        includeOperationalSettings: true
+      }
+    });
+
+    assert.equal(rejected.response.status, 400, field);
+    assert.ok(rejected.body.details.some(detail => detail.field === field), JSON.stringify(rejected.body));
+  }
+
+  assert.equal(backupCount(harness), beforeBackups);
+}));
+
 test("full import accepts older exports missing recent settings fields", async () => withHarness(async harness => {
   await createConfirmedLedgerScenario(harness);
   const exported = await harness.api("/api/export/full");
@@ -289,11 +366,11 @@ test("full import accepts older exports missing recent settings fields", async (
 
 test("full merge import appends rows and rejects ID conflicts", async () => {
   let exported;
+  let sourceOneOffId;
   await withHarness(async source => {
-    await source.api("/api/one-off", {
+    const sourceOneOff = await source.api("/api/one-off", {
       method: "POST",
       body: {
-        id: "portable-source-oneoff",
         name: "Merge source",
         currency: "PLN",
         amount: 50,
@@ -301,14 +378,14 @@ test("full merge import appends rows and rejects ID conflicts", async () => {
         date: "2026-06-02"
       }
     });
+    sourceOneOffId = sourceOneOff.id;
     exported = await source.api("/api/export/full");
   }, { userId: "source" });
 
   await withHarness(async target => {
-    await target.api("/api/one-off", {
+    const targetOneOff = await target.api("/api/one-off", {
       method: "POST",
       body: {
-        id: "portable-target-oneoff",
         name: "Merge target",
         currency: "PLN",
         amount: 75,
@@ -328,8 +405,8 @@ test("full merge import appends rows and rejects ID conflicts", async () => {
 
     assert.equal(typeof merged.import.safetyBackup, "string");
     assert.equal(backupCount(target), beforeBackups + 1);
-    assert.equal(merged.oneOffs.some(row => row.id === "portable-source-oneoff"), true);
-    assert.equal(merged.oneOffs.some(row => row.id === "portable-target-oneoff"), true);
+    assert.equal(merged.oneOffs.some(row => row.id === sourceOneOffId), true);
+    assert.equal(merged.oneOffs.some(row => row.id === targetOneOff.id), true);
 
     const conflict = await target.request("/api/import/full", {
       method: "POST",
@@ -340,17 +417,17 @@ test("full merge import appends rows and rejects ID conflicts", async () => {
     });
 
     assert.equal(conflict.response.status, 409);
-    assert.ok(conflict.body.conflicts.some(row => row.table === "one_off_transactions" && row.id === "portable-source-oneoff"));
+    assert.ok(conflict.body.conflicts.some(row => row.table === "one_off_transactions" && row.id === sourceOneOffId));
   }, { userId: "target" });
 });
 
 test("full merge import rolls back planning rows after later import failure", async () => {
   let exported;
+  let rollbackOneOffId;
   await withHarness(async source => {
-    await source.api("/api/one-off", {
+    const rollbackOneOff = await source.api("/api/one-off", {
       method: "POST",
       body: {
-        id: "portable-rollback-oneoff",
         name: "Rollback source",
         currency: "PLN",
         amount: 50,
@@ -358,6 +435,7 @@ test("full merge import rolls back planning rows after later import failure", as
         date: "2026-06-02"
       }
     });
+    rollbackOneOffId = rollbackOneOff.id;
     exported = await source.api("/api/export/full");
     exported.ledgers["2026"] = [{
       id: "portable-bad-ledger",
@@ -384,10 +462,9 @@ test("full merge import rolls back planning rows after later import failure", as
   }, { userId: "source" });
 
   await withHarness(async target => {
-    await target.api("/api/one-off", {
+    const existingOneOff = await target.api("/api/one-off", {
       method: "POST",
       body: {
-        id: "portable-existing-oneoff",
         name: "Existing target",
         currency: "PLN",
         amount: 25,
@@ -408,8 +485,8 @@ test("full merge import rolls back planning rows after later import failure", as
     assert.equal(failed.response.status, 500);
     assert.equal(backupCount(target), beforeBackups + 1);
     const snapshot = await target.api("/api");
-    assert.equal(snapshot.oneOffs.some(row => row.id === "portable-existing-oneoff"), true);
-    assert.equal(snapshot.oneOffs.some(row => row.id === "portable-rollback-oneoff"), false);
+    assert.equal(snapshot.oneOffs.some(row => row.id === existingOneOff.id), true);
+    assert.equal(snapshot.oneOffs.some(row => row.id === rollbackOneOffId), false);
   }, { userId: "target" });
 });
 

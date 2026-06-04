@@ -14,6 +14,7 @@ import {
   normalizeSupportedCurrency,
   requireSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
+import { badRequest } from "./cashflow-user-utils.js";
 
 export function createCashflowFxCacheService({
   getCurrentFxSnapshot,
@@ -137,9 +138,15 @@ export function createCashflowFxCacheService({
 
     if (provider === FX_PROVIDER_MANUAL) {
       const pairRate = Number(manualPairs[`${normalized}/${quote}`]);
-      if (pairRate) return pairRate;
-      const baseToPln = normalized === "PLN" ? 1 : Number(manualRates[normalized]);
-      const quoteToPln = quote === "PLN" ? 1 : Number(manualRates[quote]);
+      if (Number.isFinite(pairRate) && pairRate > 0) return pairRate;
+      const inversePairRate = Number(manualPairs[`${quote}/${normalized}`]);
+      if (Number.isFinite(inversePairRate) && inversePairRate > 0) return 1 / inversePairRate;
+      const baseToPln = normalized === "PLN"
+        ? 1
+        : Number(manualPairs[`${normalized}/PLN`] || manualRates[normalized]);
+      const quoteToPln = quote === "PLN"
+        ? 1
+        : Number(manualPairs[`${quote}/PLN`] || manualRates[quote]);
       if (
         Number.isFinite(baseToPln) &&
         baseToPln > 0 &&
@@ -561,6 +568,48 @@ export function createCashflowFxCacheService({
     return fetchNbpPairRate(currency, quoteCurrency, requestedDate, timezone);
   }
 
+  async function getProviderPairRate(userId, baseCurrency, quoteCurrency, date = null) {
+    const base = requireSupportedCurrency(baseCurrency, "base");
+    const quote = requireSupportedCurrency(quoteCurrency, "quote");
+    const requestedDate = date ? requireIsoDate(date, "date") : null;
+    const { provider, timezone } = getFxSettings(userId);
+    const effectiveDate = requestedDate || todayInTimezone(timezone);
+
+    if (base === quote) {
+      return {
+        currency: base,
+        baseCurrency: base,
+        quoteCurrency: quote,
+        rate: 1,
+        effectiveDate,
+        requestedDate: effectiveDate,
+        source: "same-currency"
+      };
+    }
+
+    if (provider === FX_PROVIDER_DISABLED) {
+      throw badRequest(`FX provider is disabled; no rate is available for ${base}/${quote}`);
+    }
+
+    if (provider === FX_PROVIDER_MANUAL) {
+      const rate = Number(getCachedFxRate(userId, base, requestedDate, quote));
+      if (!Number.isFinite(rate) || rate <= 0) {
+        throw badRequest(`Missing manual FX rate for ${base}/${quote}`);
+      }
+      return {
+        currency: base,
+        baseCurrency: base,
+        quoteCurrency: quote,
+        rate,
+        effectiveDate,
+        requestedDate: effectiveDate,
+        source: FX_PROVIDER_MANUAL
+      };
+    }
+
+    return fetchProviderRate(provider, base, requestedDate, quote, timezone);
+  }
+
   async function fetchNbpFxSnapshot(currencies, date = null, timezone = DEFAULT_TIMEZONE) {
     const requestedDate = date ? requireIsoDate(date) : null;
     const uniqueCurrencies = [...new Set((currencies || []).map(c => requireSupportedCurrency(c || "PLN")))];
@@ -678,6 +727,7 @@ export function createCashflowFxCacheService({
     getCachedFxRate,
     getCachedFxSnapshot,
     getFxProviderSettings: getFxSettings,
+    getProviderPairRate,
     refreshNbpFxCacheForAllUsers,
     refreshNbpFxCacheForUser,
     safeGetCurrentFxSnapshot,

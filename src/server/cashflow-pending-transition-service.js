@@ -43,7 +43,8 @@ export function createCashflowPendingTransitionService({
             sourceRecurringIncomeId: tx.source_recurring_income_id || null,
             sourceOneOffId: tx.source_one_off_id || null,
             sourceFlexId: tx.source_flex_id || null,
-            sourceGoalId: tx.source_goal_id || null
+            sourceGoalId: tx.source_goal_id || null,
+            rowId: tx.id
           });
 
           const info = insertPending.run(
@@ -151,7 +152,8 @@ export function createCashflowPendingTransitionService({
           sourceRecurringIncomeId: tx.source_recurring_income_id || null,
           sourceOneOffId: tx.source_one_off_id || null,
           sourceFlexId: tx.source_flex_id || null,
-          sourceGoalId: tx.source_goal_id || null
+          sourceGoalId: tx.source_goal_id || null,
+          rowId: tx.id
         });
 
         if (occurrenceKey) {

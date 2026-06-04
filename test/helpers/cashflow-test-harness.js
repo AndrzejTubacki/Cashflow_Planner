@@ -57,6 +57,7 @@ async function createCashflowTestHarness(options = {}) {
     localeDir,
     getCurrentFxSnapshot: () => fxSnapshot,
     getFxSnapshotForDate: () => fxSnapshot,
+    recoverableMutationHook: options.recoverableMutationHook || null,
     logError: (kind, details) => errors.push({ kind, details }),
     logServerEvent: (kind, details) => events.push({ kind, details }),
     appendApiLogLine: () => {}

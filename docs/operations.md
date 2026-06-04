@@ -122,6 +122,16 @@ npm run smoke
 
 For a deployment, replace `localhost:3000` with the deployed URL.
 
+## Optional Local Control Routes
+
+The ignored `local/dev.mjs` module may register deployment-local restart and
+test routes. When the file exists, Cashflow loads it during startup:
+
+```sh
+curl -X POST https://cashflow.example.com/api/restart
+```
+
+
 ## Users, Setup, And Admin Defaults
 
 Cashflow has a lightweight user-selection screen. Treat users as separate
@@ -135,12 +145,16 @@ New profiles open a first-run setup flow that saves:
 - UI locale
 - timezone
 - projection horizon
-- optional opening-balance pending row
+- optional non-negative opening-balance pending row
 - optional recurring income used as the budget-period income
 
 Admin global options are stored separately from user ledgers and apply only to
 new profiles created after the option change. They do not rewrite existing
 profile settings.
+
+Negative opening balances are rejected during setup. Debt and overdraft
+starting positions require a dedicated planning workflow that is not currently
+implemented.
 
 ## Background Jobs And Notifications
 

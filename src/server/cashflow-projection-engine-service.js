@@ -8,7 +8,7 @@ import { buildBudgetPeriods } from "./cashflow-period-utils.js";
 
 export function createCashflowProjectionEngineService({
   confirmedOccurrenceKeys,
-  confirmedOneOffSourceIds,
+  confirmedOneOffProgress,
   deletePendingOccurrence,
   getCachedFxSnapshot,
   logServerEvent,
@@ -92,7 +92,7 @@ export function createCashflowProjectionEngineService({
 
       const periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods);
       const handledOccurrenceKeys = confirmedOccurrenceKeys(userId);
-      const handledOneOffIds = confirmedOneOffSourceIds(userId);
+      const oneOffProgress = confirmedOneOffProgress(userId);
 
       const confirmedGoalFunding = new Map();
       const pendingGoalFunding = new Map();
@@ -183,6 +183,17 @@ export function createCashflowProjectionEngineService({
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
       `);
 
+      const insertPending = db.prepare(`
+        INSERT INTO pending_transactions (
+          id, name, currency, amount, type, date,
+          source_recurring_expense_id, source_recurring_income_id, source_one_off_id,
+          source_flex_id, source_goal_id,
+          fx_rate, buffered_fx_rate, ledger_currency, status,
+          funded_amount, requested_amount, ledger_amount, note, occurrence_key,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      `);
+
       function insertTx({
         name,
         currency,
@@ -197,9 +208,11 @@ export function createCashflowProjectionEngineService({
         sourceFlexId = null,
         sourceGoalId = null,
         status = "funded",
-        note = null
+        note = null,
+        occurrenceKeyOverride = null,
+        toPending = false
       }) {
-        const occurrenceKey = makeOccurrenceKey({
+        const occurrenceKey = occurrenceKeyOverride || makeOccurrenceKey({
           type,
           date,
           sourceRecurringExpenseId,
@@ -211,14 +224,6 @@ export function createCashflowProjectionEngineService({
 
         const conversionType = type === "income" ? "income" : "expense";
         const converted = convert(fundedAmount, currency, conversionType);
-
-        if (sourceOneOffId && handledOneOffIds.has(sourceOneOffId)) {
-          return {
-            inserted: false,
-            ledgerAmount: 0,
-            alreadyConfirmed: true
-          };
-        }
 
         if (handledOccurrenceKeys.has(occurrenceKey)) {
           return {
@@ -254,6 +259,39 @@ export function createCashflowProjectionEngineService({
             inserted: false,
             updatedPending: true,
             ledgerAmount: Number(refreshedPending.ledger_amount_delta || 0),
+            fx: converted.fx,
+            buffered: converted.buffered
+          };
+        }
+
+        if (toPending) {
+          insertPending.run(
+            generateId("pend"),
+            name,
+            currency,
+            fundedAmount,
+            type,
+            date,
+            sourceRecurringExpenseId,
+            sourceRecurringIncomeId,
+            sourceOneOffId,
+            sourceFlexId,
+            sourceGoalId,
+            converted.fx,
+            converted.buffered,
+            ledgerCurrency,
+            status === "funded" ? "pending" : status,
+            fundedAmount,
+            requestedAmount,
+            converted.ledgerAmount,
+            note,
+            occurrenceKey
+          );
+
+          return {
+            inserted: true,
+            pending: true,
+            ledgerAmount: converted.ledgerAmount,
             fx: converted.fx,
             buffered: converted.buffered
           };
@@ -362,10 +400,6 @@ export function createCashflowProjectionEngineService({
           deletePendingOccurrence(db, occurrenceKey);
         }
 
-        for (const oneOffId of handledOneOffIds) {
-          db.prepare("DELETE FROM pending_transactions WHERE source_one_off_id = ?").run(oneOffId);
-        }
-
         if (periods.length) {
           periods[0].available += planningOpeningBalance(db, userId);
         }
@@ -402,44 +436,96 @@ export function createCashflowProjectionEngineService({
           }
 
           for (const oneOff of oneOffs) {
-            if (handledOneOffIds.has(oneOff.id)) continue;
-            if (oneOff.date < today) continue;
+            const progressKey = `${oneOff.id}:${oneOff.type}:${String(oneOff.currency || "").toUpperCase()}`;
+            const progress = oneOffProgress.get(progressKey) || null;
+            const confirmedAmount = Number(progress?.confirmedAmount || 0);
+            const remainingAmount = Math.max(0, Number(oneOff.amount || 0) - confirmedAmount);
+            const isConfirmedRemainder = Boolean(progress);
+            const occurrenceKey = isConfirmedRemainder
+              ? `one_off_remainder:${oneOff.id}:${Number(progress.confirmedCount || 0) + 1}`
+              : makeOccurrenceKey({
+                  type: oneOff.type,
+                  date: oneOff.date,
+                  sourceOneOffId: oneOff.id
+                });
+            const toPending = isConfirmedRemainder && oneOff.date <= today;
 
-            const targetPeriod = periodForDate(oneOff.date);
+            if (isConfirmedRemainder) {
+              // Each confirmed installment advances the expected remainder key and invalidates older pending rows.
+              if (remainingAmount <= 0.0001) {
+                db.prepare("DELETE FROM pending_transactions WHERE source_one_off_id = ?").run(oneOff.id);
+                continue;
+              }
+
+              if (toPending) {
+                db.prepare(`
+                  DELETE FROM pending_transactions
+                  WHERE source_one_off_id = ?
+                    AND occurrence_key != ?
+                `).run(oneOff.id, occurrenceKey);
+              } else {
+                // Remove a stale due remainder after its target date moves into the future.
+                // Keep a future remainder that the user explicitly moved to pending on that same date.
+                db.prepare(`
+                  DELETE FROM pending_transactions
+                  WHERE source_one_off_id = ?
+                    AND (
+                      occurrence_key != ?
+                      OR date != ?
+                    )
+                `).run(oneOff.id, occurrenceKey, oneOff.date);
+              }
+            } else if (oneOff.date < today) {
+              continue;
+            }
+
+            const targetPeriod = toPending ? periods[0] : periodForDate(oneOff.date);
             if (!targetPeriod || targetPeriod.key !== period.key) continue;
 
-            const requestedConversion = convert(oneOff.amount, oneOff.currency, oneOff.type);
+            const requestedConversion = convert(remainingAmount, oneOff.currency, oneOff.type);
             const requestedLedger = requestedConversion.ledgerAmount;
+            const existingPending = db.prepare(`
+              SELECT ledger_amount
+              FROM pending_transactions
+              WHERE occurrence_key = ?
+              LIMIT 1
+            `).get(occurrenceKey);
+            const availableForExpense = spendableBalance(period) + Math.max(0, Number(existingPending?.ledger_amount || 0));
 
             if (oneOff.type === "income") {
               const inserted = insertTx({
                 name: oneOff.name,
                 currency: oneOff.currency,
-                requestedAmount: oneOff.amount,
-                fundedAmount: oneOff.amount,
+                requestedAmount: remainingAmount,
+                fundedAmount: remainingAmount,
                 type: "income",
                 date: oneOff.date,
                 period: period.key,
-                sourceOneOffId: oneOff.id
+                sourceOneOffId: oneOff.id,
+                occurrenceKeyOverride: occurrenceKey,
+                toPending
               });
 
               period.available += inserted.ledgerAmount;
               continue;
             }
 
-            if (spendableBalance(period) < requestedLedger) {
-              insertTx({
+            if (availableForExpense < requestedLedger) {
+              const inserted = insertTx({
                 name: oneOff.name,
                 currency: oneOff.currency,
-                requestedAmount: oneOff.amount,
+                requestedAmount: remainingAmount,
                 fundedAmount: 0,
                 type: "expense",
                 date: oneOff.date,
                 period: period.key,
                 sourceOneOffId: oneOff.id,
                 status: "underfunded",
-                note: "One-off expense requires full funding and could not be funded"
+                note: "One-off expense requires full funding and could not be funded",
+                occurrenceKeyOverride: occurrenceKey,
+                toPending
               });
+              period.available -= inserted.ledgerAmount;
 
               queueFundingShortfallIfNeeded(
                 oneOff.id,
@@ -454,12 +540,14 @@ export function createCashflowProjectionEngineService({
             const inserted = insertTx({
               name: oneOff.name,
               currency: oneOff.currency,
-              requestedAmount: oneOff.amount,
-              fundedAmount: oneOff.amount,
+              requestedAmount: remainingAmount,
+              fundedAmount: remainingAmount,
               type: "expense",
               date: oneOff.date,
               period: period.key,
-              sourceOneOffId: oneOff.id
+              sourceOneOffId: oneOff.id,
+              occurrenceKeyOverride: occurrenceKey,
+              toPending
             });
 
             period.available -= inserted.ledgerAmount;

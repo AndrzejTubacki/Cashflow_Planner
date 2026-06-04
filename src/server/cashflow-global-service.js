@@ -6,13 +6,23 @@ import {
   DEFAULT_FX_BUFFER_PERCENT,
   DEFAULT_TIMEZONE
 } from "./cashflow-constants.js";
-import { normalizeHolidayCountry, normalizeTimezone, requireHolidayCountry } from "./cashflow-date-utils.js";
+import { normalizeHolidayCountry, normalizeTimezone } from "./cashflow-date-utils.js";
 import {
   normalizeFxProvider,
-  normalizeSupportedCurrency,
-  requireSupportedCurrency
+  normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
+import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 import { conflict, normalizeUserId, userNotFoundError } from "./cashflow-user-utils.js";
+
+const GLOBAL_OPTIONS_KEYS = new Set([
+  "ledger_currency",
+  "locale",
+  "timezone",
+  "holiday_country",
+  "future_periods",
+  "fx_provider",
+  "fx_buffer_percent"
+]);
 
 function initPragmas(db) {
   db.pragma("foreign_keys = ON");
@@ -282,14 +292,15 @@ export function createCashflowGlobalService({
 
   function updateGlobalOptions(updates = {}) {
     const current = getGlobalOptions();
+    const normalized = validateAndNormalizeSettings(updates, {
+      allowedKeys: GLOBAL_OPTIONS_KEYS,
+      allowedKeysOnly: true,
+      currentSettings: current,
+      normalizeLocale
+    });
     const safe = {
-      ledger_currency: requireSupportedCurrency(updates.ledger_currency || current.ledger_currency || "PLN", "ledger_currency"),
-      locale: normalizeLocale(updates.locale || current.locale || "en"),
-      timezone: normalizeTimezone(updates.timezone || current.timezone || DEFAULT_TIMEZONE),
-      holiday_country: requireHolidayCountry(updates.holiday_country || current.holiday_country || "PL", "holiday_country"),
-      future_periods: Math.max(1, Math.min(60, Number(updates.future_periods ?? current.future_periods) || DEFAULT_FUTURE_PERIODS)),
-      fx_provider: normalizeFxProvider(updates.fx_provider || current.fx_provider || "nbp"),
-      fx_buffer_percent: Math.max(0, Math.min(100, Number(updates.fx_buffer_percent ?? current.fx_buffer_percent) || 0))
+      ...current,
+      ...normalized
     };
 
     const db = openGlobalDb();

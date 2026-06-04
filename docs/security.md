@@ -36,6 +36,9 @@ username or treat it as authorization.
   it
 - block optional private control routes such as `/api/restart` and
   `/api/local/tests/*` from ordinary users
+- treat `local/dev.mjs` code and every route it registers as
+  operator-owned; secure them through trusted-network access, the reverse
+  proxy, or controls implemented by that local module
 - protect mounted volumes from public file serving
 - keep `data/`, `logs/`, `backups/`, and `local/` out of public access
 - back up SQLite files before upgrades
