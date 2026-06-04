@@ -63,6 +63,8 @@ function createCashflowModule({
     openPlanningDb
   } = createCashflowDbService({
     ledgerDbPath,
+    logError,
+    logServerEvent,
     planningDbPath,
     userDataDir
   });

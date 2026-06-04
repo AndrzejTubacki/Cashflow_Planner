@@ -23,7 +23,8 @@ export function createCashflowFxCacheService({
   logServerEvent,
   normalizeCurrency,
   openPlanningDb,
-  regenerateProjectionsAfterMutation
+  regenerateProjectionsAfterMutation,
+  fetchImpl = fetch
 }) {
   let currentFxSnapshotDisabled = false;
 
@@ -409,7 +410,7 @@ export function createCashflowFxCacheService({
         headers: {
           "Accept": "application/json"
         }
-      }, fxFetchTimeoutMs());
+      }, fxFetchTimeoutMs(), fetchImpl);
 
       if (!response.ok) {
         const error = new Error(`NBP FX request failed for ${normalizedCurrency}${targetDate ? ` on ${targetDate}` : ""}: ${response.status} ${response.statusText}`);
@@ -524,7 +525,7 @@ export function createCashflowFxCacheService({
       headers: {
         "Accept": "application/json"
       }
-    }, fxFetchTimeoutMs());
+    }, fxFetchTimeoutMs(), fetchImpl);
 
     if (!response.ok) {
       const error = new Error(`Frankfurter FX request failed for ${code}${requestedDate ? ` on ${requestedDate}` : ""}: ${response.status} ${response.statusText}`);

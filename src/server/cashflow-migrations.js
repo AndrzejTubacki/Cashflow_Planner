@@ -1,5 +1,6 @@
 export function applyLedgerMigrations(db, {
-  occurrenceKeyFromRow
+  occurrenceKeyFromRow,
+  beforeStep = () => {}
 }) {
   const currentVersion = db.pragma("user_version", { simple: true });
 
@@ -14,6 +15,7 @@ export function applyLedgerMigrations(db, {
 
   db.transaction(() => {
     if (currentVersion < 2) {
+      beforeStep(2, db);
       addColumnIfMissing("confirmed_transactions", "source_flex_id", "source_flex_id TEXT");
       addColumnIfMissing("confirmed_transactions", "source_goal_id", "source_goal_id TEXT");
       addColumnIfMissing("confirmed_transactions", "ledger_amount", "ledger_amount REAL");
@@ -22,6 +24,7 @@ export function applyLedgerMigrations(db, {
     }
 
     if (currentVersion < 3) {
+      beforeStep(3, db);
       addColumnIfMissing("confirmed_transactions", "occurrence_key", "occurrence_key TEXT");
 
       const confirmedRows = db.prepare(`
@@ -56,6 +59,7 @@ export function applyLedgerMigrations(db, {
     }
 
     if (currentVersion < 4) {
+      beforeStep(4, db);
       addColumnIfMissing("confirmed_transactions", "ledger_currency", "ledger_currency TEXT NOT NULL DEFAULT 'PLN'");
 
       db.prepare(`
@@ -68,7 +72,9 @@ export function applyLedgerMigrations(db, {
   })();
 }
 
-export function applyPlanningMigrations(db) {
+export function applyPlanningMigrations(db, {
+  beforeStep = () => {}
+} = {}) {
   const currentVersion = db.pragma("user_version", { simple: true });
   const validPredictionSubstituteValues = `
     'none',
@@ -96,6 +102,7 @@ export function applyPlanningMigrations(db) {
 
   db.transaction(() => {
     if (currentVersion < 2) {
+      beforeStep(2, db);
       addColumnIfMissing("future_transactions", "date", "date TEXT");
       addColumnIfMissing("future_transactions", "source_one_off_id", "source_one_off_id TEXT");
 
@@ -109,6 +116,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 3) {
+      beforeStep(3, db);
       addColumnIfMissing("future_transactions", "requested_amount", "requested_amount REAL");
       addColumnIfMissing("future_transactions", "funded_amount", "funded_amount REAL");
       addColumnIfMissing("future_transactions", "ledger_amount", "ledger_amount REAL");
@@ -142,6 +150,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 4) {
+      beforeStep(4, db);
       addColumnIfMissing("future_transactions", "occurrence_key", "occurrence_key TEXT");
       addColumnIfMissing("pending_transactions", "occurrence_key", "occurrence_key TEXT");
 
@@ -158,6 +167,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 5) {
+      beforeStep(5, db);
       addColumnIfMissing("future_transactions", "running_balance", "running_balance REAL");
       addColumnIfMissing("pending_transactions", "running_balance", "running_balance REAL");
 
@@ -165,6 +175,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 6) {
+      beforeStep(6, db);
       addColumnIfMissing("settings", "ntfy_url", "ntfy_url TEXT");
 
       if (columns("settings").includes("ntfy_topic")) {
@@ -186,6 +197,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 7) {
+      beforeStep(7, db);
       db.exec(`
         CREATE TABLE IF NOT EXISTS fx_rates_cache (
           currency TEXT NOT NULL,
@@ -206,6 +218,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 8) {
+      beforeStep(8, db);
       addColumnIfMissing("settings", "fx_provider", "fx_provider TEXT NOT NULL DEFAULT 'nbp'");
       addColumnIfMissing("settings", "fx_used_currencies", "fx_used_currencies TEXT NOT NULL DEFAULT '[]'");
       addColumnIfMissing("settings", "manual_fx_rates", "manual_fx_rates TEXT NOT NULL DEFAULT '{}'");
@@ -221,6 +234,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 9) {
+      beforeStep(9, db);
       addColumnIfMissing("settings", "locale", "locale TEXT NOT NULL DEFAULT 'en'");
 
       db.prepare(`
@@ -232,6 +246,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 10) {
+      beforeStep(10, db);
       addColumnIfMissing(
         "recurring_expenses",
         "prediction_substitute_missing",
@@ -269,6 +284,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 11) {
+      beforeStep(11, db);
       addColumnIfMissing(
         "recurring_expenses",
         "prediction_min_recorded_months",
@@ -322,6 +338,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 12) {
+      beforeStep(12, db);
       if (tableExists("settings")) {
         const existingSettingsColumns = columns("settings");
         const valueExpr = (name, fallback) =>
@@ -516,6 +533,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 13) {
+      beforeStep(13, db);
       addColumnIfMissing("settings", "setup_completed", "setup_completed INTEGER NOT NULL DEFAULT 0");
       addColumnIfMissing("settings", "setup_completed_at", "setup_completed_at TEXT");
 
@@ -547,6 +565,7 @@ export function applyPlanningMigrations(db) {
     }
 
     if (currentVersion < 14) {
+      beforeStep(14, db);
       if (tableExists("settings")) {
         addColumnIfMissing("settings", "holiday_country", "holiday_country TEXT NOT NULL DEFAULT 'PL'");
         addColumnIfMissing("settings", "minimum_reserve_enabled", "minimum_reserve_enabled INTEGER NOT NULL DEFAULT 0");

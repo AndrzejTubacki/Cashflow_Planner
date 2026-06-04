@@ -196,7 +196,29 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
   gap: 0.45rem;
+}
+
+.cashflow-funding-overview-shell {
   margin: 0.75rem 0;
+}
+
+.cashflow-funding-overview--collapsed {
+  grid-template-rows: auto;
+  grid-auto-rows: 0;
+  row-gap: 0;
+  overflow: hidden;
+}
+
+.cashflow-funding-overview--collapsed > [data-cashflow-funding-item] {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cashflow-funding-overview__actions {
+  display: flex;
+  justify-content: center;
+  grid-column: 1 / -1;
+  padding-top: 0.15rem;
 }
 
 .cashflow-funding-card {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -146,6 +147,44 @@ test("invalid user headers return 400 and do not create data directories", async
 
     assert.equal(fs.existsSync(path.join(harness.dataDir, "..", "x")), false);
     assert.equal(fs.existsSync(path.join(harness.dataDir, "_reserved")), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("invalid user creation ids return 400 without metadata or profile storage", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    const invalidIds = ["", "../x", "/absolute", "_reserved", "a".repeat(65), "has/slash", "has\\slash"];
+
+    for (const userId of invalidIds) {
+      const result = await harness.request("/api/users", {
+        method: "POST",
+        skipUserHeader: true,
+        body: { userId }
+      });
+      assert.equal(result.response.status, 400, JSON.stringify(userId));
+    }
+
+    const globalDbPath = path.join(harness.dataDir, "cashflow-global.sqlite");
+    if (fs.existsSync(globalDbPath)) {
+      const db = new Database(globalDbPath);
+      try {
+        const invalidMetadata = db.prepare(`
+          SELECT id
+          FROM users
+          WHERE id != 'local'
+        `).all();
+        assert.deepEqual(invalidMetadata, []);
+      } finally {
+        db.close();
+      }
+    }
+
+    const profileDirs = fs.readdirSync(harness.dataDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name);
+    assert.deepEqual(profileDirs, []);
   } finally {
     await harness.cleanup();
   }

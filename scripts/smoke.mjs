@@ -3,14 +3,16 @@ import { tmpdir } from "os";
 import path from "path";
 import { spawn } from "child_process";
 
+import { SUPPORTED_FX_CURRENCIES } from "../src/server/cashflow-fx-provider-utils.js";
+
 const startedChildren = [];
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function requestJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { cache: "no-store", ...options });
   const body = await response.text();
 
   if (!response.ok) {
@@ -117,11 +119,17 @@ async function stopChildren() {
 }
 
 async function main() {
+  const deployed = Boolean(process.env.CASHFLOW_BASE_URL);
   let baseUrl = process.env.CASHFLOW_BASE_URL || "";
+  let userId = "local";
 
   if (!baseUrl) {
     const started = await startServer();
     baseUrl = started.baseUrl;
+  } else {
+    userId = String(process.env.CASHFLOW_SMOKE_USER_ID || "").trim();
+    if (!userId) throw new Error("CASHFLOW_SMOKE_USER_ID is required for deployed smoke");
+    if (userId === "local") throw new Error("Deployed smoke refuses CASHFLOW_SMOKE_USER_ID=local");
   }
 
   await waitForHealth(baseUrl);
@@ -131,19 +139,30 @@ async function main() {
     throw new Error("Unexpected /api/system payload");
   }
 
-  await postJson(`${baseUrl}/api/session/select`, { userId: "local" });
+  if (!deployed) {
+    await postJson(`${baseUrl}/api/session/select`, { userId });
+  } else {
+    const session = await requestJson(`${baseUrl}/api/session`, {
+      headers: {
+        "x-cashflow-user-id": userId
+      }
+    });
+    if (!session?.session?.authenticated || session.session.userId !== userId) {
+      throw new Error("Unexpected deployed /api/session payload");
+    }
+  }
 
   const response = await fetch(`${baseUrl}/api`, {
     cache: "no-store",
     headers: {
-      "x-cashflow-user-id": "local"
+      "x-cashflow-user-id": userId
     }
   });
   const cashflow = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(`${baseUrl}/api returned ${response.status}: ${JSON.stringify(cashflow).slice(0, 200)}`);
   }
-  if (cashflow?.settings?.ledger_currency !== "PLN") {
+  if (!SUPPORTED_FX_CURRENCIES.includes(cashflow?.settings?.ledger_currency)) {
     throw new Error("Unexpected /api settings payload");
   }
 

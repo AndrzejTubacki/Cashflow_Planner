@@ -20,6 +20,8 @@ flexible spending, and show what can safely be funded before money is spent.
 - [Installation](docs/installation.md)
 - [Operations](docs/operations.md)
 - [Security](docs/security.md)
+- [API](docs/api.md)
+- [Notifications](docs/notifications.md)
 - [Roadmap](docs/roadmap.md)
 
 ## Quick Start
@@ -61,9 +63,10 @@ deployment notes.
 - configurable ledger currency with FX conversion
 - configurable app timezone for date-sensitive planning and scheduled jobs
 - separate user profiles for different household or demo datasets
+- user-selection shell with auth-ready session and permission boundaries
 - first-run setup for currency, locale, timezone, opening balance, income, and
   projection horizon
-- admin defaults for newly created users
+- admin defaults for newly created profiles
 - data portability tools for full JSON export/import, one-off CSV import,
   confirmed-ledger CSV export, and sample data
 - Docker and Docker Compose support
@@ -78,10 +81,12 @@ Cashflow is usable, but still early as a standalone public app.
 Install-decision constraints:
 
 - Access control must come from your deployment, such as a VPN or reverse proxy.
-- User profiles are separate planner datasets, not secure user accounts.
-- Every selected profile can currently see admin settings.
-- FX support works for supported currencies, but currency and import workflows
-  are still being hardened.
+- The user-selection screen separates planner datasets, not secure accounts.
+- Session and permission responses are auth-ready UI boundaries, not
+  authenticated server-side sessions.
+- Every newly created profile currently receives admin permission by default.
+- Imports and restores create safety backups, but external volume backups remain
+  necessary before upgrades.
 
 ## Check An Install
 

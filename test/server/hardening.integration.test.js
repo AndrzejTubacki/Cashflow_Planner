@@ -10,6 +10,9 @@ import { createCashflowBackgroundJobs } from "../../src/server/cashflow-backgrou
 import { fetchWithTimeout } from "../../src/server/cashflow-fetch-utils.js";
 import { createCashflowGlobalService } from "../../src/server/cashflow-global-service.js";
 import { createCashflowLedgerService } from "../../src/server/cashflow-ledger-service.js";
+import { createCashflowFxCacheService } from "../../src/server/cashflow-fx-cache-service.js";
+import { createCashflowNotificationService } from "../../src/server/cashflow-notification-service.js";
+import { generateId } from "../../src/server/cashflow-id-utils.js";
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 
 async function withHarness(fn) {
@@ -202,6 +205,97 @@ test("external fetch timeout errors carry 504 status", async () => {
   );
 });
 
+test("NBP and Frankfurter provider timeouts carry 504 status", async () => {
+  const previous = process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS;
+  process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS = "20";
+  const fetchImpl = (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+  const fx = createCashflowFxCacheService({
+    fetchImpl,
+    getCurrentFxSnapshot: () => null,
+    listCashflowUserIds: () => [],
+    logCashflowError: () => {},
+    logError: () => {},
+    logServerEvent: () => {},
+    normalizeCurrency: value => String(value || "").toUpperCase(),
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    },
+    regenerateProjectionsAfterMutation: () => ({})
+  });
+
+  try {
+    await assert.rejects(() => fx.fetchNbpRate("EUR"), error => error.status === 504);
+    await assert.rejects(() => fx.fetchProviderRate("frankfurter", "EUR", null, "USD"), error => error.status === 504);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS;
+    } else {
+      process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS = previous;
+    }
+  }
+});
+
+test("ntfy timeout leaves queued notifications unsent", async () => withHarness(async harness => {
+  const previous = process.env.CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS;
+  process.env.CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS = "20";
+  const fetchImpl = (_url, options = {}) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener("abort", () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    });
+  });
+  const notifications = createCashflowNotificationService({
+    fetchImpl,
+    generateId,
+    listLedgerYears: () => [],
+    openLedgerDb: () => {
+      throw new Error("not needed");
+    },
+    openPlanningDb: harness.openPlanningDb
+  });
+  const db = harness.openPlanningDb();
+  db.prepare("UPDATE settings SET ntfy_url = 'https://ntfy.example.test/topic' WHERE id = 1").run();
+  db.prepare(`
+    INSERT INTO notification_queue (
+      id, notification_type, title, message, priority, queued_at, dedupe_key
+    ) VALUES (
+      'timeout-notification', 'pending_summary', 'Pending', 'Pending rows', 'default',
+      datetime('now'), 'timeout-notification'
+    )
+  `).run();
+  db.close();
+
+  try {
+    await assert.rejects(
+      () => notifications.sendQueuedNotifications(harness.userId),
+      error => error.status === 504
+    );
+
+    const check = harness.openPlanningDb();
+    try {
+      assert.equal(
+        check.prepare("SELECT sent_at FROM notification_queue WHERE id = 'timeout-notification'").get().sent_at,
+        null
+      );
+    } finally {
+      check.close();
+    }
+  } finally {
+    if (previous === undefined) {
+      delete process.env.CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS;
+    } else {
+      process.env.CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS = previous;
+    }
+  }
+}));
+
 test("funding source SQL helpers reject unknown source columns", () => {
   const ledger = createCashflowLedgerService({
     listLedgerYears: () => [],
@@ -252,6 +346,41 @@ test("background tick skips overlap", async () => {
 
   releaseNotifications();
   await first;
+});
+
+test("background tick isolates one user's timeout and continues with later users", async () => {
+  const errors = [];
+  const sentUsers = [];
+  const timeout = new Error("External request timed out");
+  timeout.status = 504;
+  const jobs = createCashflowBackgroundJobs({
+    getSettings: () => ({ timezone: "UTC", notification_delivery_time: "08:00" }),
+    listCashflowUserIds: () => ["timeout_user", "healthy_user"],
+    logError: (kind, details) => errors.push({ kind, details }),
+    logServerEvent: () => {},
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: () => 0,
+    now: () => new Date("2026-06-03T08:00:00.000Z"),
+    queueDailyPendingSummary: () => 0,
+    queueMissingIncomeNotifications: () => 0,
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async () => ({ updated_count: 0 }),
+    sendQueuedNotifications: async userId => {
+      sentUsers.push(userId);
+      if (userId === "timeout_user") throw timeout;
+      return 1;
+    }
+  });
+
+  const result = await jobs.tickPerUserJobs();
+
+  assert.deepEqual(result, { skipped: false, users: 2 });
+  assert.deepEqual(sentUsers, ["timeout_user", "healthy_user"]);
+  assert.ok(errors.some(item =>
+    item.kind === "cashflow_background_user_failed"
+      && item.details.userId === "timeout_user"
+      && item.details.error === "External request timed out"
+  ));
 });
 
 test("failed user creation removes global metadata so retry is not blocked", async () => {

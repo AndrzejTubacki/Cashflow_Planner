@@ -121,6 +121,6 @@ automatically.
 - Cashflow does not include built-in login yet. Use deployment-level access
   control before exposing it outside a trusted network.
 - User profiles are separate planner datasets, not protected accounts.
-- Every selected profile currently has admin access.
+- Every newly created profile currently receives admin access by default.
 - Some advanced data operations, especially imports and currency changes, should
   still be used carefully and backed up first.

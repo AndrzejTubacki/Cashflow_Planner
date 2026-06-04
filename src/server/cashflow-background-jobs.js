@@ -12,7 +12,8 @@ export function createCashflowBackgroundJobs({
   queueMissingIncomeNotifications,
   refreshNbpFxCacheForAllUsers,
   refreshNbpFxCacheForUser,
-  sendQueuedNotifications
+  sendQueuedNotifications,
+  now = () => new Date()
 }) {
   const lastRunKeys = new Set();
   let tickRunning = false;
@@ -23,7 +24,7 @@ export function createCashflowBackgroundJobs({
     }, 60_000);
   }
 
-  function localParts(timezone) {
+  function localParts(timezone, currentTime) {
     const parts = new Intl.DateTimeFormat("en-US", {
       year: "numeric",
       month: "2-digit",
@@ -32,7 +33,7 @@ export function createCashflowBackgroundJobs({
       minute: "2-digit",
       hour12: false,
       timeZone: normalizeTimezone(timezone)
-    }).formatToParts(new Date());
+    }).formatToParts(currentTime);
 
     const value = (type) => parts.find(p => p.type === type)?.value;
 
@@ -71,8 +72,9 @@ export function createCashflowBackgroundJobs({
         try {
           const settings = getSettings(userId) || {};
           const timezone = settings.timezone || DEFAULT_TIMEZONE;
-          const local = localParts(timezone);
-          const today = todayInTimezone(timezone);
+          const currentTime = now();
+          const local = localParts(timezone, currentTime);
+          const today = todayInTimezone(timezone, currentTime);
 
           if (local.time === "00:00" && shouldRun(`midnight:${userId}:${local.date}`)) {
             const created = moveDueFutureTransactionsToPending(userId, today);

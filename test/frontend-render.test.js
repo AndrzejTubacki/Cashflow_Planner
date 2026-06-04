@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.js";
 import { SUPPORTED_FX_CURRENCIES as FRONTEND_CURRENCIES } from "../public/app/cashflow/constants.js";
+import { renderFundingOverview } from "../public/app/cashflow/funding.js";
 import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
 import { renderOneOffTab } from "../public/app/cashflow/one-off-tab.js";
 import { renderCashflowPage } from "../public/app/cashflow/page.js";
@@ -433,4 +434,65 @@ test("ledger summaries and targets render the active ledger currency", async () 
   assert.doesNotMatch(goalsHtml, /Target in PLN/);
   assertNoMojibake(ledgerHtml);
   assertNoMojibake(goalsHtml);
+});
+
+test("funding overview hides fully confirmed items and prioritizes missing projections before completion date", () => {
+  const html = renderFundingOverview("en", {
+    settings: {
+      ledger_currency: "PLN"
+    },
+    goals: [
+      {
+        id: "confirmed-goal",
+        name: "Fully confirmed",
+        target_ledger_amount: 100,
+        already_funded_ledger: 100,
+        pending_allocated_ledger: 0,
+        future_allocated_ledger: 0,
+        remaining_ledger: 0,
+        funded_by_date: null
+      },
+      {
+        id: "later-goal",
+        name: "Later projection",
+        target_ledger_amount: 100,
+        already_funded_ledger: 0,
+        pending_allocated_ledger: 0,
+        future_allocated_ledger: 100,
+        remaining_ledger: 0,
+        funded_by_date: "2026-09-01"
+      },
+      {
+        id: "missing-goal",
+        name: "Missing projection",
+        target_ledger_amount: 100,
+        already_funded_ledger: 20,
+        pending_allocated_ledger: 0,
+        future_allocated_ledger: 0,
+        remaining_ledger: 80,
+        funded_by_date: null
+      }
+    ],
+    flexTransactions: [
+      {
+        id: "earlier-flex",
+        name: "Earlier projection",
+        target_ledger_amount: 100,
+        already_funded_ledger: 0,
+        pending_allocated_ledger: 100,
+        future_allocated_ledger: 0,
+        remaining_ledger: 0,
+        funded_by_date: "2026-07-01"
+      }
+    ]
+  });
+
+  assert.doesNotMatch(html, /Fully confirmed/);
+  assert.ok(html.indexOf("Missing projection") < html.indexOf("Earlier projection"));
+  assert.ok(html.indexOf("Earlier projection") < html.indexOf("Later projection"));
+  assert.match(html, /cashflow-funding-overview--collapsed/);
+  assert.equal((html.match(/data-cashflow-funding-item/g) || []).length, 3);
+  assert.match(html, /data-cashflow-toggle-funding/);
+  assert.match(html, /Show all/);
+  assert.match(html, /Show less/);
 });

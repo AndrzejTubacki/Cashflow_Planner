@@ -1,46 +1,41 @@
 # Roadmap
 
 Cashflow is already usable as a self-hosted personal finance planner. The next
-work should make it safer to run, easier to trust, and clearer for new users.
-
-## Safer Self-Hosting
-
-- Clearer backup, restore, upgrade, and rollback instructions.
-- Better production Docker Compose guidance, including persistent volumes,
-  health checks, and reverse-proxy examples.
-- More explicit guidance for notifications, scheduled jobs, and deployed smoke
-  checks.
-- Safer handling of backup locations and private deployment settings.
+work should improve account security, planning depth, and day-to-day usability.
 
 ## Access Control
 
-- Real login support.
-- Real admin and non-admin permissions.
-- Better protection for profile selection when Cashflow is used by more than one
-  person.
-- Clear documentation for reverse-proxy auth, VPN, and SSO deployments.
+- Built-in login and protected server-side sessions.
+- Configurable admin and non-admin permissions.
+- Identity-aware profile access for households and shared deployments.
+- Profile rename, archive, export-before-delete, and deletion workflows.
+
+## Self-Hosting And Recovery
+
+- A backup browser with scheduling, restore history, and retention visibility.
+- Optional off-host backup integrations and scheduled restore verification.
+- Catch-up-safe scheduled jobs and configurable retry controls after downtime.
+- Operational metrics and alerts for background jobs, backups, and external
+  provider failures.
 
 ## Planning Accuracy
 
-- Minimum reserve or safety-buffer planning.
-- Clearer handling for negative balances and debt-like situations.
-- Continued improvements to ledger-currency changes and FX workflows.
-- Better timezone and holiday-country defaults for international users.
-- Clear rules for editing or adjusting items after they have confirmed ledger
-  history.
+- More explicit debt, credit, and overdraft planning workflows.
+- Controlled confirmed-ledger correction and reversal workflows.
+- Clear partial-confirmation and remaining-balance workflows for one-off plans.
+- Additional holiday-country calendars and regional scheduling rules.
+- Continued improvements to ledger-currency changes and historical FX review.
 
 ## Imports, Exports, And Recovery
 
-- Clearer import errors and conflict reporting.
-- Better compatibility for older export files.
-- Safer merge imports for larger ledgers.
-- Cleaner separation between planner data and private deployment settings in
-  full exports.
-- More documented recovery drills for import, restore, and sample-data workflows.
+- Configurable bank-style CSV column mapping.
+- Streaming imports for very large ledgers.
+- Scheduled exports to trusted external storage.
 
 ## User Experience
 
-- More guided onboarding for first-time users.
-- Clearer in-app error messages instead of browser alerts.
-- Better browser behavior for dates in the configured app timezone.
+- More guided planning examples after first-run setup.
+- Search, filters, and scalable navigation for large confirmed ledgers.
+- Better mobile workflows for confirming and reviewing transactions.
+- More accessible keyboard and screen-reader interactions.
 - Screenshots and examples once the interface stabilizes.

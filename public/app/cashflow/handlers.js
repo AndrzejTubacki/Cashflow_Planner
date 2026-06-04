@@ -144,6 +144,20 @@ export function attachCashflowHandlers(root, props = {}) {
     });
   });
 
+  root.querySelectorAll("[data-cashflow-toggle-funding]").forEach(button => {
+    button.addEventListener("click", () => {
+      const overview = button.closest("[data-cashflow-funding-overview]");
+      const grid = overview?.querySelector("[data-cashflow-funding-grid]");
+      const expanded = button.getAttribute("aria-expanded") === "true";
+
+      grid?.classList.toggle("cashflow-funding-overview--collapsed", expanded);
+      button.setAttribute("aria-expanded", String(!expanded));
+      button.textContent = expanded
+        ? button.getAttribute("data-show-all-label")
+        : button.getAttribute("data-show-less-label");
+    });
+  });
+
   const addButtons = [
     { selector: "[data-cashflow-add-recurring]", type: "recurring-expense" },
     { selector: "[data-cashflow-add-income]", type: "recurring-income" },

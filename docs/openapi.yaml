@@ -1,0 +1,1395 @@
+openapi: 3.1.0
+info:
+  title: Cashflow API
+  version: 0.2.0
+  description: |
+    Published HTTP contract for Cashflow. Cashflow does not currently implement
+    authentication. The x-cashflow-user-id header selects a planner profile and
+    must not be treated as proof of identity.
+servers:
+  - url: http://localhost:3000
+tags:
+  - name: System
+  - name: Profiles
+  - name: Admin
+  - name: Setup
+  - name: Snapshot
+  - name: Maintenance
+  - name: FX
+  - name: Settings
+  - name: Ledger
+  - name: Planning
+  - name: Portability
+  - name: Backup
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Check process liveness
+      tags: [System]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /api/system:
+    get:
+      operationId: getSystem
+      summary: Read process diagnostics
+      tags: [System]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /api/users:
+    get:
+      operationId: listUsers
+      summary: List selectable planner profiles
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    post:
+      operationId: createUser
+      summary: Create a planner profile
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/CreateUser"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/session:
+    get:
+      operationId: getSession
+      summary: Validate the selected profile session shape
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/session/select:
+    post:
+      operationId: selectUser
+      summary: Select or initialize the built-in local profile
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/SelectUser"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/logout:
+    post:
+      operationId: logout
+      summary: Return an empty session shape
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /api/admin/options:
+    get:
+      operationId: getAdminOptions
+      summary: Read global defaults for new profiles
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+    put:
+      operationId: updateAdminOptions
+      summary: Update global defaults for new profiles
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminOptions"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/setup:
+    post:
+      operationId: completeSetup
+      summary: Complete first-run setup for a profile
+      tags: [Setup]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/Setup"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api:
+    get:
+      operationId: getSnapshot
+      summary: Read the selected profile snapshot
+      tags: [Snapshot]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/locales:
+    get:
+      operationId: listLocales
+      summary: List available UI locales
+      tags: [System]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /api/run-jobs:
+    post:
+      operationId: runJobs
+      summary: Refresh FX and regenerate the selected profile projection
+      tags: [Maintenance]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/OptionalDate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/refresh:
+    post:
+      operationId: refreshFx
+      summary: Refresh FX and regenerate the selected profile
+      tags: [FX]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/OptionalDate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/refresh-all:
+    post:
+      operationId: refreshAllFx
+      summary: Refresh FX caches for every profile
+      tags: [FX]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/OptionalDate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/nbp/{currency}:
+    get:
+      operationId: getCurrentNbpRate
+      summary: Fetch the current NBP rate for a currency
+      tags: [FX]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Currency"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/nbp/{currency}/{date}:
+    get:
+      operationId: getHistoricalNbpRate
+      summary: Fetch an NBP rate for a date
+      tags: [FX]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Currency"
+        - $ref: "#/components/parameters/Date"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/rate/{base}/{quote}:
+    get:
+      operationId: getCurrentPairRate
+      summary: Fetch a provider rate for a currency pair
+      tags: [FX]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BaseCurrency"
+        - $ref: "#/components/parameters/QuoteCurrency"
+        - $ref: "#/components/parameters/DateQuery"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/rate/{base}/{quote}/{date}:
+    get:
+      operationId: getHistoricalPairRate
+      summary: Fetch a provider pair rate for a date
+      tags: [FX]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BaseCurrency"
+        - $ref: "#/components/parameters/QuoteCurrency"
+        - $ref: "#/components/parameters/Date"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/fx/nbp-snapshot:
+    get:
+      operationId: getNbpSnapshot
+      summary: Fetch an NBP snapshot for currencies used by the profile
+      tags: [FX]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/DateQuery"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/settings:
+    put:
+      operationId: updateSettings
+      summary: Update selected profile settings
+      tags: [Settings]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/Settings"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/pending/{id}:
+    put:
+      operationId: updatePending
+      summary: Update a pending transaction
+      tags: [Ledger]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/PendingUpdate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/pending/{id}/confirm:
+    post:
+      operationId: confirmPending
+      summary: Confirm a pending transaction into the ledger
+      tags: [Ledger]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/PendingConfirm"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/pending/recalculate:
+    post:
+      operationId: recalculatePending
+      summary: Clear pending rows and regenerate projections
+      tags: [Maintenance]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/OptionalDate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/future/{id}/move-to-pending:
+    post:
+      operationId: moveFutureToPending
+      summary: Move one projected occurrence to pending
+      tags: [Ledger]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/MoveFuture"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/recurring-expenses:
+    post:
+      operationId: createRecurringExpense
+      summary: Create a recurring expense
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/RecurringExpense"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+  /api/recurring-expenses/{id}:
+    put:
+      operationId: updateRecurringExpense
+      summary: Update a recurring expense
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/RecurringExpense"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteRecurringExpense
+      summary: Delete a recurring expense
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/recurring-incomes:
+    post:
+      operationId: createRecurringIncome
+      summary: Create a recurring income
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/RecurringIncome"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+  /api/recurring-incomes/{id}:
+    put:
+      operationId: updateRecurringIncome
+      summary: Update a recurring income
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/RecurringIncome"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteRecurringIncome
+      summary: Delete a recurring income
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/goals:
+    post:
+      operationId: createGoal
+      summary: Create a savings goal
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/Goal"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+  /api/goals/{id}:
+    put:
+      operationId: updateGoal
+      summary: Update a savings goal
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/Goal"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteGoal
+      summary: Delete a savings goal
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/flex:
+    post:
+      operationId: createFlex
+      summary: Create a flexible transaction
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/Flex"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+  /api/flex/{id}:
+    put:
+      operationId: updateFlex
+      summary: Update a flexible transaction
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/Flex"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteFlex
+      summary: Delete a flexible transaction
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/one-off:
+    post:
+      operationId: createOneOff
+      summary: Create a one-off transaction
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/OneOff"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+  /api/one-off/{id}:
+    put:
+      operationId: updateOneOff
+      summary: Update a one-off transaction
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/OneOff"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteOneOff
+      summary: Delete a one-off planning source without rewriting confirmed rows
+      tags: [Planning]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/regenerate-projections:
+    post:
+      operationId: regenerateProjections
+      summary: Regenerate the selected profile projection
+      tags: [Maintenance]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/OptionalDate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "504":
+          $ref: "#/components/responses/ApiError"
+  /api/backup:
+    post:
+      operationId: createBackup
+      summary: Create a WAL-safe app-level backup for the selected profile
+      tags: [Backup]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/export/full:
+    get:
+      operationId: exportFull
+      summary: Download a full JSON export for the selected profile
+      tags: [Portability]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: true
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: includeOperationalSettings
+          in: query
+          description: Include private deployment settings when set to 1 or true.
+          schema:
+            type: string
+            enum: ["0", "1", "false", "true"]
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonDownload"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/import/full:
+    post:
+      operationId: importFull
+      summary: Replace or merge a full JSON export into the selected profile
+      tags: [Portability]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/FullImport"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/import/one-offs-csv:
+    post:
+      operationId: importOneOffCsv
+      summary: Import strict one-off transaction CSV text
+      tags: [Portability]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        $ref: "#/components/requestBodies/CsvImport"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+  /api/export/confirmed-ledger.csv:
+    get:
+      operationId: exportConfirmedLedgerCsv
+      summary: Download all confirmed ledger rows as CSV
+      tags: [Portability]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: true
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/CsvDownload"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/export/sample:
+    get:
+      operationId: exportSample
+      summary: Download the built-in fictitious sample dataset
+      tags: [Portability]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: true
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonDownload"
+  /api/import/sample:
+    post:
+      operationId: importSample
+      summary: Replace the selected profile with the sample dataset
+      tags: [Portability]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/validate:
+    post:
+      operationId: validateData
+      summary: Validate selected profile data
+      tags: [Maintenance]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/restore/{backupId}:
+    post:
+      operationId: restoreBackup
+      summary: Restore an app-level backup by metadata ID
+      tags: [Backup]
+      x-cashflow-scope: admin-user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BackupId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "500":
+          $ref: "#/components/responses/ApiError"
+components:
+  parameters:
+    UserId:
+      name: x-cashflow-user-id
+      in: header
+      required: false
+      description: Selects a planner profile. When omitted, routes use local. This is not an authentication credential.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,64}$"
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    BackupId:
+      name: backupId
+      in: path
+      required: true
+      schema:
+        type: string
+    Currency:
+      name: currency
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Z]{3}$"
+    BaseCurrency:
+      name: base
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Z]{3}$"
+    QuoteCurrency:
+      name: quote
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Z]{3}$"
+    Date:
+      name: date
+      in: path
+      required: true
+      schema:
+        type: string
+        format: date
+    DateQuery:
+      name: date
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date
+  requestBodies:
+    AdminOptions:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AdminOptionsUpdate"
+    Setup:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SetupRequest"
+    Settings:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SettingsUpdate"
+    PendingUpdate:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PendingUpdate"
+    PendingConfirm:
+      required: false
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PendingConfirm"
+    RecurringExpense:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecurringExpenseInput"
+    RecurringIncome:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RecurringIncomeInput"
+    Goal:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GoalInput"
+    Flex:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FlexInput"
+    OneOff:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OneOffInput"
+    CreateUser:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [userId]
+            properties:
+              userId:
+                type: string
+                pattern: "^[A-Za-z0-9_-]{1,64}$"
+              displayName:
+                type: string
+    SelectUser:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [userId]
+            properties:
+              userId:
+                type: string
+                pattern: "^[A-Za-z0-9_-]{1,64}$"
+    OptionalDate:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              date:
+                type:
+                  - string
+                  - "null"
+                format: date
+    MoveFuture:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              occurrenceKey:
+                type: string
+    FullImport:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [export]
+            properties:
+              mode:
+                type: string
+                enum: [replace, merge]
+                default: replace
+              includeOperationalSettings:
+                type: boolean
+                default: false
+              export:
+                $ref: "#/components/schemas/GenericObject"
+    CsvImport:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [csv]
+            properties:
+              mode:
+                type: string
+                enum: [append, replace]
+                default: append
+              csv:
+                type: string
+                description: CSV with exactly name,type,amount,currency,date columns.
+  responses:
+    JsonSuccess:
+      description: Successful JSON response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericObject"
+    ApiError:
+      description: API error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiError"
+    JsonDownload:
+      description: Downloadable JSON document
+      headers:
+        Content-Disposition:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GenericObject"
+    CsvDownload:
+      description: Downloadable CSV document
+      headers:
+        Content-Disposition:
+          schema:
+            type: string
+      content:
+        text/csv:
+          schema:
+            type: string
+  schemas:
+    GenericObject:
+      type: object
+      additionalProperties: true
+    Currency:
+      type: string
+      pattern: "^[A-Z]{3}$"
+      examples: [PLN]
+    AdminOptionsUpdate:
+      type: object
+      properties:
+        ledger_currency:
+          $ref: "#/components/schemas/Currency"
+        locale:
+          type: string
+        timezone:
+          type: string
+        holiday_country:
+          type: string
+          enum: [PL, DE]
+        future_periods:
+          type: integer
+          minimum: 1
+          maximum: 60
+        fx_provider:
+          type: string
+          enum: [disabled, manual, nbp, frankfurter]
+        fx_buffer_percent:
+          type: number
+          minimum: 0
+          maximum: 100
+    SetupRequest:
+      allOf:
+        - $ref: "#/components/schemas/AdminOptionsUpdate"
+        - type: object
+          properties:
+            opening_balance:
+              type: number
+            income_enabled:
+              type: boolean
+            income_amount:
+              type: number
+              minimum: 0
+            income_name:
+              type: string
+            income_anchor_day:
+              type: integer
+              minimum: 1
+              maximum: 31
+    SettingsUpdate:
+      allOf:
+        - $ref: "#/components/schemas/AdminOptionsUpdate"
+        - type: object
+          properties:
+            minimum_reserve_enabled:
+              type: boolean
+            minimum_reserve_amount:
+              type: number
+              minimum: 0
+            budget_period_income_id:
+              type:
+                - string
+                - "null"
+            fx_used_currencies:
+              type: array
+              items:
+                $ref: "#/components/schemas/Currency"
+            manual_fx_rates:
+              type: object
+              additionalProperties:
+                type: number
+                exclusiveMinimum: 0
+            auto_backup_enabled:
+              type: boolean
+            backup_interval_minutes:
+              type: integer
+              minimum: 1
+            backup_retention_count:
+              type: integer
+              minimum: 1
+            backup_location:
+              type:
+                - string
+                - "null"
+            ntfy_url:
+              type:
+                - string
+                - "null"
+              format: uri
+            notification_delivery_time:
+              type: string
+              pattern: "^[0-2][0-9]:[0-5][0-9]$"
+            notify_goal_impossible:
+              type: boolean
+            notify_necessary_underfunded:
+              type: boolean
+            notify_funding_shortfall:
+              type: boolean
+            notify_income_missing:
+              type: boolean
+            notify_pending_summary:
+              type: boolean
+            notify_goal_funded:
+              type: boolean
+            notify_fx_changed:
+              type: boolean
+            ntfy_priority_goal_impossible:
+              $ref: "#/components/schemas/NtfyPriority"
+            ntfy_priority_necessary_underfunded:
+              $ref: "#/components/schemas/NtfyPriority"
+            ntfy_priority_funding_shortfall:
+              $ref: "#/components/schemas/NtfyPriority"
+            ntfy_priority_income_missing:
+              $ref: "#/components/schemas/NtfyPriority"
+            ntfy_priority_pending_summary:
+              $ref: "#/components/schemas/NtfyPriority"
+            ntfy_priority_goal_funded:
+              $ref: "#/components/schemas/NtfyPriority"
+            ntfy_priority_fx_changed:
+              $ref: "#/components/schemas/NtfyPriority"
+            necessary_underfunded_repeat_days:
+              type: integer
+              minimum: 1
+    NtfyPriority:
+      type: string
+      enum: [min, low, default, high, urgent]
+    MoneyInput:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        currency:
+          $ref: "#/components/schemas/Currency"
+        amount:
+          type: number
+          minimum: 0
+        active:
+          type: boolean
+    RecurringSchedule:
+      type: object
+      properties:
+        repeat_every_months:
+          type: integer
+          minimum: 1
+          maximum: 12
+        start_month_year:
+          type:
+            - string
+            - "null"
+          pattern: "^\\d{4}-\\d{2}$"
+        anchor_type:
+          type: string
+          enum: [day_of_month, month_end]
+        anchor_day_of_month:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 31
+        anchor_offset_days:
+          type: integer
+        anchor_business_day_adjustment:
+          type: string
+          enum: [none, previous, next]
+        anchor_holiday_country:
+          type: string
+          enum: [PL, DE]
+    PredictionOptions:
+      type: object
+      properties:
+        prediction_substitute_missing:
+          type: string
+          enum:
+            - none
+            - starting_value
+            - average_extreme_starting_value
+            - median_recorded
+            - last_confirmed
+            - previous_year_same_month
+            - require_min_recorded_months
+        prediction_min_recorded_months:
+          type: integer
+          minimum: 1
+          maximum: 12
+    RecurringExpenseInput:
+      allOf:
+        - $ref: "#/components/schemas/MoneyInput"
+        - $ref: "#/components/schemas/RecurringSchedule"
+        - $ref: "#/components/schemas/PredictionOptions"
+        - type: object
+          properties:
+            prediction_strategy:
+              type: string
+              enum: [fixed, 12month_max]
+            priority:
+              type: integer
+              minimum: 1
+            necessary:
+              type: boolean
+    RecurringIncomeInput:
+      allOf:
+        - $ref: "#/components/schemas/MoneyInput"
+        - $ref: "#/components/schemas/RecurringSchedule"
+        - $ref: "#/components/schemas/PredictionOptions"
+        - type: object
+          properties:
+            prediction_strategy:
+              type: string
+              enum: [fixed, 12month_min]
+            period_setting:
+              type: boolean
+    GoalInput:
+      allOf:
+        - $ref: "#/components/schemas/MoneyInput"
+        - type: object
+          properties:
+            due_date:
+              type: string
+              format: date
+            priority:
+              type: integer
+              minimum: 1
+    FlexInput:
+      allOf:
+        - $ref: "#/components/schemas/MoneyInput"
+        - type: object
+          properties:
+            priority:
+              type: integer
+              minimum: 1
+            allow_split:
+              type: boolean
+            min_amount:
+              type:
+                - number
+                - string
+                - "null"
+            max_amount:
+              type:
+                - number
+                - string
+                - "null"
+    OneOffInput:
+      allOf:
+        - $ref: "#/components/schemas/MoneyInput"
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: [income, expense]
+            date:
+              type: string
+              format: date
+    PendingUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        amount:
+          type: number
+          minimum: 0
+        date:
+          type: string
+          format: date
+        currency:
+          $ref: "#/components/schemas/Currency"
+    PendingConfirm:
+      type: object
+      properties:
+        amount:
+          type: number
+          minimum: 0
+        confirmed_date:
+          type: string
+          format: date
+        fx_rate:
+          type: number
+          exclusiveMinimum: 0
+        buffered_fx_rate:
+          type: number
+          exclusiveMinimum: 0
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        details:
+          type:
+            - array
+            - object
+            - "null"
+        conflicts:
+          type:
+            - array
+            - "null"

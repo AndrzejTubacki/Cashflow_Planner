@@ -1,5 +1,6 @@
 services:
   cashflow:
+    image: cashflow:${CASHFLOW_IMAGE_TAG:-local}
     build:
       context: .
       target: runtime
@@ -9,9 +10,15 @@ services:
       PORT: ${PORT:-3000}
       DATA_DIR: /app/data
       LOGS_DIR: /app/logs
+      CASHFLOW_JSON_LIMIT: ${CASHFLOW_JSON_LIMIT:-10mb}
+      CASHFLOW_LOG_TIMEZONE: ${CASHFLOW_LOG_TIMEZONE:-Europe/Warsaw}
+      CASHFLOW_BACKUP_ALLOWED_ROOTS: ${CASHFLOW_BACKUP_ALLOWED_ROOTS:-/app/backups}
+      CASHFLOW_FX_FETCH_TIMEOUT_MS: ${CASHFLOW_FX_FETCH_TIMEOUT_MS:-10000}
+      CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS: ${CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS:-5000}
     volumes:
       - cashflow-data:/app/data
       - cashflow-logs:/app/logs
+      - cashflow-backups:/app/backups
     ports:
       - "${CASHFLOW_HTTP_PORT:-3000}:${PORT:-3000}"
     healthcheck:
@@ -38,5 +45,6 @@ services:
 volumes:
   cashflow-data:
   cashflow-logs:
+  cashflow-backups:
   cashflow-test-data:
   cashflow-test-logs:

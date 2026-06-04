@@ -2,6 +2,7 @@ import { escapeHtml } from "../utils.js";
 import { asNumber, formatMoney, formatPercent, t } from "./shared.js";
 
 const EMPTY_VALUE = "-";
+const FUNDING_EPSILON = 0.0001;
 
 function fundingParts(item) {
   const target = asNumber(item.target_ledger_amount ?? item.amount, 0);
@@ -22,10 +23,34 @@ function fundingParts(item) {
 }
 
 function fundingDateClass(parts) {
-  if (parts.remaining > 0.0001) return "cashflow-funding-card__date--missing";
-  if (parts.future > 0.0001) return "cashflow-funding-card__date--future";
-  if (parts.pending > 0.0001) return "cashflow-funding-card__date--pending";
+  if (parts.remaining > FUNDING_EPSILON) return "cashflow-funding-card__date--missing";
+  if (parts.future > FUNDING_EPSILON) return "cashflow-funding-card__date--future";
+  if (parts.pending > FUNDING_EPSILON) return "cashflow-funding-card__date--pending";
   return "";
+}
+
+function isFullyConfirmed(item) {
+  const parts = fundingParts(item);
+  if (item.fx_missing) return false;
+  return parts.target <= FUNDING_EPSILON || parts.confirmed >= parts.target - FUNDING_EPSILON;
+}
+
+function hasMissingProjection(item) {
+  const parts = fundingParts(item);
+  return Boolean(item.fx_missing) || parts.remaining > FUNDING_EPSILON || !item.funded_by_date;
+}
+
+function compareFundingItems(a, b) {
+  const missingCompare = Number(hasMissingProjection(b.item)) - Number(hasMissingProjection(a.item));
+  if (missingCompare !== 0) return missingCompare;
+
+  const dateCompare = String(a.item.funded_by_date || "").localeCompare(String(b.item.funded_by_date || ""));
+  if (dateCompare !== 0) return dateCompare;
+
+  const labelCompare = String(a.label || "").localeCompare(String(b.label || ""));
+  if (labelCompare !== 0) return labelCompare;
+
+  return String(a.item.id || "").localeCompare(String(b.item.id || ""));
 }
 
 function polarToCartesian(cx, cy, r, angleDeg) {
@@ -187,22 +212,53 @@ function renderFundingOverview(locale, cashflow) {
   const goals = cashflow?.goals || [];
   const flex = cashflow?.flexTransactions || [];
 
-  const goalCards = goals.map(goal =>
-    renderFundingPie(locale, goal, `${t(locale, "Goal")}: ${goal.name || EMPTY_VALUE}`, ledgerCurrency)
-  );
+  // Confirmed-only completion is factual history and no longer needs projection attention.
+  const items = [
+    ...goals.map(item => ({
+      item,
+      label: `${t(locale, "Goal")}: ${item.name || EMPTY_VALUE}`
+    })),
+    ...flex.map(item => ({
+      item,
+      label: `${t(locale, "Flex")}: ${item.name || EMPTY_VALUE}`
+    }))
+  ]
+    .filter(entry => !isFullyConfirmed(entry.item))
+    .sort(compareFundingItems);
 
-  const flexCards = flex.map(item =>
-    renderFundingPie(locale, item, `${t(locale, "Flex")}: ${item.name || EMPTY_VALUE}`, ledgerCurrency)
-  );
+  if (!items.length) return "";
 
-  if (!goalCards.length && !flexCards.length) return "";
+  const cards = items.map(entry => `
+    <div data-cashflow-funding-item>
+      ${renderFundingPie(locale, entry.item, entry.label, ledgerCurrency)}
+    </div>
+  `);
 
   return `
-    <div class="cashflow-funding-overview">
-      ${goalCards.join("")}
-      ${flexCards.join("")}
+    <div class="cashflow-funding-overview-shell" data-cashflow-funding-overview>
+      <div class="cashflow-funding-overview cashflow-funding-overview--collapsed" data-cashflow-funding-grid>
+        ${cards.join("")}
+      </div>
+      ${cards.length > 1 ? `
+        <div class="cashflow-funding-overview__actions">
+          <button
+            type="button"
+            class="btn-small"
+            data-cashflow-toggle-funding
+            data-show-all-label="${escapeHtml(t(locale, "Show all"))}"
+            data-show-less-label="${escapeHtml(t(locale, "Show less"))}"
+            aria-expanded="false"
+          >${escapeHtml(t(locale, "Show all"))}</button>
+        </div>
+      ` : ""}
     </div>
   `;
 }
 
-export { renderFundingOverview };
+export {
+  compareFundingItems,
+  fundingParts,
+  hasMissingProjection,
+  isFullyConfirmed,
+  renderFundingOverview
+};

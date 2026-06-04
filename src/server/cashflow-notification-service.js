@@ -3,6 +3,7 @@ import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { fetchWithTimeout, notificationFetchTimeoutMs } from "./cashflow-fetch-utils.js";
 
 export function createCashflowNotificationService({
+  fetchImpl = fetch,
   generateId,
   listLedgerYears,
   openLedgerDb,
@@ -48,7 +49,7 @@ export function createCashflowNotificationService({
             "Tags": "money"
           },
           body: notification.message
-        }, notificationFetchTimeoutMs());
+        }, notificationFetchTimeoutMs(), fetchImpl);
 
         if (!response.ok) {
           throw new Error(`ntfy failed: ${response.status} ${response.statusText}`);

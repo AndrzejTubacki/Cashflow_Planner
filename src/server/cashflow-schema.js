@@ -3,9 +3,13 @@ import {
   DEFAULT_FX_BUFFER_PERCENT,
   NOTIFICATION_DELIVERY_TIME
 } from "./cashflow-constants.js";
+
+export const PLANNING_SCHEMA_VERSION = 14;
+export const LEDGER_SCHEMA_VERSION = 4;
+
 export function initializePlanningSchema(db) {
   db.exec(`
-    PRAGMA user_version = 14;
+    PRAGMA user_version = ${PLANNING_SCHEMA_VERSION};
 
     CREATE TABLE fx_rates_cache (
       base_currency TEXT NOT NULL,
@@ -328,7 +332,7 @@ export function initializePlanningSchema(db) {
 
 export function initializeLedgerSchema(db) {
   db.exec(`
-    PRAGMA user_version = 4;
+    PRAGMA user_version = ${LEDGER_SCHEMA_VERSION};
 
     CREATE TABLE confirmed_transactions (
       id TEXT PRIMARY KEY,
