@@ -46,10 +46,10 @@ defaults or all-user maintenance.
 | `200` | Request completed |
 | `400` | Invalid user ID, currency, date, import, or request data |
 | `403` | Selected profile lacks admin permission |
-| `404` | Profile, planning row, or pending row was not found |
+| `404` | Profile, planning row, pending row, or usable backup was not found |
 | `409` | User already exists or merge import has ID conflicts |
 | `504` | External FX or notification request timed out |
-| `500` | Unexpected server, backup lookup, or restore failure |
+| `500` | Unexpected server failure, including a failed recovery rollback |
 
 API errors use:
 
@@ -95,7 +95,53 @@ for differing currencies. Same-currency requests always return rate `1`.
 `?includeOperationalSettings=1` only when moving trusted deployment settings.
 
 `POST /api/import/full` accepts `replace` or `merge`. Both modes create a
-safety backup and roll back later failures. Merge conflicts return `409`.
+safety backup and roll back later failures. A default replace import changes
+functional planner settings but preserves the target profile's current backup
+and notification settings. Set `includeOperationalSettings` only to
+intentionally replace those deployment settings. Sample loading uses the same
+preserve-current behavior.
+
+Full imports validate every planning and confirmed-ledger row before creating a
+safety backup. Unknown fields, invalid IDs and values, broken source
+relationships, ledger-year mismatches, and duplicate occurrence keys return
+`400`. Row validation details identify the table, row number, ID, field, and
+reason without echoing imported values:
+
+```json
+{
+  "error": "Full import contains invalid rows",
+  "details": [
+    {
+      "table": "one_off_transactions",
+      "row": 1,
+      "id": "example-id",
+      "field": "date",
+      "reason": "invalid_date"
+    }
+  ]
+}
+```
+
+Merge conflicts with existing IDs, FX keys, or occurrence keys return `409`.
+If an import or restore fails and its safety-backup rollback also fails, the
+response is `500` with structured recovery details:
+
+```json
+{
+  "error": "Import failed and rollback also failed",
+  "details": {
+    "phase": "rollback_failed",
+    "safetyBackup": "/path/to/backup",
+    "originalError": "original failure",
+    "originalStatus": 500,
+    "rollbackError": "rollback failure"
+  }
+}
+```
+
+`POST /api/restore/:backupId` returns `404` when its metadata or folder is
+missing. An existing but corrupt backup returns `400` before a restore safety
+backup is created.
 
 `POST /api/import/one-offs-csv` accepts strict CSV text with exactly:
 

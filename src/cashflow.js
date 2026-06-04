@@ -32,10 +32,12 @@ import {
 
 function createCashflowModule({
   appVersion = "0.0.0",
+  backupServiceHook = null,
   dataDir,
   localeDir,
   getCurrentFxSnapshot,
   getFxSnapshotForDate = null,
+  portabilityMutationHook = null,
   recoverableMutationHook = null,
   logError,
   logServerEvent,
@@ -43,6 +45,7 @@ function createCashflowModule({
 }) {
   // Resolve all per-user file paths: planning DB, yearly ledger DBs, and backup folders.
   const {
+    backupDir,
     backupRootDir,
     cashflowUserStorageExists,
     directorySizeBytes,
@@ -58,6 +61,8 @@ function createCashflowModule({
     translateLocale
   } = createCashflowLocaleService(localeDir);
 
+  let cleanupAfterMigrationRecovery = null;
+
   // Open and migrate SQLite databases, and expose ledger-year discovery.
   const {
     initReadOnlyPragmas,
@@ -68,6 +73,13 @@ function createCashflowModule({
     ledgerDbPath,
     logError,
     logServerEvent,
+    onMigrationRecoveryComplete: userId => {
+      queueMicrotask(() => {
+        if (typeof cleanupAfterMigrationRecovery === "function") {
+          cleanupAfterMigrationRecovery(userId, "migration_recovery_completed");
+        }
+      });
+    },
     planningDbPath,
     userDataDir
   });
@@ -296,7 +308,8 @@ function createCashflowModule({
 
   // Create/restore backups and validate data integrity before risky operations.
   const {
-    cleanupOldBackups,
+    cleanupOperationalData,
+    cleanupOperationalDataBestEffort,
     createBackup,
     maybeRunAutomaticBackup,
     restoreBackup,
@@ -304,20 +317,26 @@ function createCashflowModule({
     validateBackupFolderForRestore,
     validateCashflowData
   } = createCashflowBackupService({
+    backupDir,
+    backupHook: backupServiceHook,
     backupRootDir,
     directorySizeBytes,
     generateId,
     getSettings,
     initReadOnlyPragmas,
     listLedgerYears,
+    logError,
+    logServerEvent,
     openLedgerDb,
     openPlanningDb,
     recalculateLedgerRunningBalance,
     regenerateProjectionsAfterMutation
   });
+  cleanupAfterMigrationRecovery = cleanupOperationalDataBestEffort;
 
   recoveryService = createCashflowRecoveryService({
     afterWork: recoverableMutationHook,
+    cleanupOperationalData: cleanupOperationalDataBestEffort,
     createBackup,
     logError,
     logServerEvent,
@@ -332,10 +351,14 @@ function createCashflowModule({
     importOneOffCsv,
     importSampleData
   } = createCashflowDataPortabilityService({
+    cleanupOperationalData: cleanupOperationalDataBestEffort,
     createBackup,
     generateId,
     listLedgerYears,
     loadAllConfirmedTransactions,
+    logError,
+    logServerEvent,
+    mutationHook: portabilityMutationHook,
     normalizeLocale,
     openLedgerDb,
     openPlanningDb,
@@ -507,6 +530,7 @@ function createCashflowModule({
 
   // Schedule recurring maintenance: midnight transitions, FX refresh, notifications, backups.
   const { startBackgroundJobs } = createCashflowBackgroundJobs({
+    cleanupOperationalData: cleanupOperationalDataBestEffort,
     getSettings,
     listCashflowUserIds,
     logCashflowError,
@@ -523,6 +547,7 @@ function createCashflowModule({
 
   // Public module surface consumed by server.mjs and tests.
   return {
+    cleanupOperationalData,
     registerRoutes,
     startBackgroundJobs,
     getSnapshot,

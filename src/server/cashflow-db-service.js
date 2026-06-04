@@ -44,6 +44,7 @@ export function createCashflowDbService({
   ledgerDbPath,
   logError = () => {},
   logServerEvent = () => {},
+  onMigrationRecoveryComplete = () => {},
   planningDbPath,
   userDataDir
 }) {
@@ -55,6 +56,20 @@ export function createCashflowDbService({
     logError,
     logServerEvent
   });
+
+  function completeMigrationRecovery(userId) {
+    const recoveryPath = markMigrationRecoveryComplete(userId);
+    if (!recoveryPath) return;
+    try {
+      onMigrationRecoveryComplete(userId, recoveryPath);
+    } catch (error) {
+      logError("cashflow_migration_recovery_completion_callback_failed", {
+        userId,
+        recoveryPath,
+        error: error.message
+      });
+    }
+  }
 
   function openPlanningDb(userId, options = {}) {
     const { create = true } = options;
@@ -82,7 +97,7 @@ export function createCashflowDbService({
         initializePlanningSchema(db);
       } else {
         applyPlanningMigrations(db);
-        markMigrationRecoveryComplete(userId);
+        completeMigrationRecovery(userId);
       }
     } catch (error) {
       db.close();
@@ -118,7 +133,7 @@ export function createCashflowDbService({
         initializeLedgerSchema(db);
       } else {
         applyLedgerMigrations(db, { occurrenceKeyFromRow });
-        markMigrationRecoveryComplete(userId);
+        completeMigrationRecovery(userId);
       }
     } catch (error) {
       db.close();

@@ -1,5 +1,6 @@
-import { requireHolidayCountry, requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
+import { requireIsoDate } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
+import { validateFullImportRows } from "./cashflow-import-validation.js";
 import {
   OPERATIONAL_SETTINGS_COLUMNS,
   validateAndNormalizeSettings
@@ -79,18 +80,22 @@ function insertRows(db, tableName, rows) {
   if (!Array.isArray(rows) || !rows.length) return 0;
 
   const liveColumns = tableColumns(db, tableName);
-  const columns = liveColumns.filter(column => Object.prototype.hasOwnProperty.call(rows[0], column));
-  if (!columns.length) return 0;
-
-  const columnList = columns.map(column => `"${column}"`).join(", ");
-  const placeholders = columns.map(() => "?").join(", ");
-  const insert = db.prepare(`
-    INSERT INTO ${tableName} (${columnList})
-    VALUES (${placeholders})
-  `);
-
+  const inserts = new Map();
   let count = 0;
   for (const row of rows) {
+    const columns = liveColumns.filter(column => Object.prototype.hasOwnProperty.call(row, column));
+    if (!columns.length) continue;
+    const key = columns.join(",");
+    let insert = inserts.get(key);
+    if (!insert) {
+      const columnList = columns.map(column => `"${column}"`).join(", ");
+      const placeholders = columns.map(() => "?").join(", ");
+      insert = db.prepare(`
+        INSERT INTO ${tableName} (${columnList})
+        VALUES (${placeholders})
+      `);
+      inserts.set(key, insert);
+    }
     insert.run(...columns.map(column => row[column]));
     count += 1;
   }
@@ -277,7 +282,9 @@ function hasFunctionalRows(exportData) {
 
 function prepareExportDataForImport(exportData, options = {}) {
   const {
+    currentSettings = {},
     includeOperationalSettings = false,
+    merge = false,
     normalizeLocale = value => String(value || "en").trim().toLowerCase(),
     validateSettings = true
   } = options;
@@ -304,28 +311,54 @@ function prepareExportDataForImport(exportData, options = {}) {
     settings.updated_at = setupTimestamp;
   }
 
-  const importSettings = includeOperationalSettings ? settings : stripOperationalSettings(settings);
-  prepared.planning.settings = [
-    validateSettings
-      ? validateAndNormalizeSettings(importSettings, {
-          includeOperationalSettings,
-          normalizeLocale
-        })
-      : stripOperationalSettings(importSettings)
-  ];
+  const preservedOperationalSettings = Object.fromEntries(
+    [...OPERATIONAL_SETTINGS_COLUMNS]
+      .filter(field => Object.prototype.hasOwnProperty.call(currentSettings, field))
+      .map(field => [field, currentSettings[field]])
+  );
+  let importSettings;
+  if (merge) {
+    importSettings = { ...currentSettings };
+  } else if (includeOperationalSettings) {
+    importSettings = validateAndNormalizeSettings(settings, {
+      includeOperationalSettings: true,
+      normalizeLocale
+    });
+  } else {
+    importSettings = {
+      ...validateAndNormalizeSettings(stripOperationalSettings(settings), {
+        includeOperationalSettings: false,
+        normalizeLocale
+      }),
+      ...preservedOperationalSettings
+    };
+  }
+  prepared.planning.settings = [validateSettings ? importSettings : { ...currentSettings }];
+  validateFullImportRows(prepared, {
+    validateBudgetPeriodIncome: !merge
+  });
   return prepared;
 }
 
-function wrapRolledBackError(error, safetyBackup) {
-  const wrapped = new Error(`Import failed and was rolled back from safety backup ${safetyBackup}: ${error.message}`);
-  const message = String(error?.message || "");
-  wrapped.status = Number(error?.status) || (message.includes("FOREIGN KEY constraint failed") ? 400 : 500);
-  if (!error?.details && message.includes("FOREIGN KEY constraint failed")) {
-    wrapped.details = [{ row: null, field: null, reason: "foreign_key_constraint_failed" }];
-  }
+function rolledBackError(error, safetyBackup, operation) {
+  const wrapped = new Error(`${operation} failed and was rolled back: ${error.message}`);
+  wrapped.status = Number(error?.status) || 500;
   if (error?.details) wrapped.details = error.details;
   if (error?.conflicts) wrapped.conflicts = error.conflicts;
+  wrapped.rollback = {
+    phase: "rolled_back",
+    safetyBackup,
+    originalError: error.message,
+    originalStatus: wrapped.status
+  };
   return wrapped;
+}
+
+function importedOccurrenceKeys(exportData) {
+  return new Set([
+    ...exportData.planning.pending_transactions,
+    ...Object.values(exportData.ledgers).flat()
+  ].map(row => row.occurrence_key).filter(Boolean));
 }
 
 function normalizeExportPayload(payload) {
@@ -367,49 +400,7 @@ function normalizeExportPayload(payload) {
     }
   }
 
-  validateExportPayloadRows(exportData);
-
   return exportData;
-}
-
-function validateExportPayloadRows(exportData) {
-  const settings = exportData.planning.settings[0] || {};
-
-  for (const tableName of ["recurring_expenses", "recurring_incomes", "goals", "flex_transactions", "one_off_transactions", "pending_transactions"]) {
-    for (const row of exportData.planning[tableName] || []) {
-      if (row.currency !== undefined) {
-        requireSupportedCurrency(row.currency, `${tableName}.currency`);
-      }
-      if (row.ledger_currency !== undefined && row.ledger_currency !== null) {
-        requireSupportedCurrency(row.ledger_currency, `${tableName}.ledger_currency`);
-      }
-      if (row.date) {
-        requireIsoDate(row.date, `${tableName}.date`);
-      }
-      if (row.due_date) {
-        requireIsoDate(row.due_date, `${tableName}.due_date`);
-      }
-      if (row.start_month_year) {
-        requireIsoMonth(row.start_month_year, `${tableName}.start_month_year`);
-      }
-      if (row.anchor_holiday_country) {
-        requireHolidayCountry(row.anchor_holiday_country, `${tableName}.anchor_holiday_country`);
-      }
-    }
-  }
-
-  for (const [year, rows] of Object.entries(exportData.ledgers || {})) {
-    for (const row of rows || []) {
-      if (String(row.date || "").slice(0, 4) !== String(year)) {
-        requireIsoDate(row.date, `ledger_${year}.date`);
-      } else {
-        requireIsoDate(row.date, `ledger_${year}.date`);
-      }
-      requireIsoDate(row.confirmed_date, `ledger_${year}.confirmed_date`);
-      requireSupportedCurrency(row.currency, `ledger_${year}.currency`);
-      requireSupportedCurrency(row.ledger_currency || settings.ledger_currency || "PLN", `ledger_${year}.ledger_currency`);
-    }
-  }
 }
 
 function sampleExport() {
@@ -622,8 +613,12 @@ function sampleExport() {
 }
 
 export function createCashflowDataPortabilityService({
+  cleanupOperationalData = () => null,
   createBackup,
   generateId,
+  logError = () => {},
+  logServerEvent = () => {},
+  mutationHook = null,
   listLedgerYears,
   loadAllConfirmedTransactions,
   openLedgerDb,
@@ -633,6 +628,10 @@ export function createCashflowDataPortabilityService({
   regenerateProjectionsAfterMutation,
   restoreBackupFromPath
 }) {
+  function runMutationHook(phase, details = {}) {
+    if (typeof mutationHook === "function") mutationHook({ phase, ...details });
+  }
+
   function exportFullData(userId, appVersion = "0.0.0", options = {}) {
     const includeOperationalSettings = Boolean(options.includeOperationalSettings);
     const db = openPlanningDb(userId);
@@ -776,6 +775,9 @@ export function createCashflowDataPortabilityService({
 
   function collectMergeConflicts(userId, exportData) {
     const conflicts = [];
+    const existingConfirmedRows = loadAllConfirmedTransactions(userId);
+    const existingConfirmedIds = new Set(existingConfirmedRows.map(row => row.id));
+    let existingPendingIds = new Set();
     const db = openPlanningDb(userId);
 
     try {
@@ -783,17 +785,63 @@ export function createCashflowDataPortabilityService({
       for (const tableName of ID_TABLES) {
         conflicts.push(...idConflicts(db, tableName, exportData.planning[tableName]));
       }
+      existingPendingIds = new Set(
+        db.prepare("SELECT id FROM pending_transactions").all().map(row => row.id)
+      );
+
+      const importedKeys = importedOccurrenceKeys(exportData);
+      if (importedKeys.size) {
+        const existingPendingKeys = db.prepare(`
+          SELECT occurrence_key
+          FROM pending_transactions
+          WHERE occurrence_key IS NOT NULL
+        `).all();
+        for (const row of existingPendingKeys) {
+          if (importedKeys.has(row.occurrence_key)) {
+            conflicts.push({
+              table: "occurrence_keys",
+              id: row.occurrence_key,
+              reason: "already_exists"
+            });
+          }
+        }
+      }
     } finally {
       db.close();
     }
 
-    for (const [year, rows] of Object.entries(exportData.ledgers)) {
-      const ledgerDb = openLedgerDb(userId, year);
+    const importedKeys = importedOccurrenceKeys(exportData);
+    if (importedKeys.size) {
+      for (const row of existingConfirmedRows) {
+        if (row.occurrence_key && importedKeys.has(row.occurrence_key)) {
+          conflicts.push({
+            table: "occurrence_keys",
+            id: row.occurrence_key,
+            reason: "already_exists"
+          });
+        }
+      }
+    }
 
-      try {
-        conflicts.push(...idConflicts(ledgerDb, "confirmed_transactions", rows, `ledger_${year}.confirmed_transactions`));
-      } finally {
-        ledgerDb.close();
+    for (const [year, rows] of Object.entries(exportData.ledgers)) {
+      for (const row of rows) {
+        if (existingConfirmedIds.has(row.id) || existingPendingIds.has(row.id)) {
+          conflicts.push({
+            table: `ledger_${year}.confirmed_transactions`,
+            id: row.id,
+            reason: "already_exists"
+          });
+        }
+      }
+    }
+
+    for (const row of exportData.planning.pending_transactions) {
+      if (existingConfirmedIds.has(row.id)) {
+        conflicts.push({
+          table: "pending_transactions",
+          id: row.id,
+          reason: "already_exists"
+        });
       }
     }
 
@@ -841,10 +889,19 @@ export function createCashflowDataPortabilityService({
     const normalizedMode = mode === "merge" ? "merge" : "replace";
     const includeOperationalSettings = normalizedMode === "replace"
       && Boolean(options.includeOperationalSettings);
+    const currentDb = openPlanningDb(userId);
+    let currentSettings;
+    try {
+      currentSettings = currentDb.prepare("SELECT * FROM settings WHERE id = 1").get() || {};
+    } finally {
+      currentDb.close();
+    }
     const exportData = prepareExportDataForImport(
       normalizeExportPayload(payload),
       {
+        currentSettings,
         includeOperationalSettings,
+        merge: normalizedMode === "merge",
         normalizeLocale,
         validateSettings: normalizedMode === "replace"
       }
@@ -853,19 +910,24 @@ export function createCashflowDataPortabilityService({
     if (normalizedMode === "merge") {
       const conflicts = collectMergeConflicts(userId, exportData);
       if (conflicts.length) {
-        const error = new Error("Import has conflicting IDs");
+        const error = new Error("Import has conflicts");
         error.status = 409;
         error.conflicts = conflicts;
         throw error;
       }
 
-      const safetyBackup = createBackup(userId);
+      const safetyBackup = createBackup(userId, { deferCleanup: true });
 
       try {
         mergePlanningData(userId, exportData);
+        runMutationHook("after_merge_planning", { userId, safetyBackup });
         mergeLedgerData(userId, exportData);
         recalculateLedgerRunningBalance(userId);
         const projection = regenerateProjectionsAfterMutation(userId);
+        if (projection?.projection_ok === false) {
+          throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
+        }
+        cleanupOperationalData(userId, "merge_import_completed");
 
         return {
           ok: true,
@@ -876,18 +938,57 @@ export function createCashflowDataPortabilityService({
           _projection: projection
         };
       } catch (error) {
-        restoreBackupFromPath(userId, safetyBackup);
-        throw wrapRolledBackError(error, safetyBackup);
+        logError("cashflow_import_failed_before_rollback", {
+          userId,
+          mode: normalizedMode,
+          safetyBackup,
+          error: error.message
+        });
+        try {
+          runMutationHook("before_merge_rollback", { userId, safetyBackup, error });
+          restoreBackupFromPath(userId, safetyBackup);
+          logServerEvent("cashflow_import_rolled_back", {
+            userId,
+            mode: normalizedMode,
+            safetyBackup,
+            error: error.message
+          });
+        } catch (rollbackError) {
+          logError("cashflow_import_rollback_failed", {
+            userId,
+            mode: normalizedMode,
+            safetyBackup,
+            error: error.message,
+            rollbackError: rollbackError.message
+          });
+          const combined = new Error("Import failed and rollback also failed");
+          combined.status = 500;
+          combined.details = {
+            phase: "rollback_failed",
+            safetyBackup,
+            originalError: error.message,
+            originalStatus: Number(error?.status) || 500,
+            rollbackError: rollbackError.message
+          };
+          throw combined;
+        }
+        cleanupOperationalData(userId, "merge_import_rolled_back");
+        throw rolledBackError(error, safetyBackup, "Import");
       }
     }
 
-    const safetyBackup = createBackup(userId);
+    const safetyBackup = createBackup(userId, { deferCleanup: true });
 
     try {
       replacePlanningData(userId, exportData);
+      runMutationHook("after_replace_planning", { userId, safetyBackup });
       replaceLedgerData(userId, exportData);
       recalculateLedgerRunningBalance(userId);
       const projection = regenerateProjectionsAfterMutation(userId);
+      if (projection?.projection_ok === false) {
+        throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
+      }
+      cleanupOperationalData(userId, "replace_import_completed");
 
       return {
         ok: true,
@@ -897,8 +998,42 @@ export function createCashflowDataPortabilityService({
         _projection: projection
       };
     } catch (error) {
-      restoreBackupFromPath(userId, safetyBackup);
-      throw wrapRolledBackError(error, safetyBackup);
+      logError("cashflow_import_failed_before_rollback", {
+        userId,
+        mode: normalizedMode,
+        safetyBackup,
+        error: error.message
+      });
+      try {
+        runMutationHook("before_replace_rollback", { userId, safetyBackup, error });
+        restoreBackupFromPath(userId, safetyBackup);
+        logServerEvent("cashflow_import_rolled_back", {
+          userId,
+          mode: normalizedMode,
+          safetyBackup,
+          error: error.message
+        });
+      } catch (rollbackError) {
+        logError("cashflow_import_rollback_failed", {
+          userId,
+          mode: normalizedMode,
+          safetyBackup,
+          error: error.message,
+          rollbackError: rollbackError.message
+        });
+        const combined = new Error("Import failed and rollback also failed");
+        combined.status = 500;
+        combined.details = {
+          phase: "rollback_failed",
+          safetyBackup,
+          originalError: error.message,
+          originalStatus: Number(error?.status) || 500,
+          rollbackError: rollbackError.message
+        };
+        throw combined;
+      }
+      cleanupOperationalData(userId, "replace_import_rolled_back");
+      throw rolledBackError(error, safetyBackup, "Import");
     }
   }
 

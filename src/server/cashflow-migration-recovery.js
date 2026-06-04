@@ -9,6 +9,8 @@ import {
 
 const RECOVERY_FORMAT = "cashflow-migration-recovery";
 const RECOVERY_FORMAT_VERSION = 1;
+const COMPLETED_RECOVERY_RETENTION = 2;
+const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
 
 function targetVersion(kind) {
   return kind === "planning" ? PLANNING_SCHEMA_VERSION : LEDGER_SCHEMA_VERSION;
@@ -67,6 +69,48 @@ function pendingRecoveryDirs(backupDir) {
     .map(entry => path.join(backupDir, entry.name))
     .sort()
     .reverse();
+}
+
+export function cleanupMigrationRecoveryFolders(backupDir, currentTime = Date.now()) {
+  if (!fs.existsSync(backupDir) || !fs.statSync(backupDir).isDirectory()) {
+    return { completedDeleted: 0, staleTemporaryDeleted: 0 };
+  }
+
+  const completed = [];
+  let staleTemporaryDeleted = 0;
+
+  for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const fullPath = path.join(backupDir, entry.name);
+    const stat = fs.statSync(fullPath);
+
+    if (entry.name.startsWith("migration_backup_") && entry.name.endsWith(".tmp")) {
+      if (currentTime - stat.mtimeMs > STALE_TEMP_AGE_MS) {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+        staleTemporaryDeleted += 1;
+      }
+      continue;
+    }
+
+    if (!entry.name.startsWith("migration_backup_")) continue;
+    const manifest = readManifest(fullPath);
+    if (manifest?.status === "completed") {
+      completed.push({
+        path: fullPath,
+        completedAt: Date.parse(manifest.completedAt || manifest.createdAt || "") || stat.mtimeMs
+      });
+    }
+  }
+
+  completed.sort((a, b) => b.completedAt - a.completedAt);
+  for (const recovery of completed.slice(COMPLETED_RECOVERY_RETENTION)) {
+    fs.rmSync(recovery.path, { recursive: true, force: true });
+  }
+
+  return {
+    completedDeleted: Math.max(0, completed.length - COMPLETED_RECOVERY_RETENTION),
+    staleTemporaryDeleted
+  };
 }
 
 function canReusePendingRecovery(manifest, databases) {
@@ -219,6 +263,14 @@ export function createCashflowMigrationRecoveryService({
           userId,
           recoveryPath
         });
+        try {
+          cleanupMigrationRecoveryFolders(backupDir);
+        } catch (cleanupError) {
+          logError("cashflow_migration_recovery_cleanup_failed", {
+            userId,
+            error: cleanupError.message
+          });
+        }
         return recoveryPath;
       }
     } catch (error) {

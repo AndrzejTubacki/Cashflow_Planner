@@ -2,6 +2,7 @@
 import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
 
 export function createCashflowBackgroundJobs({
+  cleanupOperationalData = () => null,
   getSettings,
   listCashflowUserIds,
   logError,
@@ -110,6 +111,7 @@ export function createCashflowBackgroundJobs({
             if (result) {
               logServerEvent("cashflow_auto_backup_completed", { userId, ...result });
             }
+            cleanupOperationalData(userId, "daily_maintenance");
           }
         } catch (err) {
           logError("cashflow_background_user_failed", {

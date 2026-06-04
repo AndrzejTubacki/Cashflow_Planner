@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Cashflow API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     Published HTTP contract for Cashflow. Cashflow does not currently implement
     authentication. The x-cashflow-user-id header selects a planner profile and
@@ -729,6 +729,10 @@ paths:
     post:
       operationId: createBackup
       summary: Create a WAL-safe app-level backup for the selected profile
+      description: |
+        Writes and validates the backup in a temporary folder before atomically
+        finalizing it. Failed attempts clean partial folders and are recorded
+        in backup metadata when possible.
       tags: [Backup]
       x-cashflow-scope: admin-user-scoped
       x-cashflow-mutating: true
@@ -739,6 +743,8 @@ paths:
         "200":
           $ref: "#/components/responses/JsonSuccess"
         "403":
+          $ref: "#/components/responses/ApiError"
+        "500":
           $ref: "#/components/responses/ApiError"
   /api/export/full:
     get:
@@ -765,6 +771,11 @@ paths:
     post:
       operationId: importFull
       summary: Replace or merge a full JSON export into the selected profile
+      description: |
+        Strictly validates all imported planning and ledger rows before creating
+        a safety backup. Replace mode preserves the target profile's operational
+        settings unless includeOperationalSettings is true. Merge mode ignores
+        all settings. Rollback failure details include the safety-backup path.
       tags: [Portability]
       x-cashflow-scope: user-scoped
       x-cashflow-mutating: true
@@ -779,6 +790,8 @@ paths:
         "400":
           $ref: "#/components/responses/ApiError"
         "409":
+          $ref: "#/components/responses/ApiError"
+        "500":
           $ref: "#/components/responses/ApiError"
   /api/import/one-offs-csv:
     post:
@@ -827,6 +840,7 @@ paths:
     post:
       operationId: importSample
       summary: Replace the selected profile with the sample dataset
+      description: Replaces functional planner data while preserving the target profile's operational settings.
       tags: [Portability]
       x-cashflow-scope: user-scoped
       x-cashflow-mutating: true
@@ -836,7 +850,11 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
         "404":
+          $ref: "#/components/responses/ApiError"
+        "500":
           $ref: "#/components/responses/ApiError"
   /api/validate:
     post:
@@ -857,6 +875,10 @@ paths:
     post:
       operationId: restoreBackup
       summary: Restore an app-level backup by metadata ID
+      description: |
+        Validates the requested backup before creating a safety backup. Missing
+        metadata or folders return 404; corrupt backups return 400. Rollback
+        failure details include the safety-backup path.
       tags: [Backup]
       x-cashflow-scope: admin-user-scoped
       x-cashflow-mutating: true
@@ -867,7 +889,11 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
         "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
           $ref: "#/components/responses/ApiError"
         "500":
           $ref: "#/components/responses/ApiError"
@@ -1046,9 +1072,11 @@ components:
                 type: string
                 enum: [replace, merge]
                 default: replace
+                description: Replace current functional data or append non-conflicting rows.
               includeOperationalSettings:
                 type: boolean
                 default: false
+                description: Replace operational settings in replace mode; otherwise preserve target values.
               export:
                 $ref: "#/components/schemas/GenericObject"
     CsvImport:
@@ -1392,6 +1420,7 @@ components:
             - array
             - object
             - "null"
+          description: Field/row validation details or structured rollback-failure recovery details.
         conflicts:
           type:
             - array

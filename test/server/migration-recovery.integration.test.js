@@ -59,10 +59,14 @@ async function withRecoveryHarness(fn) {
   const paths = createCashflowStoragePaths(dataDir);
   const events = [];
   const errors = [];
+  const migrationCompletions = [];
   const dbService = createCashflowDbService({
     ledgerDbPath: paths.ledgerDbPath,
     logError: (kind, details) => errors.push({ kind, details }),
     logServerEvent: (kind, details) => events.push({ kind, details }),
+    onMigrationRecoveryComplete: (completedUserId, recoveryPath) => {
+      migrationCompletions.push({ userId: completedUserId, recoveryPath });
+    },
     planningDbPath: paths.planningDbPath,
     userDataDir: paths.userDataDir
   });
@@ -73,6 +77,7 @@ async function withRecoveryHarness(fn) {
       dbService,
       errors,
       events,
+      migrationCompletions,
       paths,
       planningPath,
       ledgerPath,
@@ -159,6 +164,10 @@ test("migration creates one full recovery snapshot and existing restore flow con
 
   assert.ok(harness.events.some(event => event.kind === "cashflow_migration_recovery_created"));
   assert.ok(harness.events.some(event => event.kind === "cashflow_migration_recovery_completed"));
+  assert.deepEqual(harness.migrationCompletions, [{
+    userId: harness.userId,
+    recoveryPath: folders[0]
+  }]);
   assert.deepEqual(harness.errors, []);
 }));
 

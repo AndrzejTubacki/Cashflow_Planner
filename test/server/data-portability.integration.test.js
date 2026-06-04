@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
-import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
+import { createCashflowTestHarness, ledgerDbPath } from "../helpers/cashflow-test-harness.js";
+import { OPERATIONAL_SETTINGS_COLUMNS } from "../../src/server/cashflow-settings-validation.js";
+import { badRequest } from "../../src/server/cashflow-user-utils.js";
 
 async function withHarness(fn, options = {}) {
   const harness = await createCashflowTestHarness(options);
@@ -258,6 +261,50 @@ test("full import ignores operational settings by default and restores them by o
   assert.equal(optInImport.settings.notify_income_missing, 0);
 }));
 
+test("default replace and sample imports preserve target operational settings", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
+  exported.planning.settings[0].future_periods = 3;
+  exported.planning.settings[0].ntfy_url = "https://ntfy.example.com/source";
+  exported.planning.settings[0].auto_backup_enabled = 0;
+  exported.planning.settings[0].backup_retention_count = 3;
+
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      ntfy_url: "https://ntfy.example.com/target",
+      auto_backup_enabled: 1,
+      backup_interval_minutes: 120,
+      backup_retention_count: 7,
+      notification_delivery_time: "09:15",
+      notify_goal_impossible: 0,
+      notify_income_missing: 0,
+      ntfy_priority_goal_impossible: "urgent",
+      ntfy_priority_income_missing: "low",
+      necessary_underfunded_repeat_days: 4
+    }
+  });
+  const target = await harness.api("/api");
+  const expectedOperational = Object.fromEntries(
+    [...OPERATIONAL_SETTINGS_COLUMNS].map(field => [field, target.settings[field]])
+  );
+
+  const replaced = await harness.api("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+  assert.equal(replaced.settings.future_periods, 3);
+  assert.deepEqual(
+    Object.fromEntries([...OPERATIONAL_SETTINGS_COLUMNS].map(field => [field, replaced.settings[field]])),
+    expectedOperational
+  );
+
+  const sample = await harness.api("/api/import/sample", { method: "POST", body: {} });
+  assert.deepEqual(
+    Object.fromEntries([...OPERATIONAL_SETTINGS_COLUMNS].map(field => [field, sample.settings[field]])),
+    expectedOperational
+  );
+}));
+
 test("full replace import validates opted-in operational settings before creating a backup", async () => withHarness(async harness => {
   const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
   exported.planning.settings[0].backup_location = "/outside/allowed/backup-root";
@@ -364,6 +411,33 @@ test("full import accepts older exports missing recent settings fields", async (
   assert.equal(imported.settings.minimum_reserve_amount, 0);
 }));
 
+test("full import accepts older rows that omit current schema-default fields", async () => withHarness(async harness => {
+  const sample = await harness.api("/api/export/sample");
+  delete sample.planning.fx_rates_cache[0].quote_currency;
+  delete sample.planning.recurring_expenses[0].prediction_substitute_missing;
+  delete sample.planning.recurring_expenses[0].prediction_min_recorded_months;
+  delete sample.planning.recurring_expenses[0].necessary;
+  delete sample.planning.recurring_expenses[0].active;
+  delete sample.planning.flex_transactions[0].active;
+  delete sample.planning.flex_transactions[0].allow_split;
+  delete sample.planning.goals[0].active;
+  delete sample.ledgers["2026"][0].ledger_currency;
+
+  const imported = await harness.api("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: sample }
+  });
+
+  assert.equal(imported.recurringExpenses[0].prediction_substitute_missing, "none");
+  assert.equal(imported.recurringExpenses[0].prediction_min_recorded_months, 6);
+  assert.equal(imported.recurringExpenses[0].necessary, 0);
+  assert.equal(imported.recurringExpenses[0].active, 1);
+  assert.equal(imported.flexTransactions[0].active, 1);
+  assert.equal(imported.flexTransactions[0].allow_split, 0);
+  assert.equal(imported.goals[0].active, 1);
+  assert.equal(imported.confirmedTransactions[0].ledger_currency, "PLN");
+}));
+
 test("full merge import appends rows and rejects ID conflicts", async () => {
   let exported;
   let sourceOneOffId;
@@ -421,7 +495,116 @@ test("full merge import appends rows and rejects ID conflicts", async () => {
   }, { userId: "target" });
 });
 
-test("full merge import rolls back planning rows after later import failure", async () => {
+test("full merge conflicts do not create imported ledger files before the safety backup", async () => withHarness(async harness => {
+  const existing = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Existing conflict",
+      currency: "PLN",
+      amount: 25,
+      type: "expense",
+      date: "2026-06-03"
+    }
+  });
+  const sample = await harness.api("/api/export/sample");
+  sample.planning.one_off_transactions[0].id = existing.id;
+  const newLedgerPath = ledgerDbPath(harness.dataDir, harness.userId, "2026");
+  const beforeBackups = backupCount(harness);
+
+  assert.equal(fs.existsSync(newLedgerPath), false);
+  const conflict = await harness.request("/api/import/full", {
+    method: "POST",
+    body: {
+      mode: "merge",
+      export: sample
+    }
+  });
+
+  assert.equal(conflict.response.status, 409);
+  assert.equal(backupCount(harness), beforeBackups);
+  assert.equal(fs.existsSync(newLedgerPath), false);
+}));
+
+test("full merge detects confirmed IDs that already exist in another ledger year", async () => withHarness(async harness => {
+  await createConfirmedLedgerScenario(harness);
+  const exported = await harness.api("/api/export/full");
+  const existingRow = exported.ledgers["2026"][0];
+  delete exported.ledgers["2026"];
+  exported.ledgers["2027"] = [{
+    ...existingRow,
+    date: "2027-06-01",
+    confirmed_date: "2027-06-01"
+  }];
+  const newLedgerPath = ledgerDbPath(harness.dataDir, harness.userId, "2027");
+
+  assert.equal(fs.existsSync(newLedgerPath), false);
+  const conflict = await harness.request("/api/import/full", {
+    method: "POST",
+    body: {
+      mode: "merge",
+      export: exported
+    }
+  });
+
+  assert.equal(conflict.response.status, 409);
+  assert.ok(conflict.body.conflicts.some(item =>
+    item.table === "ledger_2027.confirmed_transactions"
+      && item.id === existingRow.id
+  ));
+  assert.equal(fs.existsSync(newLedgerPath), false);
+}));
+
+test("full merge ignores target settings validation but rejects occurrence-key conflicts", async () => {
+  let sourceExport;
+  await withHarness(async source => {
+    await createConfirmedLedgerScenario(source);
+    sourceExport = await source.api("/api/export/full");
+  }, { userId: "merge-source" });
+
+  await withHarness(async target => {
+    const income = await target.api("/api/recurring-incomes", {
+      method: "POST",
+      body: {
+        name: "Target period income",
+        currency: "PLN",
+        amount: 1000,
+        prediction_strategy: "fixed",
+        active: 1,
+        period_setting: 1,
+        anchor_type: "day_of_month",
+        anchor_day_of_month: 1,
+        anchor_business_day_adjustment: "none",
+        repeat_every_months: 1
+      }
+    });
+    assert.equal((await target.api("/api")).settings.budget_period_income_id, income.id);
+
+    const merged = await target.api("/api/import/full", {
+      method: "POST",
+      body: { mode: "merge", export: sourceExport }
+    });
+    assert.equal(merged.settings.budget_period_income_id, income.id);
+
+    const duplicateOccurrence = structuredClone(sourceExport);
+    for (const row of duplicateOccurrence.planning.one_off_transactions) {
+      row.id = `duplicate-${row.id}`;
+    }
+    for (const row of Object.values(duplicateOccurrence.ledgers).flat()) {
+      row.id = `duplicate-${row.id}`;
+      row.source_one_off_id = null;
+    }
+    const conflict = await target.request("/api/import/full", {
+      method: "POST",
+      body: { mode: "merge", export: duplicateOccurrence }
+    });
+    assert.equal(conflict.response.status, 409);
+    assert.ok(conflict.body.conflicts.some(item =>
+      item.table === "occurrence_keys" && item.reason === "already_exists"
+    ));
+  }, { userId: "merge-target" });
+});
+
+test("full merge import rejects invalid ledger rows before backup or mutation", async () => {
   let exported;
   let rollbackOneOffId;
   await withHarness(async source => {
@@ -482,12 +665,284 @@ test("full merge import rolls back planning rows after later import failure", as
       }
     });
 
-    assert.equal(failed.response.status, 500);
-    assert.equal(backupCount(target), beforeBackups + 1);
+    assert.equal(failed.response.status, 400);
+    assert.equal(backupCount(target), beforeBackups);
     const snapshot = await target.api("/api");
     assert.equal(snapshot.oneOffs.some(row => row.id === existingOneOff.id), true);
     assert.equal(snapshot.oneOffs.some(row => row.id === rollbackOneOffId), false);
   }, { userId: "target" });
+});
+
+test("full import rejects malformed rows before backup or writes", async () => withHarness(async harness => {
+  const oneOff = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Validation baseline",
+      currency: "PLN",
+      amount: 10,
+      type: "expense",
+      date: "2026-06-15"
+    }
+  });
+  const exported = await harness.api("/api/export/full");
+  const beforeBackups = backupCount(harness);
+  const cases = [
+    ["unknown field", candidate => { candidate.planning.one_off_transactions[0].unexpected = true; }, "unknown_field"],
+    ["missing required", candidate => { delete candidate.planning.one_off_transactions[0].name; }, "required"],
+    ["invalid id", candidate => { candidate.planning.one_off_transactions[0].id = "../bad"; }, "invalid_id"],
+    ["whitespace id", candidate => { candidate.planning.one_off_transactions[0].id = ` ${candidate.planning.one_off_transactions[0].id} `; }, "invalid_id"],
+    ["duplicate id", candidate => { candidate.planning.one_off_transactions.push({ ...candidate.planning.one_off_transactions[0] }); }, "duplicate_id"],
+    ["invalid enum", candidate => { candidate.planning.one_off_transactions[0].type = "transfer"; }, "unsupported_value"],
+    ["negative amount", candidate => { candidate.planning.one_off_transactions[0].amount = -1; }, "below_minimum"],
+    ["bad timestamp", candidate => { candidate.planning.one_off_transactions[0].updated_at = "not-a-time"; }, "invalid_timestamp"],
+    ["impossible timestamp", candidate => { candidate.planning.one_off_transactions[0].updated_at = "2026-02-31T00:00:00.000Z"; }, "invalid_timestamp"],
+    ["missing planned owner", candidate => { candidate.planning.planned_transactions.push({
+      id: "orphan-plan",
+      type: "goal",
+      operating_priority: null,
+      goal_priority: 1,
+      created_at: "2026-06-01T00:00:00.000Z",
+      updated_at: "2026-06-01T00:00:00.000Z"
+    }); }, "planned_transaction_has_no_owner"]
+  ];
+
+  for (const [label, mutate, reason] of cases) {
+    const candidate = structuredClone(exported);
+    mutate(candidate);
+    const rejected = await harness.request("/api/import/full", {
+      method: "POST",
+      body: { mode: "replace", export: candidate }
+    });
+    assert.equal(rejected.response.status, 400, label);
+    assert.ok(rejected.body.details.some(item => item.reason === reason), `${label}: ${JSON.stringify(rejected.body)}`);
+  }
+
+  assert.equal(backupCount(harness), beforeBackups);
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.oneOffs.some(row => row.id === oneOff.id), true);
+}));
+
+test("full import validates table-specific values and relationships before backup", async () => withHarness(async harness => {
+  const sample = await harness.api("/api/export/sample");
+  const beforeBackups = backupCount(harness);
+  const timestamp = "2026-06-01T00:00:00.000Z";
+  const pendingRow = {
+    id: "validation-pending",
+    name: "Validation pending",
+    currency: "PLN",
+    amount: 10,
+    type: "expense",
+    date: "2026-06-15",
+    created_at: timestamp,
+    updated_at: timestamp
+  };
+  const cases = [
+    ["duplicate FX key", candidate => {
+      candidate.planning.fx_rates_cache.push({ ...candidate.planning.fx_rates_cache[0] });
+    }, "duplicate_pair_date"],
+    ["invalid FX JSON", candidate => {
+      candidate.planning.fx_rates_cache[0].raw_json = "{";
+    }, "invalid_json"],
+    ["non-string FX JSON", candidate => {
+      candidate.planning.fx_rates_cache[0].raw_json = 1;
+    }, "must_be_json_string"],
+    ["null default currency", candidate => {
+      candidate.planning.fx_rates_cache[0].quote_currency = null;
+    }, "unsupported_currency"],
+    ["invalid boolean", candidate => {
+      candidate.planning.flex_transactions[0].active = 2;
+    }, "must_be_boolean_or_zero_or_one"],
+    ["invalid month", candidate => {
+      candidate.planning.recurring_expenses[0].start_month_year = "2026-13";
+    }, "invalid_month"],
+    ["missing pending source", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        source_one_off_id: "missing-one-off"
+      });
+    }, "source_not_found"],
+    ["pending source type mismatch", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        type: "income",
+        source_goal_id: candidate.planning.goals[0].id
+      });
+    }, "source_type_mismatch"],
+    ["multiple pending sources", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        source_one_off_id: candidate.planning.one_off_transactions[0].id,
+        source_goal_id: candidate.planning.goals[0].id
+      });
+    }, "multiple_sources"],
+    ["negative pending funding", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        funded_amount: -1
+      });
+    }, "below_minimum"],
+    ["non-string pending note", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        note: { invalid: true }
+      });
+    }, "must_be_string"],
+    ["pending-confirmed occurrence collision", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        occurrence_key: candidate.ledgers["2026"][0].occurrence_key
+      });
+    }, "duplicate_occurrence_key"],
+    ["pending-confirmed id collision", candidate => {
+      candidate.planning.pending_transactions.push({
+        ...pendingRow,
+        id: candidate.ledgers["2026"][0].id
+      });
+    }, "duplicate_id"],
+    ["invalid budget period income", candidate => {
+      candidate.planning.settings[0].budget_period_income_id = "missing-period-income";
+    }, "invalid_period_setting_income"],
+    ["malformed budget period income id", candidate => {
+      candidate.planning.settings[0].budget_period_income_id = 0;
+    }, "invalid_id"],
+    ["negative confirmed ledger amount", candidate => {
+      candidate.ledgers["2026"][0].ledger_amount = -1;
+    }, "below_minimum"]
+  ];
+
+  for (const [label, mutate, reason] of cases) {
+    const candidate = structuredClone(sample);
+    mutate(candidate);
+    const rejected = await harness.request("/api/import/full", {
+      method: "POST",
+      body: { mode: "replace", export: candidate }
+    });
+    assert.equal(rejected.response.status, 400, label);
+    assert.ok(rejected.body.details.some(item => item.reason === reason), `${label}: ${JSON.stringify(rejected.body)}`);
+  }
+
+  assert.equal(backupCount(harness), beforeBackups);
+}));
+
+test("full import validates ledger relationships and occurrence uniqueness before backup", async () => withHarness(async harness => {
+  await createConfirmedLedgerScenario(harness);
+  const exported = await harness.api("/api/export/full");
+  const beforeBackups = backupCount(harness);
+  const cases = [
+    ["ledger year mismatch", candidate => {
+      candidate.ledgers["2025"] = candidate.ledgers["2026"];
+      delete candidate.ledgers["2026"];
+    }, "ledger_year_mismatch"],
+    ["multiple historical sources", candidate => {
+      candidate.ledgers["2026"][0].source_goal_id = "historical-goal";
+      candidate.ledgers["2026"][0].source_one_off_id = "historical-oneoff";
+    }, "multiple_sources"],
+    ["duplicate occurrence", candidate => {
+      candidate.ledgers["2026"].push({
+        ...candidate.ledgers["2026"][0],
+        id: "duplicate-occurrence-ledger"
+      });
+    }, "duplicate_occurrence_key"]
+  ];
+
+  for (const [label, mutate, reason] of cases) {
+    const candidate = structuredClone(exported);
+    mutate(candidate);
+    const rejected = await harness.request("/api/import/full", {
+      method: "POST",
+      body: { mode: "replace", export: candidate }
+    });
+    assert.equal(rejected.response.status, 400, label);
+    assert.ok(rejected.body.details.some(item => item.reason === reason), `${label}: ${JSON.stringify(rejected.body)}`);
+  }
+  assert.equal(backupCount(harness), beforeBackups);
+
+  const historical = structuredClone(exported);
+  historical.ledgers["2026"][0].source_one_off_id = "deleted-historical-source";
+  const accepted = await harness.api("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: historical }
+  });
+  assert.equal(accepted.confirmedTransactions[0].source_one_off_id, "deleted-historical-source");
+}));
+
+test("full import inserts each row using its own compatible columns", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full");
+  exported.planning.fx_rates_cache = [
+    {
+      base_currency: "EUR",
+      quote_currency: "PLN",
+      currency: "EUR",
+      rate_date: "2026-06-01",
+      rate: 4.2,
+      effective_date: null,
+      source: "manual",
+      updated_at: "2026-06-01T00:00:00.000Z"
+    },
+    {
+      base_currency: "USD",
+      quote_currency: "PLN",
+      currency: "USD",
+      rate_date: "2026-06-01",
+      rate: 3.9,
+      effective_date: "2026-06-01",
+      source: "manual",
+      raw_json: "{\"second\":true}",
+      updated_at: "2026-06-01T00:00:00.000Z"
+    }
+  ];
+
+  await harness.api("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+  const db = harness.openPlanningDb();
+  try {
+    assert.equal(
+      db.prepare("SELECT raw_json FROM fx_rates_cache WHERE base_currency = 'USD'").get().raw_json,
+      "{\"second\":true}"
+    );
+  } finally {
+    db.close();
+  }
+}));
+
+test("import rollback preserves original validation details and reports rollback failure distinctly", async () => {
+  let exported;
+  await withHarness(async source => {
+    exported = await source.api("/api/export/full");
+  }, { userId: "rollback-source" });
+
+  let failRollback = false;
+  await withHarness(async target => {
+    const original = await target.request("/api/import/full", {
+      method: "POST",
+      body: { mode: "replace", export: exported }
+    });
+    assert.equal(original.response.status, 400);
+    assert.ok(original.body.details.some(item => item.field === "forced"));
+
+    failRollback = true;
+    const rollbackFailed = await target.request("/api/import/full", {
+      method: "POST",
+      body: { mode: "replace", export: exported }
+    });
+    assert.equal(rollbackFailed.response.status, 500);
+    assert.equal(rollbackFailed.body.details.phase, "rollback_failed");
+    assert.equal(typeof rollbackFailed.body.details.safetyBackup, "string");
+    assert.match(rollbackFailed.body.details.originalError, /forced import failure/);
+    assert.match(rollbackFailed.body.details.rollbackError, /forced rollback failure/);
+  }, {
+    userId: "rollback-target",
+    portabilityMutationHook: ({ phase }) => {
+      if (phase === "after_replace_planning") {
+        throw badRequest("forced import failure", [{ field: "forced", reason: "test" }]);
+      }
+      if (failRollback && phase === "before_replace_rollback") {
+        throw new Error("forced rollback failure");
+      }
+    }
+  });
 });
 
 test("CSV one-off import appends and replaces unconfirmed one-offs", async () => withHarness(async harness => {

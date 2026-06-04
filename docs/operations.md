@@ -59,6 +59,12 @@ curl -X POST \
   https://cashflow.example.com/api/backup
 ```
 
+Cashflow first writes the database copies into a temporary folder, validates the
+complete set, and atomically renames it to the final backup folder. Successful
+metadata is recorded only after finalization. A failed attempt removes temporary
+or partial folders and records failed metadata when the planning database is
+still writable.
+
 The response returns the created path and records a backup ID in the profile's
 `backup_metadata`. There is currently no public backup-list endpoint, so the
 restore API is intended for controlled administrative tooling that already has
@@ -67,10 +73,32 @@ the metadata ID.
 `POST /api/restore/:backupId` validates the stored backup, creates another
 safety backup, restores planning and ledger rows, recalculates ledger running
 balances, and regenerates projections. If restore fails, Cashflow attempts to
-roll back from the safety backup.
+roll back from the safety backup. Missing metadata or a missing backup folder
+returns `404`. A corrupt backup returns `400` before a safety backup is created.
+If rollback also fails, the `500` response includes the safety-backup path and
+separate original and rollback error messages for operator recovery.
 
 App-level backups protect one profile and support import/restore safety. They do
 not replace an external backup of the full data volume.
+
+### Automatic Retention
+
+Retention cleanup is best-effort and does not fail an otherwise successful
+backup, import, restore, projection, or notification operation. It runs after
+completed backups and safety operations, after migration recovery completion,
+and during the daily `03:30` per-profile maintenance tick.
+
+| Data | Retained |
+| --- | --- |
+| App backup folders | `settings.backup_retention_count` newest |
+| Projection snapshots | 100 newest |
+| Event log rows | 2,000 newest |
+| Sent notification rows | 1,000 newest; unsent rows are never removed |
+| Failed backup metadata | 100 newest |
+| Successful backup metadata | Existing retained backup folders only |
+| Completed migration recoveries | 2 newest |
+| Pending migration recoveries | Never removed automatically |
+| Temporary backup/recovery folders | Removed after 24 hours |
 
 ## Production Compose
 
@@ -163,7 +191,7 @@ Cashflow checks background work once per minute using each profile's timezone:
 - midnight: move due future rows to pending and queue daily notifications
 - `08:00`: refresh FX for the profile
 - configured notification delivery time: send queued ntfy notifications
-- `03:30`: evaluate automatic backup settings
+- `03:30`: evaluate automatic backup settings and run retention cleanup
 
 A still-running tick causes the next tick to be skipped. A failure for one
 profile is logged and does not stop later profiles. See
@@ -194,10 +222,25 @@ Full JSON import supports:
   conflicts, recalculates ledger balances, regenerates projections, and rolls
   back on failure
 
-Full import ignores operational settings by default, even when the export file
-contains them. Enable **Include operational settings** during import only when
-restoring into the same trusted deployment or intentionally copying those
-settings.
+Full replace import ignores imported operational settings by default and
+preserves the target profile's current backup, notification, ntfy, and retention
+settings exactly. Enable **Include operational settings** during import only
+when restoring into the same trusted deployment or intentionally copying those
+settings. Merge imports ignore all settings. Loading the sample dataset also
+preserves the target profile's operational settings.
+
+Before creating a safety backup, full import strictly validates every planning
+and ledger row. It rejects unknown fields, missing required values, invalid IDs,
+enums, numbers, rates, dates, timestamps, JSON, broken ownership/source
+relationships, ledger-year mismatches, and duplicate occurrence keys. Validation
+errors identify the table, row, ID, field, and reason without echoing imported
+values.
+
+If a failure occurs after mutation starts, Cashflow restores the safety backup.
+When rollback succeeds, the original error status and details are preserved.
+When rollback also fails, the response is `500` and includes
+`phase: "rollback_failed"`, the safety-backup path, and separate original and
+rollback error messages. Preserve that safety backup for manual recovery.
 
 Full import also accepts older export files that do not contain newer setup,
 holiday-country, or reserve fields. Cashflow fills current defaults and marks
@@ -217,7 +260,8 @@ wrong column counts, and impossible dates are rejected.
 Confirmed ledger CSV export downloads all confirmed rows across ledger years.
 
 The sample dataset is fictitious demo data. Downloading it does not change user
-data. Loading it replaces the current user data after a safety backup.
+data. Loading it replaces the current functional data after a safety backup and
+preserves the profile's operational settings.
 
 Large full imports use the server JSON request limit. The default is `10mb`; set
 `CASHFLOW_JSON_LIMIT` when your deployment needs a larger limit.
@@ -253,7 +297,8 @@ The snapshot includes `planning.sqlite`, every yearly ledger database, and a
 manifest describing the source and target schema versions. Migration stops
 without changing the database if this recovery snapshot cannot be created.
 Keep these `migration_backup_*` folders until the upgraded profile has been
-verified.
+verified. Cashflow retains the newest two completed migration recoveries and
+never automatically removes pending recovery folders.
 
 Live verification should use an isolated profile, not `local`. For example:
 

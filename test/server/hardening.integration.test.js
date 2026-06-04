@@ -511,6 +511,32 @@ test("background tick isolates one user's timeout and continues with later users
   ));
 });
 
+test("daily maintenance runs retention even when automatic backup is disabled", async () => {
+  const cleaned = [];
+  const jobs = createCashflowBackgroundJobs({
+    cleanupOperationalData: (userId, reason) => cleaned.push({ userId, reason }),
+    getSettings: () => ({
+      timezone: "UTC",
+      auto_backup_enabled: 0,
+      notification_delivery_time: "12:00"
+    }),
+    listCashflowUserIds: () => ["local"],
+    logError: () => {},
+    logServerEvent: () => {},
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: () => 0,
+    now: () => new Date("2026-06-03T03:30:00.000Z"),
+    queueDailyPendingSummary: () => 0,
+    queueMissingIncomeNotifications: () => 0,
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async () => ({ updated_count: 0 }),
+    sendQueuedNotifications: async () => 0
+  });
+
+  await jobs.tickPerUserJobs();
+  assert.deepEqual(cleaned, [{ userId: "local", reason: "daily_maintenance" }]);
+});
+
 test("failed user creation removes global metadata so retry is not blocked", async () => {
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-global-test-"));
   const dataDir = path.join(runtimeRoot, "data");

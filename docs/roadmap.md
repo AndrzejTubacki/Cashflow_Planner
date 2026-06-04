@@ -39,3 +39,11 @@ work should improve account security, planning depth, and day-to-day usability.
 - Better mobile workflows for confirming and reviewing transactions.
 - More accessible keyboard and screen-reader interactions.
 - Screenshots and examples once the interface stabilizes.
+
+
+## ignore below::
+
+generate release notes between version 0.2.0 and now
+
+
+currently we have multiple budgets, not so much multiple users. make a plan to have user accounts that can have multiple budgets and invite other users to budgets they control. Allow changing the budget and user(for users only in admin) names, implement ui budget manager, add admin configureable auth with options for none (current model), external (document how to wire it up with sso, reverse proxy etc) and internal. If internal is selected, add options to configure external identity providers (google, github, fb, etc). Keep user credentials security and access control in mind. Make a plan for how to give admin perms to the 1st user on first setup and stop giving it to all users. Put it into todo.md as a coherent step-by-step plan on what to do in what order
