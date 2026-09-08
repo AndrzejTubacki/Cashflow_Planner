@@ -2,6 +2,31 @@ export function normalizeCurrency(currency) {
   return String(currency || "PLN").trim().toUpperCase() || "PLN";
 }
 
+export const MONEY_DECIMAL_PLACES = 2;
+export const MONEY_SCALE = 10 ** MONEY_DECIMAL_PLACES;
+export const MONEY_EPSILON = 1 / MONEY_SCALE / 2;
+const MONEY_ROUNDING_EPSILON = 1e-8;
+
+export function roundMoneyAmount(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return number;
+
+  const rounded = Math.sign(number) * Math.round((Math.abs(number) * MONEY_SCALE) + MONEY_ROUNDING_EPSILON) / MONEY_SCALE;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+export function addMoneyAmounts(...values) {
+  return roundMoneyAmount(values.reduce((sum, value) => sum + Number(value || 0), 0));
+}
+
+export function subtractMoneyAmounts(value, ...subtractValues) {
+  return roundMoneyAmount(Number(value || 0) - subtractValues.reduce((sum, item) => sum + Number(item || 0), 0));
+}
+
+export function multiplyMoney(value, multiplier) {
+  return roundMoneyAmount(Number(value || 0) * Number(multiplier || 0));
+}
+
 function pairKey(base, quote) {
   return `${normalizeCurrency(base).toLowerCase()}/${normalizeCurrency(quote).toLowerCase()}`;
 }
@@ -125,7 +150,7 @@ export function nullablePositiveAmount(value) {
     return null;
   }
 
-  return n;
+  return roundMoneyAmount(n);
 }
 
 export function toLedgerAmount(amount, currency, settings, fxSnapshot, type) {
@@ -139,6 +164,6 @@ export function toLedgerAmount(amount, currency, settings, fxSnapshot, type) {
   return {
     rawRate: rates.fx,
     effectiveRate: rates.buffered,
-    ledgerAmount: Number(amount || 0) * rates.buffered
+    ledgerAmount: multiplyMoney(amount, rates.buffered)
   };
 }

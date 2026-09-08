@@ -9,12 +9,19 @@
     "test:node": "node --test \"test/**/*.test.js\" \"test/**/*.integration.test.js\"",
     "test:browser": "node scripts/browser-smoke.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "smoke:browser": "npm run test:browser"
+    "smoke:browser": "npm run test:browser",
+    "rollout:check": "node scripts/rollout-check.mjs",
+    "docs:screenshots": "node scripts/generate-readme-screenshots.mjs",
+    "operator:grant-admin": "node scripts/operator-admin.mjs"
   },
   "dependencies": {
+    "argon2": "^0.44.0",
     "better-sqlite3": "^10.1.0",
     "dotenv": "^17.4.2",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.5.2",
+    "helmet": "^8.2.0",
+    "openid-client": "^6.8.4"
   },
   "devDependencies": {
     "playwright": "^1.60.0"

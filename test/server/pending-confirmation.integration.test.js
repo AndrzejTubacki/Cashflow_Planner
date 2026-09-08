@@ -173,16 +173,18 @@ test("editing a period-setting pending income date keeps the original source occ
     method: "PUT",
     body: {
       date: "2026-05-28",
-      amount: 110
+      amount: "110,00"
     }
   });
   assert.equal(edited.date, "2026-05-28");
   assert.equal(edited.occurrence_key, future.occurrence_key);
 
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.pendingTransactions.find(tx => tx.id === pending.id).amount, 110);
+
   await harness.api(`/api/pending/${encodeURIComponent(pending.id)}/confirm`, {
     method: "POST",
     body: {
-      amount: 110,
       confirmed_date: "2026-05-28"
     }
   });
@@ -197,8 +199,191 @@ test("editing a period-setting pending income date keeps the original source occ
 
   const confirmed = snapshot.confirmedTransactions.find(tx => tx.id === pending.id);
   assert.ok(confirmed);
+  assert.equal(confirmed.amount, 110);
   assert.equal(confirmed.date, "2026-05-28");
   assert.equal(confirmed.occurrence_key, future.occurrence_key);
+}));
+
+test("editing a pending transaction regenerates future rows without deleting pending rows", async () => withHarness(async harness => {
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      future_periods: 2,
+      fx_provider: "manual",
+      manual_fx_rates: {},
+      fx_buffer_percent: 0
+    }
+  });
+
+  const income = await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "June income",
+      currency: "PLN",
+      amount: 1000,
+      type: "income",
+      date: "2026-06-01"
+    }
+  });
+  const goal = await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "June goal",
+      currency: "PLN",
+      amount: 800,
+      active: 1,
+      priority: 1,
+      due_date: "2026-06-30"
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const incomeFuture = snapshot.futureTransactions.find(tx => tx.source_one_off_id === income.id);
+  assert.ok(incomeFuture);
+  assert.ok(snapshot.futureTransactions.some(tx =>
+    tx.source_goal_id === goal.id && tx.ledger_amount === 800
+  ));
+
+  await harness.api(`/api/future/${encodeURIComponent(incomeFuture.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: incomeFuture.occurrence_key }
+  });
+
+  snapshot = await harness.api("/api");
+  const pending = snapshot.pendingTransactions.find(tx => tx.source_one_off_id === income.id);
+  assert.ok(pending);
+
+  const edited = await harness.api(`/api/pending/${encodeURIComponent(pending.id)}`, {
+    method: "PUT",
+    body: {
+      amount: "500,00"
+    }
+  });
+
+  assert.equal(edited.amount, 500);
+  assert.equal(edited._projection.projection_ok, true);
+
+  snapshot = await harness.api("/api");
+  const pendingAfterEdit = snapshot.pendingTransactions.filter(tx => tx.source_one_off_id === income.id);
+  assert.equal(pendingAfterEdit.length, 1);
+  assert.equal(pendingAfterEdit[0].id, pending.id);
+  assert.equal(pendingAfterEdit[0].amount, 500);
+  assert.ok(snapshot.futureTransactions.some(tx =>
+    tx.source_goal_id === goal.id && tx.ledger_amount === 500 && tx.status === "partial"
+  ));
+  assert.equal(snapshot.futureTransactions.some(tx => tx.source_one_off_id === income.id), false);
+}));
+
+test("ordinary regeneration preserves pending edits for recurring, goal, and flex sources", async () => withHarness(async harness => {
+  await harness.api("/api/settings", {
+    method: "PUT",
+    body: {
+      future_periods: 3,
+      fx_provider: "manual",
+      manual_fx_rates: {},
+      fx_buffer_percent: 0
+    }
+  });
+
+  insertPending(harness, {
+    id: "pending-edit-seed-income",
+    name: "Seed income",
+    type: "income",
+    amount: 2000,
+    date: "2026-05-20",
+    occurrenceKey: "pending-edit-seed-income"
+  });
+  await harness.api("/api/pending/pending-edit-seed-income/confirm", {
+    method: "POST",
+    body: { confirmed_date: "2026-05-20" }
+  });
+
+  const expense = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Edited recurring expense",
+      currency: "PLN",
+      amount: 100,
+      prediction_strategy: "fixed",
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      repeat_every_months: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      anchor_business_day_adjustment: "none"
+    }
+  });
+  const goal = await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Edited goal allocation",
+      currency: "PLN",
+      amount: 300,
+      active: 1,
+      priority: 1,
+      due_date: "2026-06-30"
+    }
+  });
+  const flex = await harness.api("/api/flex", {
+    method: "POST",
+    body: {
+      name: "Edited flex allocation",
+      currency: "PLN",
+      amount: 200,
+      active: 1,
+      priority: 2,
+      allow_split: 0
+    }
+  });
+
+  const edits = [
+    { source: "source_recurring_expense_id", id: expense.id, amount: 80 },
+    { source: "source_goal_id", id: goal.id, amount: 70 },
+    { source: "source_flex_id", id: flex.id, amount: 60 }
+  ];
+  const editedOccurrences = new Map();
+
+  for (const edit of edits) {
+    let snapshot = await harness.api("/api");
+    const future = snapshot.futureTransactions.find(tx => tx[edit.source] === edit.id);
+    assert.ok(future, `${edit.source} future row`);
+    const moved = await harness.api(`/api/future/${encodeURIComponent(future.id)}/move-to-pending`, {
+      method: "POST",
+      body: { occurrenceKey: future.occurrence_key }
+    });
+    const pending = moved.pendingTransactions.find(tx => tx.occurrence_key === future.occurrence_key);
+    assert.ok(pending);
+    await harness.api(`/api/pending/${encodeURIComponent(pending.id)}`, {
+      method: "PUT",
+      body: { amount: String(edit.amount).replace(".", ",") }
+    });
+    editedOccurrences.set(edit.source, {
+      amount: edit.amount,
+      id: pending.id,
+      occurrenceKey: future.occurrence_key
+    });
+  }
+
+  await harness.api("/api/run-jobs", { method: "POST", body: {} });
+  let snapshot = await harness.api("/api");
+  for (const edit of edits) {
+    const expected = editedOccurrences.get(edit.source);
+    assert.equal(snapshot.pendingTransactions.find(tx => tx.id === expected.id).amount, expected.amount);
+  }
+
+  const recurringEdit = editedOccurrences.get("source_recurring_expense_id");
+  await harness.api(`/api/pending/${encodeURIComponent(recurringEdit.id)}/confirm`, {
+    method: "POST",
+    body: { confirmed_date: "2026-05-25" }
+  });
+  snapshot = await harness.api("/api");
+  assert.equal(snapshot.confirmedTransactions.find(tx => tx.id === recurringEdit.id).amount, 80);
+  assert.equal(snapshot.pendingTransactions.some(tx => tx.occurrence_key === recurringEdit.occurrenceKey), false);
+  assert.equal(snapshot.futureTransactions.some(tx => tx.occurrence_key === recurringEdit.occurrenceKey), false);
+  assert.ok(snapshot.futureTransactions.some(tx =>
+    tx.source_recurring_expense_id === expense.id && tx.amount === 100
+  ));
 }));
 
 test("confirming pending rows deletes pending rows and recalculates ledger balances across years", async () => withHarness(async harness => {

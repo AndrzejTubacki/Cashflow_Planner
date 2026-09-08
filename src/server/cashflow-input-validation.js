@@ -1,4 +1,5 @@
 import { badRequest } from "./cashflow-user-utils.js";
+import { roundMoneyAmount } from "./cashflow-money-utils.js";
 
 export function validationError(field, reason, message) {
   throw badRequest(message, [{ field, reason }]);
@@ -30,7 +31,16 @@ export function requireNumber(value, field, { min = null, max = null, integer = 
     validationError(field, "required", `${field} must be a number`);
   }
 
-  const number = Number(value);
+  const normalizedValue = typeof value === "string"
+    ? (() => {
+        const trimmed = value.trim();
+        if (!/^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
+          validationError(field, "must_be_finite_number", `${field} must be a finite number`);
+        }
+        return trimmed.replace(",", ".");
+      })()
+    : value;
+  const number = Number(normalizedValue);
   if (!Number.isFinite(number)) {
     validationError(field, "must_be_finite_number", `${field} must be a finite number`);
   }
@@ -50,6 +60,15 @@ export function requireNumber(value, field, { min = null, max = null, integer = 
 export function requireNullableNumber(value, field, options = {}) {
   if (value === null) return null;
   return requireNumber(value, field, options);
+}
+
+export function requireMoneyAmount(value, field, options = {}) {
+  return roundMoneyAmount(requireNumber(value, field, options));
+}
+
+export function requireNullableMoneyAmount(value, field, options = {}) {
+  if (value === null || value === "") return null;
+  return requireMoneyAmount(value, field, options);
 }
 
 export function requireEnum(value, field, allowed) {

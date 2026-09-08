@@ -3,14 +3,18 @@ info:
   title: Cashflow API
   version: 0.3.0
   description: |
-    Published HTTP contract for Cashflow. Cashflow does not currently implement
-    authentication. The x-cashflow-user-id header selects a planner profile and
-    must not be treated as proof of identity.
+    Published HTTP contract for Cashflow. In none mode, account selection is
+    compatibility behavior and not proof of identity. Internal mode uses
+    email/password login and server-side sessions. The x-cashflow-budget-id
+    header selects a requested budget and must not be treated as proof of
+    identity. The deprecated x-cashflow-user-id header remains a none-mode
+    budget alias for one compatibility release.
 servers:
   - url: http://localhost:3000
 tags:
   - name: System
   - name: Profiles
+  - name: Auth
   - name: Admin
   - name: Setup
   - name: Snapshot
@@ -33,6 +37,19 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Check cheap runtime readiness
+      tags: [System]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "503":
+          $ref: "#/components/responses/JsonError"
   /api/system:
     get:
       operationId: getSystem
@@ -71,6 +88,194 @@ paths:
           $ref: "#/components/responses/ApiError"
         "409":
           $ref: "#/components/responses/ApiError"
+  /api/accounts:
+    get:
+      operationId: listAccounts
+      summary: List selectable accounts in none mode
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+    post:
+      operationId: createAccount
+      summary: Create an account and first budget in none mode
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/CreateUser"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/accounts/{accountId}/budgets:
+    get:
+      operationId: listAccountBudgets
+      summary: List budgets available to the selected account
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/config:
+    get:
+      operationId: getPublicAuthConfig
+      summary: Read safe public authentication mode configuration
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+  /api/auth/internal/password:
+    post:
+      operationId: completeInternalPasswordSetup
+      summary: Consume a one-time password setup or reset token
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/InternalPasswordSetup"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/external/login:
+    post:
+      operationId: loginExternal
+      summary: Log in from trusted reverse-proxy identity headers
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/internal/login:
+    post:
+      operationId: loginInternal
+      summary: Log in with internal email/password credentials
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/InternalLogin"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/internal/register:
+    post:
+      operationId: registerInternal
+      summary: Register an internal account from an email budget invitation
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/InternalRegister"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/providers/{providerId}/login/start:
+    post:
+      operationId: startAuthProviderLogin
+      summary: Start internal-mode login through a configured identity provider
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/ProviderId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/providers/{providerId}/link/start:
+    post:
+      operationId: startAuthProviderLink
+      summary: Start explicit identity-provider linking for the signed-in account
+      tags: [Auth]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/ProviderId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/auth/providers/{providerId}/callback:
+    get:
+      operationId: completeAuthProviderCallback
+      summary: Complete a configured identity-provider authorization-code callback
+      tags: [Auth]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/ProviderId"
+      responses:
+        "302":
+          description: Redirects back to the browser app after issuing a session cookie.
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
   /api/session:
     get:
       operationId: getSession
@@ -80,7 +285,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -103,6 +308,25 @@ paths:
           $ref: "#/components/responses/ApiError"
         "404":
           $ref: "#/components/responses/ApiError"
+  /api/session/select-account:
+    post:
+      operationId: selectAccount
+      summary: Create a none-mode account session before budget selection
+      tags: [Profiles]
+      x-cashflow-scope: global-unscoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/SelectAccount"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
   /api/logout:
     post:
       operationId: logout
@@ -114,6 +338,306 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
+  /api/budgets:
+    get:
+      operationId: listBudgets
+      summary: List budgets available to the current account session
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "401":
+          $ref: "#/components/responses/ApiError"
+    post:
+      operationId: createBudget
+      summary: Create a new budget owned by the current account
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/CreateBudget"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "401":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/select:
+    post:
+      operationId: selectBudget
+      summary: Select a budget for the current account session
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "401":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}:
+    put:
+      operationId: renameBudget
+      summary: Rename a budget without changing its storage key
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      requestBody:
+        $ref: "#/components/requestBodies/CreateBudget"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: purgeBudget
+      summary: Permanently purge an archived budget after safety export
+      description: >
+        Writes a deleted-budget recovery export for planner data before removing
+        the budget storage. The export excludes operational/private settings,
+        memberships, invitations, sessions, credentials, and global roles.
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/archive:
+    post:
+      operationId: archiveBudget
+      summary: Archive an active budget
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/export:
+    get:
+      operationId: exportBudgetBeforeDelete
+      summary: Download a full export for a specific budget
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: true
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonDownload"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/restore:
+    post:
+      operationId: restoreBudgetMetadata
+      summary: Restore an archived budget metadata record
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/members:
+    get:
+      operationId: listBudgetMembers
+      summary: List members of a budget
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/members/{accountId}:
+    put:
+      operationId: updateBudgetMemberRole
+      summary: Change a budget member role
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        $ref: "#/components/requestBodies/MemberRole"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: removeBudgetMember
+      summary: Remove a non-owner budget member
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/leave:
+    post:
+      operationId: leaveBudget
+      summary: Leave a budget as a non-owner member
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/transfer-ownership:
+    post:
+      operationId: transferBudgetOwnership
+      summary: Transfer budget ownership to another member
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      requestBody:
+        $ref: "#/components/requestBodies/TransferOwnership"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/invitations:
+    get:
+      operationId: listBudgetInvitations
+      summary: List budget invitations
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+    post:
+      operationId: createBudgetInvitation
+      summary: Create an expiring single-use budget invitation
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+      requestBody:
+        $ref: "#/components/requestBodies/BudgetInvitation"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/budgets/{budgetId}/invitations/{invitationId}:
+    delete:
+      operationId: revokeBudgetInvitation
+      summary: Revoke a pending budget invitation
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/PathBudgetId"
+        - $ref: "#/components/parameters/InvitationId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/invitations/accept:
+    post:
+      operationId: acceptBudgetInvitation
+      summary: Accept a budget invitation token
+      tags: [Profiles]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      requestBody:
+        $ref: "#/components/requestBodies/AcceptInvitation"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
   /api/admin/options:
     get:
       operationId: getAdminOptions
@@ -123,7 +647,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -137,7 +661,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/AdminOptions"
       responses:
@@ -146,6 +670,305 @@ paths:
         "400":
           $ref: "#/components/responses/ApiError"
         "403":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts:
+    get:
+      operationId: listAdminAccounts
+      summary: List accounts for system administrator management
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts/{accountId}:
+    put:
+      operationId: updateAdminAccount
+      summary: Rename or enable/disable an account
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminAccountUpdate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteAdminAccount
+      summary: Mark an account deleted after ownership and membership cleanup
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts/{accountId}/system-admin:
+    put:
+      operationId: setAdminAccountSystemAdmin
+      summary: Grant or revoke the system administrator role
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminAccountSystemAdmin"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts/{accountId}/password-reset-token:
+    post:
+      operationId: createAdminPasswordResetToken
+      summary: Create a one-time internal password setup or reset token
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminPasswordToken"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts/{accountId}/external-identity:
+    put:
+      operationId: setAdminExternalIdentity
+      summary: Link a stable external subject to an account
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminExternalIdentity"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts/{accountId}/provider-identities/{providerId}:
+    put:
+      operationId: setAdminProviderIdentity
+      summary: Explicitly link a provider subject to an account
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ProviderId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminExternalIdentity"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+        "409":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/accounts/{accountId}/sessions/{sessionId}/revoke:
+    post:
+      operationId: revokeAdminAccountSession
+      summary: Revoke one active account session
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/auth:
+    get:
+      operationId: getAdminAuthConfig
+      summary: Read staged and active authentication configuration
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/auth/providers:
+    get:
+      operationId: listAdminAuthProviders
+      summary: List configured internal-mode identity providers
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/auth/providers/{providerId}:
+    put:
+      operationId: upsertAdminAuthProvider
+      summary: Create or update an internal-mode identity provider
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/ProviderId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminAuthProvider"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: deleteAdminAuthProvider
+      summary: Delete an internal-mode identity provider
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/ProviderId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/auth/draft:
+    put:
+      operationId: updateAdminAuthDraft
+      summary: Save a staged authentication configuration draft
+      description: |
+        Internal mode can activate after a usable system-administrator password
+        credential or configured provider identity exists. External trusted-header
+        mode can activate after a configured assertion secret and admin identity
+        link exist. Inline secrets are rejected.
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+      requestBody:
+        $ref: "#/components/requestBodies/AdminAuthDraft"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/auth/test:
+    post:
+      operationId: testAdminAuthDraft
+      summary: Validate whether the staged authentication configuration is safe to activate
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+  /api/admin/auth/activate:
+    post:
+      operationId: activateAdminAuthDraft
+      summary: Activate the staged authentication configuration when safe
+      tags: [Admin]
+      x-cashflow-scope: admin-global
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "403":
+          $ref: "#/components/responses/ApiError"
+        "409":
           $ref: "#/components/responses/ApiError"
   /api/setup:
     post:
@@ -156,7 +979,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/Setup"
       responses:
@@ -175,7 +998,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -201,7 +1024,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/OptionalDate"
       responses:
@@ -220,7 +1043,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/OptionalDate"
       responses:
@@ -239,7 +1062,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/OptionalDate"
       responses:
@@ -258,7 +1081,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Currency"
       responses:
         "200":
@@ -276,7 +1099,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Currency"
         - $ref: "#/components/parameters/Date"
       responses:
@@ -296,7 +1119,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/BaseCurrency"
         - $ref: "#/components/parameters/QuoteCurrency"
         - $ref: "#/components/parameters/DateQuery"
@@ -317,7 +1140,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/BaseCurrency"
         - $ref: "#/components/parameters/QuoteCurrency"
         - $ref: "#/components/parameters/Date"
@@ -337,7 +1160,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/DateQuery"
       responses:
         "200":
@@ -355,7 +1178,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/Settings"
       responses:
@@ -369,6 +1192,73 @@ paths:
           $ref: "#/components/responses/ApiError"
         "504":
           $ref: "#/components/responses/ApiError"
+  /api/ledger/confirmed:
+    get:
+      operationId: listConfirmedLedgerRows
+      summary: List confirmed ledger rows with pagination and filters
+      tags: [Ledger]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: false
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: year
+          in: query
+          schema:
+            type: string
+            pattern: "^\\d{4}$"
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [income, expense]
+        - name: currency
+          in: query
+          schema:
+            type: string
+        - name: ledger_currency
+          in: query
+          schema:
+            type: string
+        - name: date_from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: date_to
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: source_type
+          in: query
+          schema:
+            type: string
+            enum: [recurring_expense, recurring_income, one_off, flex, goal]
+        - name: source_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
   /api/pending/{id}:
     put:
       operationId: updatePending
@@ -378,10 +1268,28 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/PendingUpdate"
+      responses:
+        "200":
+          $ref: "#/components/responses/JsonSuccess"
+        "400":
+          $ref: "#/components/responses/ApiError"
+        "404":
+          $ref: "#/components/responses/ApiError"
+    delete:
+      operationId: dismissPendingOneOffRemainder
+      summary: Dismiss a generated one-off remainder
+      description: Reduces the source one-off target to the already confirmed total and removes its generated remainder rows.
+      tags: [Ledger]
+      x-cashflow-scope: user-scoped
+      x-cashflow-mutating: true
+      x-cashflow-download-only: false
+      parameters:
+        - $ref: "#/components/parameters/BudgetId"
+        - $ref: "#/components/parameters/Id"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -398,7 +1306,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/PendingConfirm"
@@ -418,7 +1326,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/OptionalDate"
       responses:
@@ -435,7 +1343,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/MoveFuture"
@@ -455,7 +1363,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/RecurringExpense"
       responses:
@@ -472,7 +1380,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/RecurringExpense"
@@ -491,7 +1399,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
@@ -507,7 +1415,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/RecurringIncome"
       responses:
@@ -524,7 +1432,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/RecurringIncome"
@@ -543,7 +1451,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
@@ -559,7 +1467,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/Goal"
       responses:
@@ -576,7 +1484,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/Goal"
@@ -595,7 +1503,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
@@ -611,7 +1519,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/Flex"
       responses:
@@ -628,7 +1536,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/Flex"
@@ -647,7 +1555,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
@@ -663,7 +1571,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/OneOff"
       responses:
@@ -680,7 +1588,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       requestBody:
         $ref: "#/components/requestBodies/OneOff"
@@ -699,7 +1607,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
@@ -715,7 +1623,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/OptionalDate"
       responses:
@@ -738,7 +1646,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -755,7 +1663,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: true
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - name: includeOperationalSettings
           in: query
           description: Include private deployment settings when set to 1 or true.
@@ -781,7 +1689,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/FullImport"
       responses:
@@ -802,7 +1710,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       requestBody:
         $ref: "#/components/requestBodies/CsvImport"
       responses:
@@ -819,7 +1727,7 @@ paths:
       x-cashflow-mutating: false
       x-cashflow-download-only: true
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/CsvDownload"
@@ -846,7 +1754,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -865,7 +1773,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
       responses:
         "200":
           $ref: "#/components/responses/JsonSuccess"
@@ -884,7 +1792,7 @@ paths:
       x-cashflow-mutating: true
       x-cashflow-download-only: false
       parameters:
-        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/BudgetId"
         - $ref: "#/components/parameters/BackupId"
       responses:
         "200":
@@ -899,14 +1807,43 @@ paths:
           $ref: "#/components/responses/ApiError"
 components:
   parameters:
-    UserId:
-      name: x-cashflow-user-id
+    BudgetId:
+      name: x-cashflow-budget-id
       in: header
       required: false
-      description: Selects a planner profile. When omitted, routes use local. This is not an authentication credential.
+      description: Selects a requested budget. When omitted, compatibility routes use local. This is not an authentication credential.
       schema:
         type: string
         pattern: "^[A-Za-z0-9_-]{1,64}$"
+    LegacyUserId:
+      name: x-cashflow-user-id
+      in: header
+      required: false
+      deprecated: true
+      description: Deprecated none-mode alias for x-cashflow-budget-id. Responses include deprecation headers.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,64}$"
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,64}$"
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^[a-z0-9][a-z0-9_-]{0,79}$"
     Id:
       name: id
       in: path
@@ -961,6 +1898,221 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/AdminOptionsUpdate"
+    AdminAccountUpdate:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              displayName:
+                type: string
+              email:
+                type: string
+                format: email
+                minLength: 1
+                maxLength: 120
+              email:
+                type: string
+                format: email
+              status:
+                type: string
+                enum: [active, disabled]
+    AdminPasswordToken:
+      required: false
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              purpose:
+                type: string
+                enum: [password_setup, password_reset]
+              email:
+                type: string
+                format: email
+    AdminExternalIdentity:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [subject]
+            properties:
+              subject:
+                type: string
+                minLength: 1
+                maxLength: 512
+              email:
+                type: string
+                format: email
+              emailVerified:
+                type: boolean
+    AdminAccountSystemAdmin:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [enabled]
+            properties:
+              enabled:
+                type: boolean
+    AdminAuthDraft:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              draftMode:
+                type: string
+                enum: [none, external, internal]
+              sessionIdleMinutes:
+                type: integer
+                minimum: 5
+                maximum: 10080
+              sessionAbsoluteMinutes:
+                type: integer
+                minimum: 5
+                maximum: 43200
+              draftConfig:
+                type: object
+                additionalProperties: false
+                properties:
+                  external:
+                    type: object
+                    properties:
+                      subjectHeader:
+                        type: string
+                      assertionSecretHeader:
+                        type: string
+                      assertionSecretEnv:
+                        type: string
+                      emailHeader:
+                        type: string
+                      displayNameHeader:
+                        type: string
+                      groupsHeader:
+                        type: string
+                      trustedIssuer:
+                        type: string
+                      provisioningMode:
+                        type: string
+                        enum: [deny_unknown, allow_invited, allow_any]
+                      allowedDomains:
+                        oneOf:
+                          - type: string
+                          - type: array
+                            items:
+                              type: string
+                      adminGroups:
+                        oneOf:
+                          - type: string
+                          - type: array
+                            items:
+                              type: string
+                  internal:
+                    type: object
+                    properties:
+                      allowPasswordLogin:
+                        type: boolean
+    AdminAuthProvider:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              kind:
+                type: string
+                enum: [oidc, google, github, facebook]
+              displayName:
+                type: string
+                minLength: 1
+                maxLength: 120
+              enabled:
+                type: boolean
+              issuer:
+                type: string
+                format: uri
+              clientId:
+                type: string
+              secretEnv:
+                type: string
+                description: Environment variable name containing the client secret.
+              secretFile:
+                type: string
+                description: Absolute file path containing the client secret.
+              clearSecret:
+                type: boolean
+              redirectUri:
+                type: string
+                format: uri
+              scope:
+                type: string
+              authorizationEndpoint:
+                type: string
+                format: uri
+              tokenEndpoint:
+                type: string
+                format: uri
+              userInfoEndpoint:
+                type: string
+                format: uri
+    InternalPasswordSetup:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [token, password]
+            properties:
+              token:
+                type: string
+                minLength: 20
+              password:
+                type: string
+                minLength: 12
+                maxLength: 1024
+    InternalLogin:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [email, password]
+            properties:
+              email:
+                type: string
+                format: email
+              password:
+                type: string
+                minLength: 1
+                maxLength: 1024
+    InternalRegister:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [invitationToken, email, displayName, password]
+            properties:
+              invitationToken:
+                type: string
+                minLength: 20
+              email:
+                type: string
+                format: email
+              displayName:
+                type: string
+                minLength: 1
+                maxLength: 120
+              password:
+                type: string
+                minLength: 12
+                maxLength: 1024
     Setup:
       required: true
       content:
@@ -1164,13 +2316,19 @@ components:
         - type: object
           properties:
             opening_balance:
-              type: number
+              type:
+                - number
+                - string
               minimum: 0
+              description: Non-negative money amount. Decimal strings may use "." or "," and are stored rounded to two decimal places.
             income_enabled:
               type: boolean
             income_amount:
-              type: number
+              type:
+                - number
+                - string
               minimum: 0
+              description: Non-negative money amount. Decimal strings may use "." or "," and are stored rounded to two decimal places.
             income_name:
               type: string
             income_anchor_day:
@@ -1185,8 +2343,11 @@ components:
             minimum_reserve_enabled:
               type: boolean
             minimum_reserve_amount:
-              type: number
+              type:
+                - number
+                - string
               minimum: 0
+              description: Non-negative money amount. Decimal strings may use "." or "," and are stored rounded to two decimal places.
             budget_period_income_id:
               type:
                 - string
@@ -1262,8 +2423,11 @@ components:
         currency:
           $ref: "#/components/schemas/Currency"
         amount:
-          type: number
+          type:
+            - number
+            - string
           minimum: 0
+          description: Non-negative money amount. Decimal strings may use "." or "," and are stored rounded to two decimal places.
         active:
           type: boolean
     RecurringSchedule:
@@ -1387,8 +2551,11 @@ components:
         name:
           type: string
         amount:
-          type: number
+          type:
+            - number
+            - string
           minimum: 0
+          description: Non-negative money amount. Decimal strings may use "." or "," and are stored rounded to two decimal places.
         date:
           type: string
           format: date
@@ -1398,8 +2565,11 @@ components:
       type: object
       properties:
         amount:
-          type: number
+          type:
+            - number
+            - string
           minimum: 0
+          description: Non-negative money amount. Decimal strings may use "." or "," and are stored rounded to two decimal places.
         confirmed_date:
           type: string
           format: date

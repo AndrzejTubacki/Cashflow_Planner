@@ -1,11 +1,12 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { formatMoney, t } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
 const EMPTY_VALUE = "-";
 
 export function renderGoalsTab(locale, cashflow) {
-  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY;
   const items = (cashflow?.goals || []).map(g => {
     const originalTarget = Number(g.amount || 0);
     const targetLedger = Number(g.target_ledger_amount || 0);
@@ -32,7 +33,7 @@ export function renderGoalsTab(locale, cashflow) {
       requested_amount: originalTarget,
       funded_amount: fundedOriginal,
       funded_ledger_amount: fundedLedger,
-      currency: g.currency || "PLN",
+      currency: g.currency || DEFAULT_LEDGER_CURRENCY,
 
       // These are separate active-ledger values.
       ledger_amount: targetLedger,
@@ -69,7 +70,7 @@ export function renderGoalsTab(locale, cashflow) {
 }
 
 export function renderFlexTab(locale, cashflow) {
-  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY;
   const items = (cashflow?.flexTransactions || []).map(f => {
     const originalTarget = Number(f.amount || 0);
     const targetLedger = Number(f.target_ledger_amount || 0);
@@ -95,7 +96,7 @@ export function renderFlexTab(locale, cashflow) {
       requested_amount: originalTarget,
       funded_amount: fundedOriginal,
       funded_ledger_amount: fundedLedger,
-      currency: f.currency || "PLN",
+      currency: f.currency || DEFAULT_LEDGER_CURRENCY,
 
       ledger_amount: targetLedger,
       ledger_currency: f.ledger_currency || ledgerCurrency,

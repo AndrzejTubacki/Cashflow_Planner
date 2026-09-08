@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.js";
+import { normalizeCashflowNumericInput } from "../public/app/cashflow/modal.js";
 import { SUPPORTED_FX_CURRENCIES as FRONTEND_CURRENCIES } from "../public/app/cashflow/constants.js";
 import { renderFundingOverview } from "../public/app/cashflow/funding.js";
 import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
 import { renderOneOffTab } from "../public/app/cashflow/one-off-tab.js";
 import { renderCashflowPage } from "../public/app/cashflow/page.js";
 import { renderAdminTab } from "../public/app/cashflow/admin-tab.js";
-import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
-import { loadLocale, todayForCashflow } from "../public/app/cashflow/shared.js";
+import { renderBudgetManagerTab } from "../public/app/cashflow/budget-manager-tab.js";
 import {
+  renderRecurringExpensesTab,
+  renderRecurringIncomeTab
+} from "../public/app/cashflow/recurring-tabs.js";
+import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
+import { hasCapability, loadLocale, todayForCashflow } from "../public/app/cashflow/shared.js";
+import {
+  renderBudgetSelectionPage,
   renderSetupPage,
   renderUserSelectionPage
 } from "../public/app/cashflow/session-pages.js";
@@ -21,6 +29,16 @@ import { SUPPORTED_FX_CURRENCIES as SERVER_CURRENCIES } from "../src/server/cash
 function assertNoMojibake(html) {
   assert.equal(/[\u00c4\u0102\u0139\u00e2\u00c2]/u.test(html), false, html);
 }
+
+test("app background is rendered by a fixed root layer for expanded pages", async () => {
+  const css = await readFile(new URL("../public/styles/base.css", import.meta.url), "utf8");
+
+  assert.match(css, /--app-background:/);
+  assert.match(css, /body\s*{[^}]*min-height:\s*100dvh/s);
+  assert.match(css, /\.page-shell\s*{[^}]*min-height:\s*100dvh/s);
+  assert.match(css, /\.page-shell::before\s*{[^}]*position:\s*fixed;[^}]*background:\s*var\(--app-background\);[^}]*background-size:\s*cover;/s);
+  assert.doesNotMatch(css, /background-size:\s*100vw\s+100vh/);
+});
 
 test("session and setup pages render auth-ready controls", async () => {
   await loadLocale("en");
@@ -33,9 +51,52 @@ test("session and setup pages render auth-ready controls", async () => {
 
   assert.match(userHtml, /data-cashflow-user-selection/);
   assert.match(userHtml, /data-cashflow-select-user="local"/);
+  assert.doesNotMatch(userHtml, /data-cashflow-select-account="local"/);
   assert.match(userHtml, /data-cashflow-create-user-form/);
   assert.match(userHtml, /name="userId"/);
   assert.match(userHtml, /Create and continue/);
+
+  const accountHtml = renderUserSelectionPage({
+    accounts: [
+      { id: "account_owner", display_name: "Account Owner", status: "active" }
+    ]
+  });
+
+  assert.match(accountHtml, /data-cashflow-select-account="account_owner"/);
+  assert.doesNotMatch(accountHtml, /data-cashflow-select-user="account_owner"/);
+
+  const internalLoginHtml = renderUserSelectionPage({
+    auth: {
+      activeMode: "internal",
+      internal: {
+        allowPasswordLogin: true,
+        providers: [
+          { id: "google", displayName: "Google", kind: "google", enabled: true }
+        ]
+      }
+    }
+  });
+  assert.match(internalLoginHtml, /data-cashflow-internal-login-form/);
+  assert.match(internalLoginHtml, /data-cashflow-provider-login="google"/);
+  assert.match(internalLoginHtml, /Continue with Google/);
+  assert.match(internalLoginHtml, /data-cashflow-password-token-form/);
+  assert.match(internalLoginHtml, /data-cashflow-internal-register-form/);
+  assert.match(internalLoginHtml, /name="invitationToken"/);
+  assert.match(internalLoginHtml, /name="email" type="email"/);
+  assert.match(internalLoginHtml, /name="password" type="password"/);
+  assert.doesNotMatch(internalLoginHtml, /data-cashflow-create-account-form/);
+
+  const externalLoginHtml = renderUserSelectionPage({
+    auth: {
+      activeMode: "external",
+      external: {
+        enabled: true
+      }
+    }
+  });
+  assert.match(externalLoginHtml, /data-cashflow-external-login/);
+  assert.match(externalLoginHtml, /Continue with SSO/);
+  assert.doesNotMatch(externalLoginHtml, /data-cashflow-create-account-form/);
 
   const setupHtml = renderSetupPage({
     cashflow: {
@@ -59,11 +120,73 @@ test("session and setup pages render auth-ready controls", async () => {
   assert.match(setupHtml, /data-cashflow-setup/);
   assert.match(setupHtml, /data-cashflow-setup-form/);
   assert.match(setupHtml, /data-cashflow-logout/);
-  assert.match(setupHtml, /name="opening_balance" value="0" min="0"/);
+  assert.equal(
+    setupHtml.includes('inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" name="opening_balance" value="0"'),
+    true
+  );
   assert.match(setupHtml, /name="income_amount"/);
   assert.match(setupHtml, /Complete setup/);
   assertNoMojibake(userHtml);
+  assertNoMojibake(internalLoginHtml);
+  assertNoMojibake(externalLoginHtml);
   assertNoMojibake(setupHtml);
+});
+
+test("budget selection and manager render account-owned budget controls", async () => {
+  await loadLocale("en");
+
+  const selectionHtml = renderBudgetSelectionPage({
+    account: {
+      accountId: "owner",
+      accountDisplayName: "Owner"
+    },
+    budgets: [
+      { id: "budget-home", display_name: "Home", role: "owner", status: "active" }
+    ]
+  });
+  assert.match(selectionHtml, /data-cashflow-budget-selection/);
+  assert.match(selectionHtml, /data-cashflow-select-budget="budget-home"/);
+  assert.match(selectionHtml, /data-cashflow-create-budget-form/);
+  assert.match(selectionHtml, /data-cashflow-accept-invitation-form/);
+
+  const managerHtml = renderBudgetManagerTab("en", {
+    session: {
+      accountId: "owner",
+      budgetId: "budget-home",
+      budgetRole: "owner"
+    }
+  }, {
+    accounts: [
+      { id: "member", display_name: "Member" }
+    ],
+    budgets: [
+      { id: "budget-home", display_name: "Home", role: "owner", status: "active" },
+      { id: "budget-side", display_name: "Side", role: "editor", status: "active" }
+    ],
+    members: [
+      { account_id: "owner", display_name: "Owner", role: "owner", status: "active" },
+      { account_id: "member", display_name: "Member", role: "editor", status: "active" }
+    ],
+    invitations: [
+      { id: "invite-1", target_account_id: "member", role: "viewer", status: "pending", expires_at: "2026-06-10" }
+    ],
+    lastInvitation: {
+      token: "copyable-token"
+    }
+  });
+
+  assert.match(managerHtml, /data-cashflow-budget-manager/);
+  assert.match(managerHtml, /data-cashflow-budget-select="budget-side"/);
+  assert.match(managerHtml, /data-cashflow-budget-rename="budget-home"/);
+  assert.match(managerHtml, /data-cashflow-member-transfer="member"/);
+  assert.match(managerHtml, /data-cashflow-budget-invite-form/);
+  assert.match(managerHtml, /copyable-token/);
+  assert.match(managerHtml, /aria-label="New budget name"/);
+  assert.match(managerHtml, /aria-label="Budget name"/);
+  assert.match(managerHtml, /aria-label="Role: Member"/);
+  assert.match(managerHtml, /aria-label="Invitation token"/);
+  assertNoMojibake(selectionHtml);
+  assertNoMojibake(managerHtml);
 });
 
 test("frontend currency selectors share the complete server-supported list", async () => {
@@ -86,6 +209,23 @@ test("frontend currency selectors share the complete server-supported list", asy
     assert.match(adminHtml, option);
     assert.match(modalHtml, option);
   }
+});
+
+test("transaction amount fields accept comma decimals", async () => {
+  await loadLocale("en");
+
+  assert.equal(normalizeCashflowNumericInput("482,97"), "482.97");
+  assert.equal(normalizeCashflowNumericInput("480.00"), "480.00");
+  assert.equal(normalizeCashflowNumericInput("1,234.56"), "1,234.56");
+
+  const oneOffHtml = renderCashflowModalFields("en", "one-off", {}, { today: "2026-06-03" });
+  const pendingHtml = renderCashflowModalFields("en", "pending", {
+    amount: 482.97,
+    date: "2026-06-03"
+  }, { today: "2026-06-03" });
+
+  assert.match(oneOffHtml, /name="amount" type="text" inputmode="decimal"/);
+  assert.match(pendingHtml, /name="amount" type="text" inputmode="decimal"/);
 });
 
 test("frontend date defaults and one-off classification use the profile date", async () => {
@@ -117,6 +257,45 @@ test("frontend date defaults and one-off classification use the profile date", a
   assert.ok(oneOffTab.indexOf("Today item") < oneOffTab.indexOf("Past item"));
 });
 
+test("recurring tabs expose delete actions for recurring sources", async () => {
+  await loadLocale("en");
+
+  const cashflow = {
+    settings: { ledger_currency: "PLN" },
+    recurringExpenses: [
+      {
+        id: "rec-exp-rent",
+        name: "Rent",
+        amount: 2000,
+        currency: "PLN",
+        active: 1,
+        necessary: 1,
+        anchor: "15th",
+        occurrence_total: 1,
+        occurrence_funded_count: 1
+      }
+    ],
+    recurringIncomes: [
+      {
+        id: "rec-inc-salary",
+        name: "Salary",
+        amount: 8000,
+        currency: "PLN",
+        active: 1,
+        anchor: "26th"
+      }
+    ]
+  };
+
+  const expensesHtml = renderRecurringExpensesTab("en", cashflow);
+  const incomeHtml = renderRecurringIncomeTab("en", cashflow);
+
+  assert.match(expensesHtml, /data-cashflow-delete-tx="rec-exp-rent"/);
+  assert.match(expensesHtml, /data-cashflow-delete-entity="recurring-expense"/);
+  assert.match(incomeHtml, /data-cashflow-delete-tx="rec-inc-salary"/);
+  assert.match(incomeHtml, /data-cashflow-delete-entity="recurring-income"/);
+});
+
 test("page keeps transient errors visible and hides admin controls for non-admin users", async () => {
   await loadLocale("en");
   const cashflow = {
@@ -141,6 +320,9 @@ test("page keeps transient errors visible and hides admin controls for non-admin
   });
 
   assert.match(html, /data-cashflow-error-banner/);
+  assert.match(html, /role="tablist"/);
+  assert.match(html, /role="tab"/);
+  assert.match(html, /aria-selected="true"/);
   assert.match(html, /data-cashflow-dismiss-error/);
   assert.match(html, /data-cashflow-ledger-tab/);
   assert.doesNotMatch(html, /data-cashflow-tab="admin"/);
@@ -167,11 +349,115 @@ test("page keeps transient errors visible and hides admin controls for non-admin
   assert.match(adminHtml, /data-cashflow-recalculate-pending/);
 });
 
+test("budget capabilities expose maintenance controls without exposing global administration", async () => {
+  await loadLocale("en");
+  const cashflow = {
+    today: "2026-06-03",
+    session: {
+      userId: "budget-owner",
+      permissions: [],
+      capabilities: ["budget:maintain", "budget:validate"]
+    },
+    settings: { locale: "en", ledger_currency: "PLN" },
+    pendingTransactions: [],
+    confirmedTransactions: [],
+    futureTransactions: [],
+    periodSummaries: [],
+    missingFxRates: ["EUR"],
+    latestProjectionSnapshot: {
+      generation_succeeded: 0,
+      snapshot_timestamp: "2026-06-03T00:00:00.000Z"
+    }
+  };
+
+  assert.equal(hasCapability(cashflow, "budget:maintain"), true);
+  assert.equal(hasCapability(cashflow, "budget:backup"), false);
+
+  const html = renderCashflowPage({ cashflow, activeTab: "ledger" });
+  assert.doesNotMatch(html, /data-cashflow-tab="admin"/);
+  assert.match(html, /data-cashflow-refresh-fx/);
+  assert.match(html, /data-cashflow-validate/);
+  assert.match(html, /data-cashflow-run-jobs/);
+  assert.match(html, /data-cashflow-recalculate-pending/);
+});
+
 test("admin tab renders global options controls", async () => {
   await loadLocale("en");
 
   const html = renderAdminTab("en", {
     admin: {
+      accounts: [
+        {
+          id: "admin-account",
+          email: "admin@example.com",
+          display_name: "Admin Account",
+          status: "active",
+          globalRoles: ["system_admin"],
+          hasPasswordCredential: true,
+          identities: [
+            {
+              provider_id: "external_test",
+              subject: "proxy-subject-admin"
+            }
+          ],
+          ownedBudgetCount: 1,
+          membershipCount: 2,
+          sessions: [
+            {
+              id: "session-one",
+              auth_method: "none",
+              last_seen_at: "2026-06-05T01:00:00.000Z"
+            }
+          ]
+        },
+        {
+          id: "regular-account",
+          email: "regular@example.com",
+          display_name: "Regular Account",
+          status: "disabled",
+          globalRoles: [],
+          hasPasswordCredential: false,
+          ownedBudgetCount: 0,
+          membershipCount: 0,
+          sessions: []
+        }
+      ],
+      authConfig: {
+        activeMode: "none",
+        draftMode: "external",
+        sessionIdleMinutes: 60,
+        sessionAbsoluteMinutes: 480,
+        draftConfig: {
+          external: {
+            subjectHeader: "x-auth-request-user",
+            emailHeader: "x-auth-request-email",
+            displayNameHeader: "x-auth-request-name",
+            groupsHeader: "x-auth-request-groups",
+            trustedIssuer: "oauth2-proxy",
+            provisioningMode: "deny_unknown",
+            allowedDomains: ["example.com"],
+            adminGroups: ["cashflow-admins"]
+          },
+          internal: {
+            allowPasswordLogin: true
+          }
+        }
+      },
+      providers: [
+        {
+          id: "google",
+          kind: "google",
+          displayName: "Google",
+          enabled: true,
+          issuer: "https://accounts.google.com/",
+          clientId: "google-client",
+          secretConfigured: true,
+          config: {
+            redirectUri: "https://cashflow.example/api/auth/providers/google/callback",
+            scope: "openid email profile"
+          }
+        }
+      ],
       options: {
         ledger_currency: "EUR",
         locale: "pl",
@@ -189,6 +475,43 @@ test("admin tab renders global options controls", async () => {
   });
 
   assert.match(html, /data-cashflow-admin-options-form/);
+  assert.match(html, /data-cashflow-admin-accounts/);
+  assert.match(html, /data-cashflow-admin-account-name="admin-account"/);
+  assert.match(html, /data-cashflow-admin-account-email="admin-account"/);
+  assert.match(html, /data-cashflow-admin-external-subject="admin-account"/);
+  assert.match(html, /proxy-subject-admin/);
+  assert.match(html, /data-cashflow-admin-external-link="admin-account"/);
+  assert.match(html, /value="admin@example.com"/);
+  assert.match(html, /aria-label="Display name: Admin Account"/);
+  assert.match(html, /data-cashflow-admin-account-rename="admin-account"/);
+  assert.match(html, /data-cashflow-admin-password-token="admin-account" data-purpose="password_reset"/);
+  assert.match(html, /data-cashflow-admin-password-token="regular-account" data-purpose="password_setup"/);
+  assert.match(html, /data-cashflow-admin-password-token-output="admin-account"/);
+  assert.match(html, /data-cashflow-admin-account-status="admin-account" data-next-status="disabled"/);
+  assert.match(html, /data-cashflow-admin-account-status="regular-account" data-next-status="active"/);
+  assert.match(html, /data-cashflow-admin-account-admin="admin-account" data-enabled="0"/);
+  assert.match(html, /data-cashflow-admin-account-admin="regular-account" data-enabled="1"/);
+  assert.match(html, /data-cashflow-admin-session-revoke="admin-account"/);
+  assert.match(html, /data-session-id="session-one"/);
+  assert.match(html, /No active sessions/);
+  assert.match(html, /data-cashflow-admin-auth/);
+  assert.match(html, /data-cashflow-admin-auth-form/);
+  assert.match(html, /data-cashflow-admin-auth-providers/);
+  assert.match(html, /data-cashflow-admin-provider-form/);
+  assert.match(html, /data-cashflow-admin-provider-delete="google"/);
+  assert.match(html, /name="providerId" value="google" required maxlength="80" readonly/);
+  assert.match(html, /name="clientId" value="google-client"/);
+  assert.match(html, /name="redirectUri" value="https:\/\/cashflow\.example\/api\/auth\/providers\/google\/callback"/);
+  assert.match(html, /Secret configured/);
+  assert.match(html, /name="draftMode"/);
+  assert.match(html, /value="external" selected/);
+  assert.match(html, /name="sessionIdleMinutes" type="number" min="5" max="10080" value="60"/);
+  assert.match(html, /name="external.subjectHeader" value="x-auth-request-user"/);
+  assert.match(html, /name="external.assertionSecretHeader" value="x-cashflow-auth-secret"/);
+  assert.match(html, /name="external.assertionSecretEnv" value="CASHFLOW_EXTERNAL_AUTH_SECRET"/);
+  assert.match(html, /name="external.allowedDomains" value="example\.com"/);
+  assert.match(html, /data-cashflow-admin-auth-test/);
+  assert.match(html, /data-cashflow-admin-auth-activate/);
   assert.match(html, /name="ledger_currency"/);
   assert.match(html, /value="EUR" selected/);
   assert.match(html, /name="fx_provider"/);
@@ -376,6 +699,50 @@ test("ledger future rows can move to pending from every generated period", async
   assert.match(html, /data-cashflow-move-future-to-pending="future-current"/);
   assert.match(html, /data-cashflow-move-future-to-pending="future-later"/);
   assert.match(html, /data-cashflow-recalculate-pending/);
+  assertNoMojibake(html);
+});
+
+test("ledger pending one-off remainders render an explicit dismiss action", async () => {
+  await loadLocale("en");
+
+  const html = renderLedgerTab("en", {
+    session: {
+      capabilities: ["budget:maintain"]
+    },
+    settings: { ledger_currency: "PLN" },
+    periodSummaries: [],
+    confirmedTransactions: [],
+    futureTransactions: [],
+    pendingTransactions: [
+      {
+        id: "pending-fotel-remainder",
+        source_one_off_id: "oneoff-fotel",
+        occurrence_key: "one_off_remainder:oneoff-fotel:2",
+        date: "2026-06-01",
+        name: "Fotel",
+        type: "expense",
+        status: "pending",
+        amount: 2.97,
+        currency: "PLN"
+      },
+      {
+        id: "pending-regular",
+        source_recurring_expense_id: "rec-disney",
+        occurrence_key: "recurring_expense:rec-disney:2026-06-01",
+        date: "2026-06-01",
+        name: "Disney",
+        type: "expense",
+        status: "pending",
+        amount: 60,
+        currency: "PLN"
+      }
+    ]
+  });
+
+  assert.match(html, /data-cashflow-delete-tx="pending-fotel-remainder"/);
+  assert.match(html, /data-cashflow-delete-entity="pending"/);
+  assert.match(html, /Dismiss remainder/);
+  assert.doesNotMatch(html, /data-cashflow-delete-tx="pending-regular"/);
   assertNoMojibake(html);
 });
 

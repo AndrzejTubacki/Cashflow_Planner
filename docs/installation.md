@@ -57,6 +57,14 @@ For production installs:
 - tag each built image so the previous application version remains available
   for rollback
 
+## Kubernetes Examples
+
+Initial Kubernetes examples live under
+[`deploy/kubernetes/`](../deploy/kubernetes/README.md). They are optional,
+starter manifests for operators to review and adapt before use. They do not
+replace the Docker Compose guidance, and the repository test suite does not
+validate a live Kubernetes deployment.
+
 ## Configuration
 
 Environment variables:
@@ -70,9 +78,15 @@ Environment variables:
 | `LOGS_DIR` | `./logs` | Log directory for non-container process managers |
 | `CASHFLOW_JSON_LIMIT` | `10mb` | Maximum JSON request body size, primarily used by full JSON imports |
 | `CASHFLOW_LOG_TIMEZONE` | `Europe/Warsaw` | Timezone used for server log timestamps |
+| `CASHFLOW_MIRROR_LOGS_TO_STDOUT` | `0` | Also mirror file log lines to stdout/stderr for process-manager or container log collection |
+| `CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET` | `0` | Make `/readyz` also perform a cheap `local` planning DB schema read when that DB exists |
 | `CASHFLOW_BACKUP_ALLOWED_ROOTS` | unset for direct Node; `/app/backups` in Compose | Comma-separated absolute roots allowed for custom profile backup locations |
 | `CASHFLOW_FX_FETCH_TIMEOUT_MS` | `10000` | External FX request timeout in milliseconds |
 | `CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS` | `5000` | ntfy request timeout in milliseconds |
+| `CASHFLOW_DELETED_BUDGET_RECOVERY_RETENTION_COUNT` | `5` | Completed deleted-budget recovery exports retained under `DATA_DIR/deleted-budget-recoveries` |
+| `CASHFLOW_GLOBAL_MIGRATION_RECOVERY_RETENTION_COUNT` | `2` | Completed global migration recovery snapshots retained under `DATA_DIR/global-migration-backups` |
+| `CASHFLOW_PASSWORD_PEPPER` | unset | Optional deployment secret mixed into internal-login password hashing; keep stable and backed up |
+| `CASHFLOW_EXTERNAL_AUTH_SECRET` | unset | Shared assertion secret expected from a trusted reverse proxy in external SSO mode |
 
 Use `.env.example` as a deployment reference.
 
@@ -127,7 +141,7 @@ The Compose example stores these paths in named volumes:
 | `cashflow-logs` | `/app/logs` | Operational logs |
 | `cashflow-backups` | `/app/backups` | Optional custom app-level backups |
 
-Back up `cashflow-data` externally before every upgrade. See
+An external `cashflow-data` backup is recommended before every upgrade. See
 [Operations](operations.md) for upgrade, rollback, and restore procedures.
 
 ## Reverse Proxy

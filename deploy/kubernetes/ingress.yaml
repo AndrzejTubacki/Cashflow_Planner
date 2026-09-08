@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cashflow
+  namespace: cashflow-staging
+  labels:
+    app.kubernetes.io/name: cashflow
+  annotations: {}
+spec:
+  # Set this for your cluster, for example: traefik, nginx, or another ingress class.
+  # ingressClassName: traefik
+  rules:
+    - host: cashflow-staging.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cashflow
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - cashflow-staging.example.com
+      secretName: cashflow-staging-tls

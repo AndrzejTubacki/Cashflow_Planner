@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { renderDetailsPanel, t, todayForCashflow } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
@@ -27,7 +28,7 @@ export function renderOneOffTab(locale, cashflow) {
       type: o.type || "expense",
       status: isConfirmed ? "confirmed" : isPending || (o.date && o.date < now) ? "pending" : "funded",
       amount: Number(o.amount) || 0,
-      currency: o.currency || "PLN",
+      currency: o.currency || DEFAULT_LEDGER_CURRENCY,
       isConfirmed,
       isPending,
       canDelete: !isConfirmed

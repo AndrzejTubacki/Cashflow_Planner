@@ -24,18 +24,47 @@ async function withHarness(fn) {
   }
 }
 
-function setLocalPermissions(harness, permissions) {
+function setLocalRole(harness, role, { systemAdmin = false } = {}) {
   const db = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
   try {
-    db.prepare("UPDATE users SET permissions = ? WHERE id = 'local'").run(JSON.stringify(permissions));
+    db.prepare(`
+      INSERT OR IGNORE INTO accounts (
+        id, display_name, status, created_at, updated_at
+      )
+      VALUES ('role_test_owner', 'Role test owner', 'active', datetime('now'), datetime('now'))
+    `).run();
+    db.prepare(`
+      UPDATE budget_memberships
+      SET account_id = 'role_test_owner', updated_at = datetime('now')
+      WHERE budget_id = 'local' AND account_id = 'legacy-admin'
+    `).run();
+    db.prepare(`
+      INSERT INTO budget_memberships (
+        budget_id, account_id, role, invited_by_account_id, created_at, updated_at
+      )
+      VALUES ('local', 'legacy-admin', ?, NULL, datetime('now'), datetime('now'))
+    `).run(role);
+    db.prepare(`
+      INSERT OR IGNORE INTO account_global_roles (
+        account_id, role, granted_by_account_id, created_at
+      )
+      VALUES ('role_test_owner', 'system_admin', NULL, datetime('now'))
+    `).run();
+    db.prepare("DELETE FROM account_global_roles WHERE account_id = 'legacy-admin'").run();
+    if (systemAdmin) {
+      db.prepare(`
+        INSERT INTO account_global_roles (account_id, role, granted_by_account_id, created_at)
+        VALUES ('legacy-admin', 'system_admin', NULL, datetime('now'))
+      `).run();
+    }
   } finally {
     db.close();
   }
 }
 
-test("operational endpoints require admin while normal user actions remain available", async () => withHarness(async harness => {
+test("budget and system operations require capabilities while editor actions remain available", async () => withHarness(async harness => {
   await harness.api("/api/users");
-  setLocalPermissions(harness, ["user"]);
+  setLocalRole(harness, "editor");
 
   const operationalRequests = [
     ["/api/fx/refresh-all", {}],
@@ -54,7 +83,7 @@ test("operational endpoints require admin while normal user actions remain avail
       body
     });
     assert.equal(result.response.status, 403, pathname);
-    assert.match(result.body.error, /Admin permission required/);
+    assert.match(result.body.error, /permission required/i);
   }
 
   const oneOff = await harness.request("/api/one-off", {
@@ -75,7 +104,7 @@ test("operational endpoints require admin while normal user actions remain avail
       future_periods: 4
     }
   });
-  assert.equal(settings.response.status, 200);
+  assert.equal(settings.response.status, 403);
 }));
 
 test("invalid currencies and impossible dates are rejected before writes", async () => withHarness(async harness => {
@@ -333,6 +362,15 @@ test("external fetch timeout errors carry 504 status", async () => {
   );
 });
 
+test("external fetch network errors carry 504 status", async () => {
+  await assert.rejects(
+    () => fetchWithTimeout("https://example.invalid", {}, 20, async () => {
+      throw new TypeError("fetch failed");
+    }),
+    error => error.status === 504 && /External request failed: fetch failed/.test(error.message)
+  );
+});
+
 test("NBP and Frankfurter provider timeouts carry 504 status", async () => {
   const previous = process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS;
   process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS = "20";
@@ -444,20 +482,15 @@ test("funding source SQL helpers reject unknown source columns", () => {
 test("background tick skips overlap", async () => {
   const events = [];
   let releaseNotifications = null;
-  const currentTime = new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "UTC"
-  }).format(new Date());
 
   const jobs = createCashflowBackgroundJobs({
-    getSettings: () => ({ timezone: "UTC", notification_delivery_time: currentTime }),
+    getSettings: () => ({ timezone: "UTC", notification_delivery_time: "08:00" }),
     listCashflowUserIds: () => ["local"],
     logError: () => {},
     logServerEvent: (kind, details) => events.push({ kind, details }),
     maybeRunAutomaticBackup: () => null,
     moveDueFutureTransactionsToPending: () => 0,
+    now: () => new Date("2026-06-03T08:00:00.000Z"),
     queueDailyPendingSummary: () => 0,
     queueMissingIncomeNotifications: () => 0,
     refreshNbpFxCacheForAllUsers: async () => [],
@@ -472,6 +505,10 @@ test("background tick skips overlap", async () => {
   assert.deepEqual(second, { skipped: true });
   assert.ok(events.some(event => event.kind === "cashflow_background_tick_skipped"));
 
+  for (let index = 0; index < 20 && typeof releaseNotifications !== "function"; index += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(typeof releaseNotifications, "function");
   releaseNotifications();
   await first;
 });
@@ -509,6 +546,113 @@ test("background tick isolates one user's timeout and continues with later users
       && item.details.userId === "timeout_user"
       && item.details.error === "External request timed out"
   ));
+});
+
+test("background tick catches up overdue daily jobs and persists success across scheduler instances", async () => withHarness(async harness => {
+  const calls = [];
+  const events = [];
+  const makeJobs = () => createCashflowBackgroundJobs({
+    cleanupOperationalData: (userId, reason) => calls.push(["cleanup", userId, reason]),
+    getSettings: () => ({
+      timezone: "UTC",
+      auto_backup_enabled: 0,
+      notification_delivery_time: "12:00"
+    }),
+    listCashflowUserIds: () => [harness.userId],
+    logError: () => {},
+    logServerEvent: (kind, details) => events.push({ kind, details }),
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: userId => {
+      calls.push(["midnight", userId]);
+      return 0;
+    },
+    now: () => new Date("2026-06-03T08:05:00.000Z"),
+    openPlanningDb: harness.openPlanningDb,
+    queueDailyPendingSummary: userId => {
+      calls.push(["pending-summary", userId]);
+      return 0;
+    },
+    queueMissingIncomeNotifications: userId => {
+      calls.push(["missing-income", userId]);
+      return 0;
+    },
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async userId => {
+      calls.push(["fx", userId]);
+      return { updated_count: 0 };
+    },
+    sendQueuedNotifications: async userId => {
+      calls.push(["notify", userId]);
+      return 0;
+    }
+  });
+
+  await makeJobs().tickPerUserJobs();
+  assert.deepEqual(calls, [
+    ["midnight", harness.userId],
+    ["pending-summary", harness.userId],
+    ["missing-income", harness.userId],
+    ["fx", harness.userId],
+    ["cleanup", harness.userId, "daily_maintenance"]
+  ]);
+  assert.ok(events.some(event => event.kind === "cashflow_midnight_job_completed"));
+  assert.ok(events.some(event => event.kind === "cashflow_fx_refresh_completed"));
+
+  await makeJobs().tickPerUserJobs();
+  assert.deepEqual(calls, [
+    ["midnight", harness.userId],
+    ["pending-summary", harness.userId],
+    ["missing-income", harness.userId],
+    ["fx", harness.userId],
+    ["cleanup", harness.userId, "daily_maintenance"]
+  ]);
+
+  const db = harness.openPlanningDb();
+  try {
+    const persisted = db.prepare(`
+      SELECT entity_type, entity_id
+      FROM event_log
+      WHERE action = 'background_job_success'
+      ORDER BY entity_type, entity_id
+    `).all();
+    assert.deepEqual(persisted, [
+      { entity_type: "background_job:fx", entity_id: "2026-06-03" },
+      { entity_type: "background_job:maintenance", entity_id: "2026-06-03" },
+      { entity_type: "background_job:midnight", entity_id: "2026-06-03" }
+    ]);
+  } finally {
+    db.close();
+  }
+}));
+
+test("automatic backup scheduling checks the configured interval on ordinary ticks", async () => {
+  const backups = [];
+  const jobs = createCashflowBackgroundJobs({
+    cleanupOperationalData: () => {},
+    getSettings: () => ({
+      timezone: "UTC",
+      auto_backup_enabled: 1,
+      backup_interval_minutes: 30,
+      notification_delivery_time: "23:59"
+    }),
+    listCashflowUserIds: () => ["local"],
+    logError: () => {},
+    logServerEvent: () => {},
+    maybeRunAutomaticBackup: userId => {
+      backups.push(userId);
+      return null;
+    },
+    moveDueFutureTransactionsToPending: () => 0,
+    now: () => new Date("2026-06-03T10:17:00.000Z"),
+    queueDailyPendingSummary: () => 0,
+    queueMissingIncomeNotifications: () => 0,
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async () => ({ updated_count: 0 }),
+    sendQueuedNotifications: async () => 0
+  });
+
+  await jobs.tickPerUserJobs();
+  assert.deepEqual(backups, ["local"]);
 });
 
 test("daily maintenance runs retention even when automatic backup is disabled", async () => {
@@ -570,6 +714,62 @@ test("failed user creation removes global metadata so retry is not blocked", asy
     shouldFail = false;
     const session = service.createUser({ userId: "retry_user" });
     assert.equal(session.userId, "retry_user");
+  } finally {
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test("failed user creation removes physical profile storage so retry is not blocked", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-global-test-"));
+  const dataDir = path.join(runtimeRoot, "data");
+  let failAfterStorageCreate = true;
+  const openCounts = new Map();
+  const userDir = userId => path.join(dataDir, userId);
+
+  try {
+    const service = createCashflowGlobalService({
+      cashflowUserStorageExists: userId => fs.existsSync(userDir(userId)),
+      dataDir,
+      deleteCashflowUserStorage: userId => {
+        fs.rmSync(userDir(userId), { recursive: true, force: true });
+      },
+      listCashflowUserIds: () => fs.existsSync(dataDir)
+        ? fs.readdirSync(dataDir).filter(name => fs.statSync(path.join(dataDir, name)).isDirectory())
+        : [],
+      normalizeLocale: value => String(value || "en"),
+      openPlanningDb: userId => {
+        fs.mkdirSync(userDir(userId), { recursive: true });
+        const count = (openCounts.get(userId) || 0) + 1;
+        openCounts.set(userId, count);
+        if (failAfterStorageCreate && userId === "retry_storage_user" && count >= 2) {
+          throw new Error("defaults failed after storage");
+        }
+        return {
+          prepare: () => ({ run: () => {} }),
+          close: () => {}
+        };
+      }
+    });
+
+    assert.throws(
+      () => service.createUser({ userId: "retry_storage_user" }),
+      /defaults failed after storage/
+    );
+    assert.equal(fs.existsSync(userDir("retry_storage_user")), false);
+
+    const db = new Database(path.join(dataDir, "cashflow-global.sqlite"));
+    try {
+      assert.equal(db.prepare("SELECT id FROM users WHERE id = 'retry_storage_user'").get(), undefined);
+      assert.equal(db.prepare("SELECT id FROM budgets WHERE id = 'retry_storage_user'").get(), undefined);
+      assert.equal(db.prepare("SELECT id FROM accounts WHERE id = 'retry_storage_user'").get(), undefined);
+    } finally {
+      db.close();
+    }
+
+    failAfterStorageCreate = false;
+    const session = service.createUser({ userId: "retry_storage_user" });
+    assert.equal(session.userId, "retry_storage_user");
+    assert.equal(fs.existsSync(userDir("retry_storage_user")), true);
   } finally {
     await rm(runtimeRoot, { recursive: true, force: true });
   }

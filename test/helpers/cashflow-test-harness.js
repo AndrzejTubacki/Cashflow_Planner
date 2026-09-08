@@ -41,7 +41,9 @@ async function createCashflowTestHarness(options = {}) {
   const logsDir = path.join(runtimeRoot, "logs");
   const localeDir = path.join(repoRoot, "public", "app", "cashflow", "locales");
   const userId = options.userId || "local";
-  const fxSnapshot = options.fxSnapshot || defaultFxSnapshot();
+  const fxSnapshot = Object.prototype.hasOwnProperty.call(options, "fxSnapshot")
+    ? options.fxSnapshot
+    : defaultFxSnapshot();
   const testToday = options.today || "2026-05-20";
   const previousTestToday = setTodayOverrideForTests(testToday);
 
@@ -53,11 +55,13 @@ async function createCashflowTestHarness(options = {}) {
 
   const cashflow = createCashflowModule({
     appVersion: "0.0.0-test",
+    authProviderHook: options.authProviderHook || null,
     backupServiceHook: options.backupServiceHook || null,
     dataDir,
     localeDir,
     getCurrentFxSnapshot: () => fxSnapshot,
     getFxSnapshotForDate: () => fxSnapshot,
+    fetchImpl: options.fetchImpl || fetch,
     portabilityMutationHook: options.portabilityMutationHook || null,
     recoverableMutationHook: options.recoverableMutationHook || null,
     logError: (kind, details) => errors.push({ kind, details }),
@@ -71,6 +75,8 @@ async function createCashflowTestHarness(options = {}) {
 
   let server = null;
   let baseUrl = null;
+  let sessionCookie = "";
+  let csrfToken = "";
 
   async function startServer() {
     if (server) return baseUrl;
@@ -91,14 +97,21 @@ async function createCashflowTestHarness(options = {}) {
 
   async function request(pathname, requestOptions = {}) {
     const url = `${await startServer()}${pathname}`;
+    const useSession = requestOptions.useSession === true;
+    const method = String(requestOptions.method || "GET").toUpperCase();
     const headers = {
       ...(requestOptions.body !== undefined ? { "content-type": "application/json" } : {}),
-      ...(requestOptions.skipUserHeader ? {} : { "x-cashflow-user-id": userId }),
+      ...(useSession && sessionCookie ? { cookie: sessionCookie } : {}),
+      ...(useSession && csrfToken && !["GET", "HEAD", "OPTIONS"].includes(method)
+        ? { "x-cashflow-csrf-token": csrfToken }
+        : {}),
+      ...(requestOptions.skipUserHeader || useSession ? {} : { "x-cashflow-user-id": userId }),
       ...(requestOptions.headers || {})
     };
 
     const response = await fetch(url, {
       ...requestOptions,
+      useSession: undefined,
       headers,
       body: requestOptions.body === undefined
         ? undefined
@@ -113,6 +126,12 @@ async function createCashflowTestHarness(options = {}) {
         ? JSON.parse(text)
         : text
       : null;
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie) {
+      sessionCookie = setCookie.split(";")[0];
+      if (/^cashflow_session=$/.test(sessionCookie)) sessionCookie = "";
+    }
+    if (body?.csrfToken) csrfToken = String(body.csrfToken);
 
     return {
       response,
@@ -140,6 +159,8 @@ async function createCashflowTestHarness(options = {}) {
 
   async function cleanup() {
     if (server) {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise(resolve => server.close(resolve));
       server = null;
     }
@@ -160,6 +181,7 @@ async function createCashflowTestHarness(options = {}) {
     openLedgerDb,
     openPlanningDb,
     request,
+    session: () => ({ cookie: sessionCookie, csrfToken }),
     startServer,
     today: testToday,
     userId

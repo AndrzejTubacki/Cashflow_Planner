@@ -17,6 +17,8 @@ const dataDir = process.env.DATA_DIR || path.join(__dirname, "data");
 const logsDir = process.env.LOGS_DIR || path.join(__dirname, "logs");
 const logTimezone = normalizeTimezone(process.env.CASHFLOW_LOG_TIMEZONE || DEFAULT_TIMEZONE);
 const jsonLimit = process.env.CASHFLOW_JSON_LIMIT || "10mb";
+const mirrorLogsToStdout = enabledByEnv(process.env.CASHFLOW_MIRROR_LOGS_TO_STDOUT);
+const readyzCheckDefaultBudget = enabledByEnv(process.env.CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET);
 const publicDir = path.join(__dirname, "public");
 const localeDir = path.join(publicDir, "app", "cashflow", "locales");
 const startedAt = new Date();
@@ -32,6 +34,10 @@ const runtime = {
 
 fs.mkdirSync(dataDir, { recursive: true });
 fs.mkdirSync(logsDir, { recursive: true });
+
+function enabledByEnv(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
 
 function timestampForLogs() {
   // Format operational logs in the configured deployment timezone with a real offset.
@@ -88,7 +94,15 @@ function toLogPayload(kind, details = {}) {
 
 function appendLog(fileName, line) {
   // Append one JSON/text line to the configured logs directory.
-  fs.appendFileSync(path.join(logsDir, fileName), `${line}\n`);
+  const text = String(line);
+  fs.appendFileSync(path.join(logsDir, fileName), `${text}\n`);
+  if (mirrorLogsToStdout) {
+    if (fileName === "error.log") {
+      console.error(text);
+    } else {
+      console.log(text);
+    }
+  }
 }
 
 function logServerEvent(kind, details = {}) {
@@ -109,6 +123,8 @@ function appendApiLogLine(line) {
 logServerEvent("server_entry", { port, dataDir, logsDir, publicDir });
 
 let express;
+let helmet;
+let rateLimit;
 
 try {
   ({ default: express } = await import("express"));
@@ -117,10 +133,38 @@ try {
   throw error;
 }
 
+try {
+  ({ default: helmet } = await import("helmet"));
+} catch (error) {
+  logServerEvent("optional_helmet_unavailable", { message: error.message });
+  helmet = null;
+}
+
+try {
+  ({ default: rateLimit } = await import("express-rate-limit"));
+} catch (error) {
+  logServerEvent("optional_rate_limit_unavailable", { message: error.message });
+  rateLimit = null;
+}
+
 const app = express();
 
+app.disable("x-powered-by");
+if (helmet) {
+  app.use(helmet({
+    contentSecurityPolicy: false
+  }));
+}
 app.use(express.json({ limit: jsonLimit }));
 app.use(express.urlencoded({ extended: true }));
+if (rateLimit) {
+  app.use("/api/auth/internal", rateLimit({
+    legacyHeaders: false,
+    limit: 20,
+    standardHeaders: "draft-8",
+    windowMs: 15 * 60 * 1000
+  }));
+}
 
 let createCashflowModule;
 
@@ -148,6 +192,57 @@ cashflow.registerRoutes(app);
 app.get("/healthz", (req, res) => {
   // Minimal liveness endpoint for Docker/reverse-proxy health checks.
   res.json({ ok: true, app: "cashflow" });
+});
+
+function checkDataDirWritable() {
+  const tempPath = path.join(
+    dataDir,
+    `.cashflow-readyz-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`
+  );
+  fs.writeFileSync(tempPath, "ready\n", "utf8");
+  fs.rmSync(tempPath, { force: true });
+}
+
+app.get("/readyz", (req, res) => {
+  // Cheap readiness check for any process manager; this is intentionally not a full data integrity scan.
+  const checks = [];
+
+  function runCheck(name, fn) {
+    try {
+      const details = fn();
+      checks.push({ name, ok: true, ...(details && typeof details === "object" ? { details } : {}) });
+    } catch (error) {
+      checks.push({
+        name,
+        ok: false,
+        error: error?.message || String(error)
+      });
+    }
+  }
+
+  runCheck("app_initialized", () => {
+    if (!cashflow || typeof cashflow.readinessCheck !== "function") {
+      throw new Error("Cashflow module is not initialized");
+    }
+  });
+  runCheck("data_dir_exists", () => {
+    if (!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory()) {
+      throw new Error("DATA_DIR does not exist or is not a directory");
+    }
+  });
+  runCheck("data_dir_writable", () => {
+    checkDataDirWritable();
+  });
+  runCheck("global_metadata", () => cashflow.readinessCheck({
+    checkDefaultBudget: readyzCheckDefaultBudget
+  }));
+
+  const ok = checks.every(check => check.ok);
+  res.status(ok ? 200 : 503).json({
+    ok,
+    app: "cashflow",
+    checks
+  });
 });
 
 app.get("/api/system", (req, res) => {
@@ -178,7 +273,7 @@ app.use((req, res, next) => {
 });
 
 // Start scheduled projection, FX, notification, and backup jobs.
-cashflow.startBackgroundJobs();
+const backgroundInterval = cashflow.startBackgroundJobs();
 
 try {
   // Optional operator-owned routes live in ignored local/dev.mjs and remain outside published APIs.
@@ -195,7 +290,7 @@ try {
   }
 }
 
-app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", () => {
   // Bind on all interfaces for container networking.
   logServerEvent("server_start", {
     port,
@@ -204,4 +299,51 @@ app.listen(port, "0.0.0.0", () => {
     publicDir
   });
   console.log(`Cashflow listening on ${port}`);
+});
+
+let shutdownStarted = false;
+
+function closeServer() {
+  return new Promise((resolve, reject) => {
+    server.close(error => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function shutdown(signal) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  runtime.restartInProgress = true;
+
+  logServerEvent("server_shutdown_requested", { signal });
+  clearInterval(backgroundInterval);
+
+  const forceExitTimer = setTimeout(() => {
+    logError("server_shutdown_timeout", { signal });
+    process.exit(1);
+  }, 10_000);
+  forceExitTimer.unref?.();
+
+  try {
+    await closeServer();
+    clearTimeout(forceExitTimer);
+    logServerEvent("server_shutdown_complete", { signal });
+    process.exit(0);
+  } catch (error) {
+    clearTimeout(forceExitTimer);
+    logError("server_shutdown_failed", error);
+    process.exit(1);
+  }
+}
+
+process.once("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+process.once("SIGTERM", () => {
+  void shutdown("SIGTERM");
 });

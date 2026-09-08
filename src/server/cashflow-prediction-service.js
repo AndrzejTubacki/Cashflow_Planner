@@ -128,16 +128,64 @@
     return normalExtreme(amounts, direction);
   }
 
-  function predictedAmountForRecurringExpense(userId, expense, today, occurrenceDate = today) {
+  function confirmedRowsForPrediction(userId, today, confirmedRows = null) {
+    if (Array.isArray(confirmedRows)) return confirmedRows;
+    return loadConfirmedTransactions(userId, twelveMonthsAgoDate(today));
+  }
+
+  function rowsInPredictionWindow(rows, occurrenceDate) {
+    const cutoffDate = String(occurrenceDate || "");
+    const startDate = twelveMonthsAgoDate(cutoffDate);
+
+    return rows.filter(tx => {
+      const txDate = String(tx.date || "");
+      return txDate >= startDate && txDate <= cutoffDate;
+    });
+  }
+
+  function normalizePredictionName(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  function normalizePredictionCurrency(value) {
+    return String(value || "").trim().toUpperCase();
+  }
+
+  function matchesRecurringPredictionSource(tx, item, {
+    sourceColumn,
+    type
+  }) {
+    if (tx?.type !== type) return false;
+
+    const sourceId = String(tx?.[sourceColumn] || "");
+    if (sourceId === item.id) return true;
+    if (sourceId) return false;
+
+    const itemName = normalizePredictionName(item?.name);
+    const txName = normalizePredictionName(tx?.name);
+    if (!itemName || !txName || itemName !== txName) return false;
+
+    const itemCurrency = normalizePredictionCurrency(item?.currency);
+    const txCurrency = normalizePredictionCurrency(tx?.currency);
+    return Boolean(itemCurrency && txCurrency && itemCurrency === txCurrency);
+  }
+
+  function predictedAmountForRecurringExpense(userId, expense, today, occurrenceDate = today, confirmedRows = null) {
     const startingAmount = Number(expense.amount || 0);
 
     if (expense.prediction_strategy !== "12month_max") {
       return startingAmount;
     }
 
-    const since = twelveMonthsAgoDate(today);
-    const rows = loadConfirmedTransactions(userId, since)
-      .filter(tx => tx.source_recurring_expense_id === expense.id && tx.type === "expense");
+    const predictionDate = occurrenceDate || today;
+    const rows = rowsInPredictionWindow(
+      confirmedRowsForPrediction(userId, predictionDate, confirmedRows),
+      predictionDate
+    )
+      .filter(tx => matchesRecurringPredictionSource(tx, expense, {
+        sourceColumn: "source_recurring_expense_id",
+        type: "expense"
+      }));
 
     return predictedTwelveMonthAmount({
       rows,
@@ -149,16 +197,22 @@
     });
   }
 
-  function predictedAmountForRecurringIncome(userId, income, today, occurrenceDate = today) {
+  function predictedAmountForRecurringIncome(userId, income, today, occurrenceDate = today, confirmedRows = null) {
     const startingAmount = Number(income.amount || 0);
 
     if (income.prediction_strategy !== "12month_min") {
       return startingAmount;
     }
 
-    const since = twelveMonthsAgoDate(today);
-    const rows = loadConfirmedTransactions(userId, since)
-      .filter(tx => tx.source_recurring_income_id === income.id && tx.type === "income");
+    const predictionDate = occurrenceDate || today;
+    const rows = rowsInPredictionWindow(
+      confirmedRowsForPrediction(userId, predictionDate, confirmedRows),
+      predictionDate
+    )
+      .filter(tx => matchesRecurringPredictionSource(tx, income, {
+        sourceColumn: "source_recurring_income_id",
+        type: "income"
+      }));
 
     return predictedTwelveMonthAmount({
       rows,
@@ -171,6 +225,7 @@
   }
   return {
     loadConfirmedTransactions,
+    confirmedRowsForPrediction,
     predictedAmountForRecurringExpense,
     predictedAmountForRecurringIncome
   };

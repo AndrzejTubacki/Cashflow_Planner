@@ -1,5 +1,6 @@
 import { requireHolidayCountry, requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
+import { roundMoneyAmount } from "./cashflow-money-utils.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
@@ -65,7 +66,7 @@ const TABLE_COLUMNS = {
   pending_transactions: [
     "id", "name", "currency", "amount", "type", "date", ...SOURCE_FIELDS, "fx_rate",
     "buffered_fx_rate", "ledger_currency", "status", "funded_amount", "requested_amount",
-    "ledger_amount", "running_balance", "note", "occurrence_key", "created_at", "updated_at"
+    "ledger_amount", "running_balance", "pending_origin", "note", "occurrence_key", "created_at", "updated_at"
   ],
   confirmed_transactions: [
     "id", "name", "currency", "amount", "type", "date", "confirmed_date", "fx_rate",
@@ -152,7 +153,14 @@ function optionalId(details, table, index, row, field) {
 }
 
 function requireNumber(details, table, index, row, field, options = {}) {
-  const { allowNull = false, integer = false, min = null, exclusiveMin = false, max = null } = options;
+  const {
+    allowNull = false,
+    integer = false,
+    min = null,
+    exclusiveMin = false,
+    max = null,
+    money = false
+  } = options;
   if (allowNull && (!isPresent(row, field) || row[field] === null)) return null;
   const value = row[field];
   if (
@@ -171,8 +179,9 @@ function requireNumber(details, table, index, row, field, options = {}) {
     details.push(detail(table, index, row, field, exclusiveMin ? "must_be_positive" : "below_minimum"));
   }
   if (max !== null && number > max) details.push(detail(table, index, row, field, "above_maximum"));
-  row[field] = number;
-  return number;
+  const normalized = money ? roundMoneyAmount(number) : number;
+  row[field] = normalized;
+  return normalized;
 }
 
 function optionalNumber(details, table, index, row, field, options = {}) {
@@ -290,7 +299,11 @@ function validateShape(details, table, rows) {
 function validateCommonEntity(details, table, index, row, { amountMin = 0, amountExclusive = false } = {}) {
   requireString(details, table, index, row, "name");
   currencyField(details, table, index, row, "currency");
-  requireNumber(details, table, index, row, "amount", { min: amountMin, exclusiveMin: amountExclusive });
+  requireNumber(details, table, index, row, "amount", {
+    min: amountMin,
+    exclusiveMin: amountExclusive,
+    money: true
+  });
   timestampField(details, table, index, row, "created_at");
   timestampField(details, table, index, row, "updated_at");
 }
@@ -389,8 +402,8 @@ function validateRows(exportData, options = {}) {
   planning.ledger_currency_events.forEach((row, index) => {
     currencyField(details, "ledger_currency_events", index, row, "old_currency");
     currencyField(details, "ledger_currency_events", index, row, "new_currency");
-    requireNumber(details, "ledger_currency_events", index, row, "old_balance");
-    requireNumber(details, "ledger_currency_events", index, row, "converted_opening_balance");
+    requireNumber(details, "ledger_currency_events", index, row, "old_balance", { money: true });
+    requireNumber(details, "ledger_currency_events", index, row, "converted_opening_balance", { money: true });
     requireNumber(details, "ledger_currency_events", index, row, "fx_rate", { min: 0, exclusiveMin: true });
     dateField(details, "ledger_currency_events", index, row, "rate_date");
     requireString(details, "ledger_currency_events", index, row, "source");
@@ -412,8 +425,8 @@ function validateRows(exportData, options = {}) {
     validateCommonEntity(details, "flex_transactions", index, row);
     booleanField(details, "flex_transactions", index, row, "active", { optional: true });
     booleanField(details, "flex_transactions", index, row, "allow_split", { optional: true });
-    optionalNumber(details, "flex_transactions", index, row, "min_amount", { min: 0 });
-    optionalNumber(details, "flex_transactions", index, row, "max_amount", { min: 0 });
+    optionalNumber(details, "flex_transactions", index, row, "min_amount", { min: 0, money: true });
+    optionalNumber(details, "flex_transactions", index, row, "max_amount", { min: 0, money: true });
     requireString(details, "flex_transactions", index, row, "planned_transaction_id", { id: true });
     if (row.min_amount !== null && row.max_amount !== null && Number(row.min_amount) > Number(row.max_amount)) {
       details.push(detail("flex_transactions", index, row, "min_amount", "greater_than_max_amount"));
@@ -454,9 +467,12 @@ function validateRows(exportData, options = {}) {
     dateField(details, "pending_transactions", index, row, "date");
     currencyField(details, "pending_transactions", index, row, "ledger_currency", { optional: true });
     enumField(details, "pending_transactions", index, row, "status", ["pending", "partial", "underfunded", "funded"], { optional: true });
+    enumField(details, "pending_transactions", index, row, "pending_origin", ["projection", "scheduled", "manual", "system"], { optional: true });
     for (const field of ["fx_rate", "buffered_fx_rate"]) optionalNumber(details, "pending_transactions", index, row, field, { min: 0, exclusiveMin: true });
-    for (const field of ["funded_amount", "requested_amount", "ledger_amount"]) optionalNumber(details, "pending_transactions", index, row, field, { min: 0 });
-    optionalNumber(details, "pending_transactions", index, row, "running_balance");
+    for (const field of ["funded_amount", "requested_amount", "ledger_amount"]) {
+      optionalNumber(details, "pending_transactions", index, row, field, { min: 0, money: true });
+    }
+    optionalNumber(details, "pending_transactions", index, row, "running_balance", { money: true });
     optionalString(details, "pending_transactions", index, row, "note");
     validateSources(details, "pending_transactions", index, row, { requireImported: sourceSets, expectedTypes });
     if (row.source_one_off_id && oneOffTypes.get(row.source_one_off_id) !== row.type) {
@@ -517,8 +533,8 @@ function validateRows(exportData, options = {}) {
       }
       currencyField(details, `ledger_${year}.confirmed_transactions`, index, row, "ledger_currency", { optional: true });
       for (const field of ["fx_rate", "buffered_fx_rate"]) optionalNumber(details, `ledger_${year}.confirmed_transactions`, index, row, field, { min: 0, exclusiveMin: true });
-      requireNumber(details, `ledger_${year}.confirmed_transactions`, index, row, "running_balance_pln");
-      optionalNumber(details, `ledger_${year}.confirmed_transactions`, index, row, "ledger_amount", { min: 0 });
+      requireNumber(details, `ledger_${year}.confirmed_transactions`, index, row, "running_balance_pln", { money: true });
+      optionalNumber(details, `ledger_${year}.confirmed_transactions`, index, row, "ledger_amount", { min: 0, money: true });
       validateSources(details, `ledger_${year}.confirmed_transactions`, index, row);
       timestampField(details, `ledger_${year}.confirmed_transactions`, index, row, "created_at");
       timestampField(details, `ledger_${year}.confirmed_transactions`, index, row, "updated_at");

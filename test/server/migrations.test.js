@@ -10,6 +10,10 @@ import {
   applyPlanningMigrations
 } from "../../src/server/cashflow-migrations.js";
 import { occurrenceKeyFromRow } from "../../src/server/cashflow-occurrence-utils.js";
+import {
+  LEDGER_SCHEMA_VERSION,
+  PLANNING_SCHEMA_VERSION
+} from "../../src/server/cashflow-schema.js";
 
 async function withTempDb(fn) {
   const dir = await mkdtemp(path.join(tmpdir(), "cashflow-migration-test-"));
@@ -22,6 +26,10 @@ async function withTempDb(fn) {
     db.close();
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+function indexNames(db) {
+  return new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
 }
 
 test("planning migration from version 8 adds locale and preserves valid settings data", () => withTempDb(db => {
@@ -69,7 +77,7 @@ test("planning migration from version 8 adds locale and preserves valid settings
   const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
   const oneOff = db.prepare("SELECT * FROM one_off_transactions WHERE id = 'old-one-off'").get();
 
-  assert.equal(version, 14);
+  assert.equal(version, PLANNING_SCHEMA_VERSION);
   assert.equal(columns.includes("locale"), true);
   assert.equal(columns.includes("setup_completed"), true);
   assert.equal(columns.includes("setup_completed_at"), true);
@@ -164,7 +172,7 @@ test("planning migration from version 9 adds prediction fallback fields", () => 
   const expense = db.prepare("SELECT * FROM recurring_expenses WHERE id = 'exp-1'").get();
   const income = db.prepare("SELECT * FROM recurring_incomes WHERE id = 'inc-1'").get();
 
-  assert.equal(version, 14);
+  assert.equal(version, PLANNING_SCHEMA_VERSION);
   assert.equal(expenseColumns.includes("prediction_substitute_missing"), true);
   assert.equal(incomeColumns.includes("prediction_substitute_missing"), true);
   assert.equal(expenseColumns.includes("prediction_min_recorded_months"), true);
@@ -216,9 +224,209 @@ test("ledger migration from version 2 adds occurrence keys and preserves ledger 
   const columns = db.prepare("PRAGMA table_info(confirmed_transactions)").all().map(column => column.name);
   const row = db.prepare("SELECT * FROM confirmed_transactions WHERE id = 'conf-1'").get();
 
-  assert.equal(version, 4);
+  assert.equal(version, LEDGER_SCHEMA_VERSION);
   assert.equal(columns.includes("occurrence_key"), true);
   assert.equal(row.ledger_amount, 25);
   assert.equal(row.running_balance_pln, 75);
   assert.equal(row.occurrence_key, "one_off:oneoff-1:expense:2026-01-02");
+}));
+
+test("planning migration rounds stored money columns to cents", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 15;
+
+    CREATE TABLE settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      minimum_reserve_amount REAL NOT NULL DEFAULT 0
+    );
+
+    INSERT INTO settings (id, minimum_reserve_amount)
+    VALUES (1, 100.129);
+
+    CREATE TABLE recurring_expenses (
+      id TEXT PRIMARY KEY,
+      amount REAL NOT NULL
+    );
+
+    INSERT INTO recurring_expenses (id, amount)
+    VALUES ('expense-1', 10.235);
+
+    CREATE TABLE pending_transactions (
+      id TEXT PRIMARY KEY,
+      amount REAL NOT NULL,
+      funded_amount REAL,
+      requested_amount REAL,
+      ledger_amount REAL,
+      running_balance REAL,
+      source_recurring_expense_id TEXT,
+      source_recurring_income_id TEXT,
+      source_one_off_id TEXT,
+      source_flex_id TEXT,
+      source_goal_id TEXT
+    );
+
+    INSERT INTO pending_transactions (
+      id, amount, funded_amount, requested_amount, ledger_amount, running_balance
+    ) VALUES (
+      'pending-1', 1.005, 2.335, 3.675, 4.995, 5.555
+    );
+
+    CREATE TABLE future_transactions (
+      id TEXT PRIMARY KEY,
+      amount REAL NOT NULL,
+      funded_amount REAL,
+      requested_amount REAL,
+      ledger_amount REAL,
+      running_balance REAL,
+      source_recurring_expense_id TEXT,
+      source_recurring_income_id TEXT,
+      source_one_off_id TEXT,
+      source_flex_id TEXT,
+      source_goal_id TEXT
+    );
+
+    INSERT INTO future_transactions (
+      id, amount, funded_amount, requested_amount, ledger_amount, running_balance
+    ) VALUES (
+      'future-1', 6.105, 7.335, 8.675, 9.995, 10.555
+    );
+  `);
+
+  applyPlanningMigrations(db);
+
+  assert.equal(db.pragma("user_version", { simple: true }), PLANNING_SCHEMA_VERSION);
+  assert.equal(db.prepare("SELECT minimum_reserve_amount FROM settings WHERE id = 1").get().minimum_reserve_amount, 100.13);
+  assert.equal(db.prepare("SELECT amount FROM recurring_expenses WHERE id = 'expense-1'").get().amount, 10.24);
+  assert.deepEqual(
+    db.prepare("SELECT amount, funded_amount, requested_amount, ledger_amount, running_balance FROM pending_transactions WHERE id = 'pending-1'").get(),
+    {
+      amount: 1.01,
+      funded_amount: 2.34,
+      requested_amount: 3.68,
+      ledger_amount: 5,
+      running_balance: 5.56
+    }
+  );
+  assert.deepEqual(
+    db.prepare("SELECT amount, funded_amount, requested_amount, ledger_amount, running_balance FROM future_transactions WHERE id = 'future-1'").get(),
+    {
+      amount: 6.11,
+      funded_amount: 7.34,
+      requested_amount: 8.68,
+      ledger_amount: 10,
+      running_balance: 10.56
+    }
+  );
+}));
+
+test("ledger migration rounds stored money columns to cents", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 4;
+
+    CREATE TABLE confirmed_transactions (
+      id TEXT PRIMARY KEY,
+      amount REAL NOT NULL,
+      running_balance_pln REAL NOT NULL,
+      ledger_amount REAL,
+      source_recurring_expense_id TEXT,
+      source_recurring_income_id TEXT,
+      source_one_off_id TEXT,
+      source_flex_id TEXT,
+      source_goal_id TEXT,
+      occurrence_key TEXT
+    );
+
+    INSERT INTO confirmed_transactions (
+      id, amount, running_balance_pln, ledger_amount
+    ) VALUES (
+      'confirmed-1', 10.235, 20.675, 30.995
+    );
+  `);
+
+  applyLedgerMigrations(db, { occurrenceKeyFromRow });
+
+  assert.equal(db.pragma("user_version", { simple: true }), LEDGER_SCHEMA_VERSION);
+  assert.deepEqual(
+    db.prepare("SELECT amount, running_balance_pln, ledger_amount FROM confirmed_transactions WHERE id = 'confirmed-1'").get(),
+    {
+      amount: 10.24,
+      running_balance_pln: 20.68,
+      ledger_amount: 31
+    }
+  );
+}));
+
+test("current planning migrations create source indexes for existing databases", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 14;
+
+    CREATE TABLE future_transactions (
+      id TEXT PRIMARY KEY,
+      source_recurring_expense_id TEXT,
+      source_recurring_income_id TEXT,
+      source_one_off_id TEXT,
+      source_flex_id TEXT,
+      source_goal_id TEXT
+    );
+
+    CREATE TABLE pending_transactions (
+      id TEXT PRIMARY KEY,
+      source_recurring_expense_id TEXT,
+      source_recurring_income_id TEXT,
+      source_one_off_id TEXT,
+      source_flex_id TEXT,
+      source_goal_id TEXT
+    );
+  `);
+
+  applyPlanningMigrations(db);
+
+  const indexes = indexNames(db);
+  const pendingColumns = db.prepare("PRAGMA table_info(pending_transactions)").all().map(column => column.name);
+  assert.equal(pendingColumns.includes("pending_origin"), true);
+
+  for (const name of [
+    "idx_future_source_recurring_expense",
+    "idx_future_source_recurring_income",
+    "idx_future_source_one_off",
+    "idx_future_source_goal",
+    "idx_future_source_flex",
+    "idx_pending_source_recurring_expense",
+    "idx_pending_source_recurring_income",
+    "idx_pending_source_one_off",
+    "idx_pending_source_goal",
+    "idx_pending_source_flex"
+  ]) {
+    assert.equal(indexes.has(name), true, name);
+  }
+}));
+
+test("current ledger migrations create confirmed source indexes for existing databases", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 4;
+
+    CREATE TABLE confirmed_transactions (
+      id TEXT PRIMARY KEY,
+      source_recurring_expense_id TEXT,
+      source_recurring_income_id TEXT,
+      source_one_off_id TEXT,
+      source_flex_id TEXT,
+      source_goal_id TEXT,
+      occurrence_key TEXT
+    );
+  `);
+
+  applyLedgerMigrations(db, { occurrenceKeyFromRow });
+
+  const indexes = indexNames(db);
+  for (const name of [
+    "idx_confirmed_source_recurring_expense",
+    "idx_confirmed_source_recurring_income",
+    "idx_confirmed_source_one_off",
+    "idx_confirmed_source_goal",
+    "idx_confirmed_source_flex",
+    "idx_confirmed_occurrence_key"
+  ]) {
+    assert.equal(indexes.has(name), true, name);
+  }
 }));

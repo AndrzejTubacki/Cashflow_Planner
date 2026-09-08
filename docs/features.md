@@ -36,10 +36,12 @@ The core workflow is:
 - per-period funding overview
 - configurable ledger currency with FX conversion
 - configurable app timezone for date-sensitive planning and scheduled jobs
-- user selection screen for separate planner profiles
+- account and budget selection for separate planner datasets
 - first-run setup for currency, locale, timezone, non-negative opening balance,
   recurring income, and projection horizon
 - admin tab for global defaults applied to newly created users
+- admin-managed internal email/password login with one-time setup/reset tokens
+- trusted reverse-proxy/SSO login using stable subject headers
 - FX conversion with disabled, manual, NBP, and Frankfurter provider options
 - Docker support
 - backup and restore support for self-hosted installs
@@ -118,9 +120,12 @@ automatically.
 
 ## Current Limitations
 
-- Cashflow does not include built-in login yet. Use deployment-level access
-  control before exposing it outside a trusted network.
-- User profiles are separate planner datasets, not protected accounts.
-- Every newly created profile currently receives admin access by default.
+- `none` mode is still a compatibility mode without credential checks. Use
+  deployment-level access control before exposing it outside a trusted network.
+- Internal email/password login, trusted reverse-proxy/SSO login, and
+  internal-mode provider login are available after admin setup and explicit
+  identity linking.
+- Old profile headers remain as deprecated none-mode budget aliases for one
+  compatibility release.
 - Some advanced data operations, especially imports and currency changes, should
   still be used carefully and backed up first.

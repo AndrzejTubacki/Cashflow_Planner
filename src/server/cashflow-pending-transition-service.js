@@ -25,9 +25,9 @@ export function createCashflowPendingTransitionService({
           source_recurring_expense_id, source_recurring_income_id, source_one_off_id,
           source_flex_id, source_goal_id,
           fx_rate, buffered_fx_rate, ledger_currency,
-          status, funded_amount, requested_amount, ledger_amount, note, occurrence_key,
+          status, funded_amount, requested_amount, ledger_amount, pending_origin, note, occurrence_key,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
 
       const deleteFuture = db.prepare("DELETE FROM future_transactions WHERE id = ?");
@@ -66,6 +66,7 @@ export function createCashflowPendingTransitionService({
             tx.funded_amount ?? tx.amount,
             tx.requested_amount ?? tx.amount,
             tx.ledger_amount || null,
+            "scheduled",
             tx.note || null,
             occurrenceKey
           );
@@ -139,9 +140,9 @@ export function createCashflowPendingTransitionService({
           source_recurring_expense_id, source_recurring_income_id, source_one_off_id,
           source_flex_id, source_goal_id,
           fx_rate, buffered_fx_rate, ledger_currency,
-          status, funded_amount, requested_amount, ledger_amount, note, occurrence_key,
+          status, funded_amount, requested_amount, ledger_amount, pending_origin, note, occurrence_key,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       `);
 
       result = db.transaction(() => {
@@ -198,6 +199,7 @@ export function createCashflowPendingTransitionService({
           tx.funded_amount ?? tx.amount,
           tx.requested_amount ?? tx.amount,
           tx.ledger_amount ?? null,
+          "manual",
           tx.note || null,
           occurrenceKey
         );

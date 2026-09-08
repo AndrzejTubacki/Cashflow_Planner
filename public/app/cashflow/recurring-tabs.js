@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { formatMessage, t } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
@@ -30,11 +31,11 @@ export function renderRecurringExpensesTab(locale, cashflow) {
       type: r.necessary ? t(locale, "Necessary") : t(locale, "Optional"),
       status: r.active ? "pending" : "disabled",
       amount: Number(r.amount) || 0,
-      currency: r.currency || "PLN",
+      currency: r.currency || DEFAULT_LEDGER_CURRENCY,
       ledger_amount: currentPrediction,
-      ledger_amount_currency: r.currency || "PLN",
+      ledger_amount_currency: r.currency || DEFAULT_LEDGER_CURRENCY,
       ledger_amount_ledger_amount: currentPredictionLedger,
-      ledger_currency: cashflow?.settings?.ledger_currency || "PLN",
+      ledger_currency: cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY,
       note: [
         r.active ? t(locale, "Active") : t(locale, "Disabled"),
         occurrenceNote
@@ -52,6 +53,7 @@ export function renderRecurringExpensesTab(locale, cashflow) {
         <div data-recurring-list>
           ${renderTransactionTable(items, locale, {
             entityType: "recurring-expense",
+            canDelete: true,
             ledgerAmountLabel: t(locale, "Current prediction"),
             showRunningBalance: false
           })}
@@ -69,7 +71,7 @@ export function renderRecurringIncomeTab(locale, cashflow) {
     type: "income",
     status: r.active ? "funded" : "pending",
     amount: Number(r.amount) || 0,
-    currency: r.currency || "PLN",
+    currency: r.currency || DEFAULT_LEDGER_CURRENCY,
     note: r.period_setting ? t(locale, "Defines budget period") : ""
   }));
 
@@ -85,6 +87,7 @@ export function renderRecurringIncomeTab(locale, cashflow) {
         <div data-income-list>
           ${renderTransactionTable(items, locale, {
             entityType: "recurring-income",
+            canDelete: true,
             showLedgerAmount: false,
             showRunningBalance: false
           })}

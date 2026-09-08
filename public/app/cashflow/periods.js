@@ -1,10 +1,11 @@
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { formatMoney, renderStatCard, t } from "./shared.js";
 
 export function renderBudgetPeriodStats(locale, cashflow) {
   if (!cashflow) return "";
 
   const settings = cashflow.settings || {};
-  const ledgerCurrency = settings.ledger_currency || "PLN";
+  const ledgerCurrency = settings.ledger_currency || DEFAULT_LEDGER_CURRENCY;
   const recurringIncomes = cashflow.recurringIncomes || [];
   const activePeriodIncomeId = settings.budget_period_income_id;
   const activePeriodIncome = recurringIncomes.find(r => r.id === activePeriodIncomeId);

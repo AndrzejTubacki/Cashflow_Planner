@@ -1,5 +1,10 @@
 import { escapeHtml } from "../utils.js";
-import { SUPPORTED_FX_CURRENCIES } from "./constants.js";
+import {
+  DEFAULT_LEDGER_CURRENCY,
+  HOLIDAY_COUNTRIES,
+  PREDICTION_SUBSTITUTE_OPTIONS,
+  SUPPORTED_FX_CURRENCIES
+} from "./constants.js";
 import { t, todayForCashflow } from "./shared.js";
 
 function fieldValue(item, name, fallback = "") {
@@ -15,7 +20,7 @@ function checkedAttr(value, fallback = false) {
 }
 
 function renderCurrencySelect(locale, item = {}) {
-  const selected = String(item?.currency || "PLN").toUpperCase();
+  const selected = String(item?.currency || DEFAULT_LEDGER_CURRENCY).toUpperCase();
 
   return `
     <label>
@@ -54,16 +59,11 @@ function nextAvailablePriority(cashflow, entityType) {
 function renderHolidayCountrySelect(locale, item = {}, cashflow = null) {
   const selected = String(item?.anchor_holiday_country || cashflow?.settings?.holiday_country || "PL").toUpperCase();
 
-  const countries = [
-    { code: "PL", labelKey: "Poland" },
-    { code: "DE", labelKey: "Germany" }
-  ];
-
   return `
     <label data-anchor-holiday-country-field>
       <span>${escapeHtml(t(locale, "Holiday country"))}</span>
       <select name="anchor_holiday_country">
-        ${countries.map(country => `
+        ${HOLIDAY_COUNTRIES.map(country => `
           <option value="${escapeHtml(country.code)}"${selected === country.code ? " selected" : ""}>
             ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
           </option>
@@ -75,21 +75,12 @@ function renderHolidayCountrySelect(locale, item = {}, cashflow = null) {
 
 function renderPredictionSubstituteSelect(locale, item = {}) {
   const selected = fieldValue(item, "prediction_substitute_missing", "none");
-  const options = [
-    { value: "none", label: "None" },
-    { value: "starting_value", label: "Starting value" },
-    { value: "average_extreme_starting_value", label: "Average of recorded extreme and starting value" },
-    { value: "median_recorded", label: "Median recorded" },
-    { value: "last_confirmed", label: "Last confirmed" },
-    { value: "previous_year_same_month", label: "Previous year same month" },
-    { value: "require_min_recorded_months", label: "Require minimum recorded months" }
-  ];
 
   return `
     <label data-prediction-substitute-field>
       <span>${escapeHtml(t(locale, "Substitute missing with"))}</span>
       <select name="prediction_substitute_missing">
-        ${options.map(option => `<option value="${escapeHtml(option.value)}"${selected === option.value ? " selected" : ""}>${escapeHtml(t(locale, option.label))}</option>`).join("")}
+        ${PREDICTION_SUBSTITUTE_OPTIONS.map(option => `<option value="${escapeHtml(option.value)}"${selected === option.value ? " selected" : ""}>${escapeHtml(t(locale, option.labelKey))}</option>`).join("")}
       </select>
     </label>
   `;
@@ -130,7 +121,7 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
     <label>
       <span>${escapeHtml(t(locale, "Amount"))}</span>
-      <input name="amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "amount", "0"))}" required>
+      <input name="amount" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${escapeHtml(fieldValue(item, "amount", "0"))}" required>
     </label>
   `;
 
@@ -303,12 +294,12 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
       <label data-flex-split-field>
         <span>${escapeHtml(t(locale, "Minimum"))}</span>
-        <input name="min_amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "min_amount"))}">
+        <input name="min_amount" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${escapeHtml(fieldValue(item, "min_amount"))}">
       </label>
 
       <label data-flex-split-field>
         <span>${escapeHtml(t(locale, "Maximum"))}</span>
-        <input name="max_amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "max_amount"))}">
+        <input name="max_amount" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${escapeHtml(fieldValue(item, "max_amount"))}">
       </label>
     `;
   }
@@ -322,7 +313,7 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
       <label>
         <span>${escapeHtml(t(locale, "Amount"))}</span>
-        <input name="amount" type="number" min="0" step="0.01" value="${escapeHtml(fieldValue(item, "amount", "0"))}" required>
+        <input name="amount" type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" value="${escapeHtml(fieldValue(item, "amount", "0"))}" required>
       </label>
 
       <label>

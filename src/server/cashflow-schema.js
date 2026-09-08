@@ -4,8 +4,8 @@ import {
   NOTIFICATION_DELIVERY_TIME
 } from "./cashflow-constants.js";
 
-export const PLANNING_SCHEMA_VERSION = 14;
-export const LEDGER_SCHEMA_VERSION = 4;
+export const PLANNING_SCHEMA_VERSION = 16;
+export const LEDGER_SCHEMA_VERSION = 5;
 
 export function initializePlanningSchema(db) {
   db.exec(`
@@ -225,6 +225,8 @@ export function initializePlanningSchema(db) {
       requested_amount REAL,
       ledger_amount REAL,
       running_balance REAL,
+      pending_origin TEXT NOT NULL DEFAULT 'projection'
+        CHECK (pending_origin IN ('projection', 'scheduled', 'manual', 'system')),
       note TEXT,
       occurrence_key TEXT,
       created_at TEXT NOT NULL,
@@ -316,8 +318,18 @@ export function initializePlanningSchema(db) {
     CREATE INDEX idx_future_date ON future_transactions(date);
     CREATE INDEX idx_future_period ON future_transactions(period);
     CREATE INDEX idx_future_occurrence_key ON future_transactions(occurrence_key);
+    CREATE INDEX idx_future_source_recurring_expense ON future_transactions(source_recurring_expense_id);
+    CREATE INDEX idx_future_source_recurring_income ON future_transactions(source_recurring_income_id);
+    CREATE INDEX idx_future_source_one_off ON future_transactions(source_one_off_id);
+    CREATE INDEX idx_future_source_goal ON future_transactions(source_goal_id);
+    CREATE INDEX idx_future_source_flex ON future_transactions(source_flex_id);
 
     CREATE INDEX idx_pending_date ON pending_transactions(date);
+    CREATE INDEX idx_pending_source_recurring_expense ON pending_transactions(source_recurring_expense_id);
+    CREATE INDEX idx_pending_source_recurring_income ON pending_transactions(source_recurring_income_id);
+    CREATE INDEX idx_pending_source_one_off ON pending_transactions(source_one_off_id);
+    CREATE INDEX idx_pending_source_goal ON pending_transactions(source_goal_id);
+    CREATE INDEX idx_pending_source_flex ON pending_transactions(source_flex_id);
     CREATE UNIQUE INDEX idx_pending_occurrence_key
       ON pending_transactions(occurrence_key)
       WHERE occurrence_key IS NOT NULL;
@@ -359,6 +371,9 @@ export function initializeLedgerSchema(db) {
 
     CREATE INDEX idx_confirmed_date ON confirmed_transactions(date);
     CREATE INDEX idx_confirmed_confirmed_date ON confirmed_transactions(confirmed_date);
+    CREATE INDEX idx_confirmed_source_recurring_expense ON confirmed_transactions(source_recurring_expense_id);
+    CREATE INDEX idx_confirmed_source_recurring_income ON confirmed_transactions(source_recurring_income_id);
+    CREATE INDEX idx_confirmed_source_one_off ON confirmed_transactions(source_one_off_id);
     CREATE INDEX idx_confirmed_source_goal ON confirmed_transactions(source_goal_id);
     CREATE INDEX idx_confirmed_source_flex ON confirmed_transactions(source_flex_id);
     CREATE INDEX idx_confirmed_occurrence_key ON confirmed_transactions(occurrence_key);

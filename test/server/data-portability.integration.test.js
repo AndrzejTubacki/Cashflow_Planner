@@ -722,6 +722,55 @@ test("full import rejects malformed rows before backup or writes", async () => w
   assert.equal(snapshot.oneOffs.some(row => row.id === oneOff.id), true);
 }));
 
+test("full import rounds imported money columns before insertion", async () => withHarness(async harness => {
+  const sample = await harness.api("/api/export/sample");
+  sample.planning.one_off_transactions[0].amount = 123.456;
+  sample.planning.pending_transactions.push({
+    id: "sample-import-pending",
+    name: "Imported pending",
+    currency: "PLN",
+    amount: 10.005,
+    type: "expense",
+    date: "2026-07-15",
+    source_recurring_expense_id: null,
+    source_recurring_income_id: null,
+    source_one_off_id: "sample-oneoff-laptop",
+    source_flex_id: null,
+    source_goal_id: null,
+    fx_rate: 1,
+    buffered_fx_rate: 1,
+    ledger_currency: "PLN",
+    status: "pending",
+    funded_amount: 10.005,
+    requested_amount: 10.005,
+    ledger_amount: 10.005,
+    running_balance: null,
+    pending_origin: "manual",
+    note: null,
+    occurrence_key: "sample-import-pending",
+    created_at: sample.planning.one_off_transactions[0].created_at,
+    updated_at: sample.planning.one_off_transactions[0].updated_at
+  });
+  sample.ledgers["2026"][0].amount = 7000.005;
+  sample.ledgers["2026"][0].ledger_amount = 7000.005;
+  sample.ledgers["2026"][0].running_balance_pln = 7000.005;
+
+  const imported = await harness.api("/api/import/full", {
+    method: "POST",
+    body: {
+      mode: "replace",
+      export: sample
+    }
+  });
+
+  assert.equal(imported.oneOffs.find(row => row.id === "sample-oneoff-laptop").amount, 123.46);
+  assert.equal(imported.pendingTransactions.find(row => row.id === "sample-import-pending").amount, 10.01);
+  assert.equal(imported.pendingTransactions.find(row => row.id === "sample-import-pending").ledger_amount, 10.01);
+  assert.equal(imported.confirmedTransactions.find(row => row.id === "sample-ledger-salary-2026-01").amount, 7000.01);
+  assert.equal(imported.confirmedTransactions.find(row => row.id === "sample-ledger-salary-2026-01").ledger_amount, 7000.01);
+  assert.equal(imported.confirmedTransactions.find(row => row.id === "sample-ledger-salary-2026-01").running_balance, 7000.01);
+}));
+
 test("full import validates table-specific values and relationships before backup", async () => withHarness(async harness => {
   const sample = await harness.api("/api/export/sample");
   const beforeBackups = backupCount(harness);
@@ -962,12 +1011,13 @@ test("CSV one-off import appends and replaces unconfirmed one-offs", async () =>
     method: "POST",
     body: {
       mode: "replace",
-      csv: "name,type,amount,currency,date\nCSV replacement,expense,12,PLN,2026-06-12"
+      csv: "name,type,amount,currency,date\nCSV replacement,expense,\"12,345\",PLN,2026-06-12"
     }
   });
 
   assert.equal(replaced.import.imported, 1);
   assert.equal(replaced.oneOffs.some(row => row.name === "CSV replacement"), true);
+  assert.equal(replaced.oneOffs.find(row => row.name === "CSV replacement").amount, 12.35);
   assert.equal(replaced.oneOffs.some(row => row.name === "CSV income"), false);
 }));
 

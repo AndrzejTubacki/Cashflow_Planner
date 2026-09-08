@@ -1,8 +1,12 @@
 ﻿import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { recurringOccurrencesInPeriod, todayInTimezone } from "./cashflow-date-utils.js";
 import {
+  addMoneyAmounts,
   getBufferedFxForCurrency,
-  normalizeCurrency
+  multiplyMoney,
+  normalizeCurrency,
+  roundMoneyAmount,
+  subtractMoneyAmounts
 } from "./cashflow-money-utils.js";
 import {
   normalizeFxCurrencyList,
@@ -10,11 +14,14 @@ import {
   normalizeManualFxPairs,
   normalizeManualFxRates
 } from "./cashflow-fx-provider-utils.js";
+import { periodAnchorOverridesForIncome } from "./cashflow-period-utils.js";
 
 export function createCashflowSnapshotService({
   buildBudgetPeriods,
   buildPeriodSummariesFromDefinitions,
+  confirmedFundingTotals = null,
   getCachedFxSnapshot,
+  confirmedRowsForPrediction = null,
   listAvailableLocales = () => [{ id: "en", label: "English" }],
   loadAllConfirmedTransactions,
   openPlanningDb,
@@ -128,6 +135,15 @@ export function createCashflowSnapshotService({
       const missingFxRates = new Set();
 
       const today = todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
+      let predictionRows = null;
+      const predictionRowsForRun = () => {
+        if (!predictionRows) {
+          predictionRows = typeof confirmedRowsForPrediction === "function"
+            ? confirmedRowsForPrediction(userId, today)
+            : null;
+        }
+        return predictionRows;
+      };
 
       const safeConvertToLedger = (amount, currency, type = "expense") => {
         try {
@@ -135,7 +151,7 @@ export function createCashflowSnapshotService({
 
           return {
             ok: true,
-            value: Number(amount || 0) * rates.buffered,
+            value: multiplyMoney(amount, rates.buffered),
             fx: rates.fx,
             buffered: rates.buffered,
             error: null
@@ -175,11 +191,27 @@ export function createCashflowSnapshotService({
         };
       });
 
+      const pendingTransactions = db.prepare(`
+        SELECT *
+        FROM pending_transactions
+        ORDER BY date ASC, created_at ASC, id ASC
+      `).all();
+
+      const rawConfirmedTransactions = loadAllConfirmedTransactions(userId);
+      const periodAnchorOverrides = periodAnchorOverridesForIncome(
+        settings?.budget_period_income_id,
+        [
+          ...rawConfirmedTransactions,
+          ...pendingTransactions
+        ]
+      );
+
       const periods = buildBudgetPeriods(
         settings || {},
         recurringIncomes || [],
         today,
-        Number(settings?.future_periods || DEFAULT_FUTURE_PERIODS)
+        Number(settings?.future_periods || DEFAULT_FUTURE_PERIODS),
+        { anchorOverrides: periodAnchorOverrides }
       );
 
       const recurringExpensesRaw = db.prepare(`
@@ -190,7 +222,13 @@ export function createCashflowSnapshotService({
       `).all();
 
       const recurringExpenses = recurringExpensesRaw.map(expense => {
-        const currentPrediction = predictedAmountForRecurringExpense(userId, expense, today);
+        const currentPrediction = roundMoneyAmount(predictedAmountForRecurringExpense(
+          userId,
+          expense,
+          today,
+          today,
+          expense.prediction_strategy === "12month_max" ? predictionRowsForRun() : null
+        ));
         const currentPredictionLedger = safeConvertToLedger(
           currentPrediction,
           expense.currency,
@@ -209,12 +247,6 @@ export function createCashflowSnapshotService({
           ...summarizeRecurringExpenseOccurrences(db, expense, periods, today)
         };
       });
-
-      const pendingTransactions = db.prepare(`
-        SELECT *
-        FROM pending_transactions
-        ORDER BY date ASC, created_at ASC, id ASC
-      `).all();
 
       const futureTransactions = db.prepare(`
         SELECT *
@@ -258,7 +290,17 @@ export function createCashflowSnapshotService({
         ORDER BY pt.operating_priority ASC
       `).all();
 
-      const confirmedTransactions = loadAllConfirmedTransactions(userId)
+      const confirmedFunding = typeof confirmedFundingTotals === "function"
+        ? confirmedFundingTotals(userId, ledgerCurrency, settings)
+        : null;
+      const confirmedGoalFundingFor = goalId => roundMoneyAmount(confirmedFunding
+        ? confirmedFunding.source_goal_id.get(goalId)
+        : sumConfirmedFunding(userId, "source_goal_id", goalId, ledgerCurrency, settings));
+      const confirmedFlexFundingFor = flexId => roundMoneyAmount(confirmedFunding
+        ? confirmedFunding.source_flex_id.get(flexId)
+        : sumConfirmedFunding(userId, "source_flex_id", flexId, ledgerCurrency, settings));
+
+      const confirmedTransactions = rawConfirmedTransactions
         .map(tx => ({
           ...tx,
           ledger_year: tx.ledger_year || String(tx.date || "").slice(0, 4),
@@ -267,12 +309,12 @@ export function createCashflowSnapshotService({
           funded_amount: tx.funded_amount ?? tx.amount,
           ledger_amount:
             tx.ledger_amount !== null && tx.ledger_amount !== undefined
-              ? Number(tx.ledger_amount || 0)
-              : Number(tx.amount || 0) * Number(tx.buffered_fx_rate || tx.fx_rate || 1),
+              ? roundMoneyAmount(tx.ledger_amount)
+              : multiplyMoney(tx.amount, tx.buffered_fx_rate || tx.fx_rate || 1),
           running_balance:
             tx.running_balance !== null && tx.running_balance !== undefined
-              ? tx.running_balance
-              : tx.running_balance_pln
+              ? roundMoneyAmount(tx.running_balance)
+              : roundMoneyAmount(tx.running_balance_pln)
         }))
         .sort((a, b) => {
           const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
@@ -286,7 +328,7 @@ export function createCashflowSnapshotService({
 
       const goalSummaries = goals.map(goal => {
         const target = safeConvertToLedger(goal.amount, goal.currency, "expense");
-        const alreadyFundedLedger = sumConfirmedFunding(userId, "source_goal_id", goal.id, ledgerCurrency, settings);
+        const alreadyFundedLedger = confirmedGoalFundingFor(goal.id);
 
         const futureAllocatedLedger = db.prepare(`
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
@@ -310,12 +352,16 @@ export function createCashflowSnapshotService({
           LIMIT 1
         `).get(goal.id);
 
-        const totalPlannedLedger =
-          Number(alreadyFundedLedger || 0) +
-          Number(futureAllocatedLedger || 0) +
-          Number(pendingAllocatedLedger || 0);
+        const normalizedFutureAllocatedLedger = roundMoneyAmount(futureAllocatedLedger);
+        const normalizedPendingAllocatedLedger = roundMoneyAmount(pendingAllocatedLedger);
+        const totalPlannedLedger = addMoneyAmounts(
+          alreadyFundedLedger,
+          normalizedFutureAllocatedLedger,
+          normalizedPendingAllocatedLedger
+        );
 
         const targetLedger = target.ok ? target.value : null;
+        const remainingLedger = target.ok ? Math.max(0, subtractMoneyAmounts(targetLedger, totalPlannedLedger)) : null;
         const fundedByDate = latestFundingDate(db, "source_goal_id", goal.id, ledgerCurrency);
 
         return {
@@ -324,12 +370,12 @@ export function createCashflowSnapshotService({
           ledger_currency: ledgerCurrency,
           already_funded: alreadyFundedLedger,
           already_funded_ledger: alreadyFundedLedger,
-          pending_allocated: pendingAllocatedLedger,
-          pending_allocated_ledger: pendingAllocatedLedger,
-          future_allocated: futureAllocatedLedger,
-          future_allocated_ledger: futureAllocatedLedger,
-          remaining: target.ok ? Math.max(0, targetLedger - totalPlannedLedger) : null,
-          remaining_ledger: target.ok ? Math.max(0, targetLedger - totalPlannedLedger) : null,
+          pending_allocated: normalizedPendingAllocatedLedger,
+          pending_allocated_ledger: normalizedPendingAllocatedLedger,
+          future_allocated: normalizedFutureAllocatedLedger,
+          future_allocated_ledger: normalizedFutureAllocatedLedger,
+          remaining: remainingLedger,
+          remaining_ledger: remainingLedger,
           impossible: Boolean(impossible),
           funded_by_date: fundedByDate,
           warning: target.ok
@@ -341,7 +387,7 @@ export function createCashflowSnapshotService({
 
       const flexSummaries = flexTransactions.map(flex => {
         const target = safeConvertToLedger(flex.amount, flex.currency, "expense");
-        const alreadyFundedLedger = sumConfirmedFunding(userId, "source_flex_id", flex.id, ledgerCurrency, settings);
+        const alreadyFundedLedger = confirmedFlexFundingFor(flex.id);
 
         const futureAllocatedLedger = db.prepare(`
           SELECT COALESCE(SUM(ledger_amount), 0) AS v
@@ -357,12 +403,16 @@ export function createCashflowSnapshotService({
             AND COALESCE(ledger_currency, 'PLN') = ?
         `).get(flex.id, ledgerCurrency).v;
 
-        const totalPlannedLedger =
-          Number(alreadyFundedLedger || 0) +
-          Number(futureAllocatedLedger || 0) +
-          Number(pendingAllocatedLedger || 0);
+        const normalizedFutureAllocatedLedger = roundMoneyAmount(futureAllocatedLedger);
+        const normalizedPendingAllocatedLedger = roundMoneyAmount(pendingAllocatedLedger);
+        const totalPlannedLedger = addMoneyAmounts(
+          alreadyFundedLedger,
+          normalizedFutureAllocatedLedger,
+          normalizedPendingAllocatedLedger
+        );
 
         const targetLedger = target.ok ? target.value : null;
+        const remainingLedger = target.ok ? Math.max(0, subtractMoneyAmounts(targetLedger, totalPlannedLedger)) : null;
         const fundedByDate = latestFlexFundingDate(db, flex.id, ledgerCurrency);
 
         return {
@@ -371,12 +421,12 @@ export function createCashflowSnapshotService({
           ledger_currency: ledgerCurrency,
           already_funded: alreadyFundedLedger,
           already_funded_ledger: alreadyFundedLedger,
-          pending_allocated: pendingAllocatedLedger,
-          pending_allocated_ledger: pendingAllocatedLedger,
-          future_allocated: futureAllocatedLedger,
-          future_allocated_ledger: futureAllocatedLedger,
-          remaining: target.ok ? Math.max(0, targetLedger - totalPlannedLedger) : null,
-          remaining_ledger: target.ok ? Math.max(0, targetLedger - totalPlannedLedger) : null,
+          pending_allocated: normalizedPendingAllocatedLedger,
+          pending_allocated_ledger: normalizedPendingAllocatedLedger,
+          future_allocated: normalizedFutureAllocatedLedger,
+          future_allocated_ledger: normalizedFutureAllocatedLedger,
+          remaining: remainingLedger,
+          remaining_ledger: remainingLedger,
           funded_by_date: fundedByDate,
           fx_missing: !target.ok,
           warning: target.ok ? null : target.error
@@ -386,7 +436,13 @@ export function createCashflowSnapshotService({
       const periodSummaries = buildPeriodSummariesFromDefinitions(
         settings || {},
         recurringIncomes || [],
-        futureTransactions || []
+        futureTransactions || [],
+        {
+          anchorOverrides: periodAnchorOverrides,
+          confirmedTransactions: rawConfirmedTransactions,
+          pendingTransactions,
+          today
+        }
       );
 
       const ledger = db.prepare(`

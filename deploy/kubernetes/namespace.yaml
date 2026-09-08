@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cashflow-staging
+  labels:
+    app.kubernetes.io/name: cashflow
+    app.kubernetes.io/part-of: cashflow
+    app.kubernetes.io/environment: staging

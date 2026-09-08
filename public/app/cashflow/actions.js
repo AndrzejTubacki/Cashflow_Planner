@@ -80,8 +80,8 @@ export async function validateCashflowAction(apiClient, button) {
   }
 }
 
-export async function deleteCashflowEntity(apiClient, button, entityType, id) {
-  if (!window.confirm(t(null, "Delete this transaction?"))) return;
+export async function deleteCashflowEntity(apiClient, button, entityType, id, confirmMessage = "") {
+  if (!window.confirm(t(null, confirmMessage || "Delete this transaction?"))) return;
 
   const oldText = button.textContent;
   button.disabled = true;

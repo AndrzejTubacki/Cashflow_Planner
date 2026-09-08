@@ -5,7 +5,18 @@ import {
   replaceTableRowsFromBackup,
   tableExists
 } from "./cashflow-db-utils.js";
+import {
+  requireHolidayCountry,
+  requireIsoDate,
+  requireIsoMonth
+} from "./cashflow-date-utils.js";
+import {
+  FX_PROVIDER_IDS,
+  SUPPORTED_FX_CURRENCIES,
+  requireSupportedCurrency
+} from "./cashflow-fx-provider-utils.js";
 import { cleanupMigrationRecoveryFolders } from "./cashflow-migration-recovery.js";
+import { addMoneyAmounts, multiplyMoney, roundMoneyAmount, subtractMoneyAmounts } from "./cashflow-money-utils.js";
 import { badRequest, notFound } from "./cashflow-user-utils.js";
 
 const PROJECTION_SNAPSHOT_RETENTION = 100;
@@ -13,6 +24,14 @@ const EVENT_LOG_RETENTION = 2_000;
 const SENT_NOTIFICATION_RETENTION = 1_000;
 const FAILED_BACKUP_METADATA_RETENTION = 100;
 const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_FIELDS = [
+  "source_recurring_expense_id",
+  "source_recurring_income_id",
+  "source_one_off_id",
+  "source_flex_id",
+  "source_goal_id"
+];
+const ACTIVE_LEDGER_DRIFT_EPSILON = 0.01;
 
 export function createCashflowBackupService({
   backupDir,
@@ -116,11 +135,386 @@ export function createCashflowBackupService({
     };
   }
 
+  function pushWarning(warnings, type, message, details = {}) {
+    warnings.push({
+      type,
+      message,
+      details
+    });
+  }
+
+  function isFiniteNumber(value) {
+    return typeof value !== "boolean" && Number.isFinite(Number(value));
+  }
+
+  function isValidDate(value) {
+    try {
+      requireIsoDate(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isValidMonth(value) {
+    try {
+      requireIsoMonth(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isValidCurrency(value) {
+    try {
+      requireSupportedCurrency(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isValidHolidayCountry(value) {
+    try {
+      requireHolidayCountry(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function isValidTimezone(value) {
+    const timezone = String(value || "").trim();
+    if (!timezone) return false;
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(new Date());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function parseJsonForValidation(value) {
+    if (value === null || value === undefined || value === "") return null;
+    if (typeof value === "object") return value;
+    try {
+      return JSON.parse(String(value));
+    } catch {
+      return undefined;
+    }
+  }
+
+  function sourceCount(row) {
+    return SOURCE_FIELDS.filter(field => row?.[field]).length;
+  }
+
+  function collectSourceSets(db) {
+    return {
+      source_recurring_expense_id: new Set(db.prepare("SELECT id FROM recurring_expenses").all().map(row => row.id)),
+      source_recurring_income_id: new Set(db.prepare("SELECT id FROM recurring_incomes").all().map(row => row.id)),
+      source_one_off_id: new Set(db.prepare("SELECT id FROM one_off_transactions").all().map(row => row.id)),
+      source_flex_id: new Set(db.prepare("SELECT id FROM flex_transactions").all().map(row => row.id)),
+      source_goal_id: new Set(db.prepare("SELECT id FROM goals").all().map(row => row.id))
+    };
+  }
+
+  function validateSettingsRow(warnings, db) {
+    const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
+    if (!settings) {
+      pushWarning(warnings, "missing_settings", "Settings row is missing", { table: "settings", id: 1 });
+      return { ledgerCurrency: "PLN" };
+    }
+
+    const checks = [
+      ["ledger_currency", () => isValidCurrency(settings.ledger_currency)],
+      ["timezone", () => isValidTimezone(settings.timezone)],
+      ["holiday_country", () => isValidHolidayCountry(settings.holiday_country)],
+      ["future_periods", () => Number.isInteger(Number(settings.future_periods)) && Number(settings.future_periods) >= 1 && Number(settings.future_periods) <= 60],
+      ["minimum_reserve_amount", () => isFiniteNumber(settings.minimum_reserve_amount) && Number(settings.minimum_reserve_amount) >= 0],
+      ["fx_buffer_percent", () => isFiniteNumber(settings.fx_buffer_percent) && Number(settings.fx_buffer_percent) >= 0 && Number(settings.fx_buffer_percent) <= 100],
+      ["fx_provider", () => FX_PROVIDER_IDS.includes(String(settings.fx_provider || ""))]
+    ];
+
+    for (const [field, valid] of checks) {
+      if (!valid()) {
+        pushWarning(warnings, "malformed_setting", `Malformed setting ${field}`, {
+          table: "settings",
+          id: 1,
+          field
+        });
+      }
+    }
+
+    const currencyList = parseJsonForValidation(settings.fx_used_currencies);
+    if (!Array.isArray(currencyList) || currencyList.some(currency => !SUPPORTED_FX_CURRENCIES.includes(String(currency || "").toUpperCase()))) {
+      pushWarning(warnings, "malformed_setting", "Malformed setting fx_used_currencies", {
+        table: "settings",
+        id: 1,
+        field: "fx_used_currencies"
+      });
+    }
+
+    const manualRates = parseJsonForValidation(settings.manual_fx_rates);
+    const ledgerCurrency = isValidCurrency(settings.ledger_currency)
+      ? String(settings.ledger_currency).toUpperCase()
+      : "PLN";
+    const manualRatesValid = manualRates
+      && typeof manualRates === "object"
+      && !Array.isArray(manualRates)
+      && Object.entries(manualRates).every(([pair, rate]) => {
+        const [base, quote = ledgerCurrency] = String(pair || "").toUpperCase().split("/");
+        return base
+          && quote
+          && base !== quote
+          && SUPPORTED_FX_CURRENCIES.includes(base)
+          && SUPPORTED_FX_CURRENCIES.includes(quote)
+          && isFiniteNumber(rate)
+          && Number(rate) > 0;
+      });
+    if (!manualRatesValid) {
+      pushWarning(warnings, "malformed_setting", "Malformed setting manual_fx_rates", {
+        table: "settings",
+        id: 1,
+        field: "manual_fx_rates"
+      });
+    }
+
+    if (settings.budget_period_income_id) {
+      const row = db.prepare(`
+        SELECT id
+        FROM recurring_incomes
+        WHERE id = ?
+          AND active = 1
+          AND period_setting = 1
+      `).get(settings.budget_period_income_id);
+      if (!row) {
+        pushWarning(warnings, "stale_budget_period_income", "Budget period income setting points to a missing or inactive income", {
+          table: "settings",
+          id: 1,
+          field: "budget_period_income_id"
+        });
+      }
+    }
+
+    return { ledgerCurrency };
+  }
+
+  function validatePlanningSourceLinks(warnings, db) {
+    const sourceSets = collectSourceSets(db);
+    const rowsByTable = [
+      ["pending_transactions", db.prepare("SELECT * FROM pending_transactions").all()],
+      ["future_transactions", db.prepare("SELECT * FROM future_transactions").all()]
+    ];
+
+    for (const [table, rows] of rowsByTable) {
+      for (const row of rows) {
+        const count = sourceCount(row);
+        if (count > 1) {
+          pushWarning(warnings, "multiple_source_links", `${table} row ${row.id} has multiple source links`, {
+            table,
+            id: row.id
+          });
+        }
+
+        for (const field of SOURCE_FIELDS) {
+          const sourceId = row[field];
+          if (sourceId && !sourceSets[field]?.has(sourceId)) {
+            pushWarning(warnings, "stale_source_link", `${table} row ${row.id} references missing ${field}`, {
+              table,
+              id: row.id,
+              field
+            });
+          }
+        }
+      }
+    }
+
+    const plannedRows = db.prepare("SELECT * FROM planned_transactions").all();
+    for (const planned of plannedRows) {
+      const references = [
+        ["recurring_expenses", "recurring_expense"],
+        ["flex_transactions", "flex"],
+        ["goals", "goal"]
+      ].flatMap(([table, expectedType]) =>
+        db.prepare(`SELECT id FROM ${table} WHERE planned_transaction_id = ?`).all(planned.id)
+          .map(row => ({ table, id: row.id, expectedType }))
+      );
+
+      if (!references.length) {
+        pushWarning(warnings, "orphan_planned_transaction", `Orphan planned transaction ${planned.id}`, {
+          table: "planned_transactions",
+          id: planned.id
+        });
+      }
+
+      for (const reference of references) {
+        if (planned.type !== reference.expectedType) {
+          pushWarning(warnings, "planned_type_mismatch", `Planned transaction ${planned.id} type does not match ${reference.table}`, {
+            table: "planned_transactions",
+            id: planned.id,
+            expectedType: reference.expectedType,
+            actualType: planned.type,
+            sourceTable: reference.table,
+            sourceId: reference.id
+          });
+        }
+      }
+    }
+  }
+
+  function validateOccurrenceKeys(warnings, db, confirmedRows) {
+    const occurrences = new Map();
+    const add = (row, table, year = null) => {
+      const key = row.occurrence_key;
+      if (!key) return;
+      if (!occurrences.has(key)) occurrences.set(key, []);
+      occurrences.get(key).push({ table, id: row.id, year });
+    };
+
+    for (const row of db.prepare("SELECT id, occurrence_key FROM pending_transactions WHERE occurrence_key IS NOT NULL").all()) {
+      add(row, "pending_transactions");
+    }
+    for (const row of db.prepare("SELECT id, occurrence_key FROM future_transactions WHERE occurrence_key IS NOT NULL").all()) {
+      add(row, "future_transactions");
+    }
+    for (const row of confirmedRows) {
+      add(row, "confirmed_transactions", row.ledger_year);
+    }
+
+    for (const [occurrenceKey, rows] of occurrences.entries()) {
+      if (rows.length > 1) {
+        pushWarning(warnings, "duplicate_occurrence_key", `Duplicate occurrence key ${occurrenceKey}`, {
+          occurrence_key: occurrenceKey,
+          rows
+        });
+      }
+    }
+  }
+
+  function validateLedgerRows(warnings, ledgerRows, activeLedgerCurrency) {
+    let expectedBalance = 0;
+    const activeRows = ledgerRows
+      .filter(row => String(row.ledger_currency || "PLN").toUpperCase() === activeLedgerCurrency)
+      .sort((a, b) => {
+        const dateCompare = String(a.date).localeCompare(String(b.date));
+        if (dateCompare !== 0) return dateCompare;
+        const createdCompare = String(a.created_at).localeCompare(String(b.created_at));
+        if (createdCompare !== 0) return createdCompare;
+        return String(a.id).localeCompare(String(b.id));
+      });
+
+    for (const row of ledgerRows) {
+      if (!["income", "expense"].includes(row.type)) {
+        pushWarning(warnings, "invalid_ledger_row", `Ledger row ${row.id} has invalid type`, {
+          table: "confirmed_transactions",
+          id: row.id,
+          year: row.ledger_year,
+          field: "type"
+        });
+      }
+      for (const field of ["date", "confirmed_date", "created_at", "updated_at"]) {
+        if (field === "date" || field === "confirmed_date") {
+          if (!isValidDate(row[field])) {
+            pushWarning(warnings, "invalid_ledger_row", `Ledger row ${row.id} has invalid ${field}`, {
+              table: "confirmed_transactions",
+              id: row.id,
+              year: row.ledger_year,
+              field
+            });
+          }
+        } else if (!row[field]) {
+          pushWarning(warnings, "invalid_ledger_row", `Ledger row ${row.id} is missing ${field}`, {
+            table: "confirmed_transactions",
+            id: row.id,
+            year: row.ledger_year,
+            field
+          });
+        }
+      }
+      if (String(row.confirmed_date || "").slice(0, 4) !== String(row.ledger_year)) {
+        pushWarning(warnings, "ledger_year_mismatch", `Ledger row ${row.id} is stored in the wrong ledger year`, {
+          table: "confirmed_transactions",
+          id: row.id,
+          year: row.ledger_year,
+          confirmed_date: row.confirmed_date
+        });
+      }
+      for (const field of ["currency", "ledger_currency"]) {
+        if (!isValidCurrency(row[field])) {
+          pushWarning(warnings, "invalid_ledger_row", `Ledger row ${row.id} has unsupported ${field}`, {
+            table: "confirmed_transactions",
+            id: row.id,
+            year: row.ledger_year,
+            field
+          });
+        }
+      }
+      for (const field of ["amount", "running_balance_pln"]) {
+        if (!isFiniteNumber(row[field]) || Number(row[field]) < 0 && field === "amount") {
+          pushWarning(warnings, "invalid_ledger_row", `Ledger row ${row.id} has invalid ${field}`, {
+            table: "confirmed_transactions",
+            id: row.id,
+            year: row.ledger_year,
+            field
+          });
+        }
+      }
+      if (row.ledger_amount !== null && row.ledger_amount !== undefined && !isFiniteNumber(row.ledger_amount)) {
+        pushWarning(warnings, "invalid_ledger_row", `Ledger row ${row.id} has invalid ledger_amount`, {
+          table: "confirmed_transactions",
+          id: row.id,
+          year: row.ledger_year,
+          field: "ledger_amount"
+        });
+      }
+      if (sourceCount(row) > 1) {
+        pushWarning(warnings, "multiple_source_links", `Ledger row ${row.id} has multiple source links`, {
+          table: "confirmed_transactions",
+          id: row.id,
+          year: row.ledger_year
+        });
+      }
+    }
+
+    for (const row of activeRows) {
+      const ledgerAmount = row.ledger_amount !== null && row.ledger_amount !== undefined
+        ? roundMoneyAmount(row.ledger_amount)
+        : multiplyMoney(row.amount, row.buffered_fx_rate || row.fx_rate || 1);
+      expectedBalance = row.type === "income"
+        ? addMoneyAmounts(expectedBalance, ledgerAmount)
+        : subtractMoneyAmounts(expectedBalance, ledgerAmount);
+      const actual = Number(row.running_balance_pln);
+      if (Number.isFinite(actual) && Math.abs(actual - expectedBalance) > ACTIVE_LEDGER_DRIFT_EPSILON) {
+        pushWarning(warnings, "active_ledger_running_balance_drift", `Ledger row ${row.id} running balance differs from recalculated active-ledger balance`, {
+          table: "confirmed_transactions",
+          id: row.id,
+          year: row.ledger_year,
+          expected: Number(expectedBalance.toFixed(2)),
+          actual: Number(actual.toFixed(2))
+        });
+      }
+    }
+  }
+
   function validateCashflowData(userId) {
     const db = openPlanningDb(userId);
     const warnings = [];
 
     try {
+      const { ledgerCurrency } = validateSettingsRow(warnings, db);
+      const confirmedRows = [];
+      for (const year of listLedgerYears(userId)) {
+        const ledgerDb = openLedgerDb(userId, year);
+        try {
+          confirmedRows.push(...ledgerDb.prepare(`
+            SELECT *, ? AS ledger_year
+            FROM confirmed_transactions
+          `).all(year));
+        } finally {
+          ledgerDb.close();
+        }
+      }
+
       const duplicateOperating = db.prepare(`
         SELECT operating_priority AS priority, COUNT(*) AS count
         FROM planned_transactions
@@ -172,6 +566,28 @@ export function createCashflowBackupService({
         });
       }
 
+      for (const table of ["pending_transactions", "future_transactions"]) {
+        const rows = db.prepare(`SELECT * FROM ${table}`).all();
+        for (const row of rows) {
+          const invalidFields = [];
+          if (!isFiniteNumber(row.amount) || Number(row.amount) < 0) invalidFields.push("amount");
+          if (!isValidDate(row.date)) invalidFields.push("date");
+          if (!isValidCurrency(row.currency)) invalidFields.push("currency");
+          if (row.ledger_currency && !isValidCurrency(row.ledger_currency)) invalidFields.push("ledger_currency");
+          if (!["income", "expense", "goal_allocation"].includes(row.type)) invalidFields.push("type");
+          if (row.running_balance !== null && row.running_balance !== undefined && !isFiniteNumber(row.running_balance)) invalidFields.push("running_balance");
+          if (row.ledger_amount !== null && row.ledger_amount !== undefined && !isFiniteNumber(row.ledger_amount)) invalidFields.push("ledger_amount");
+
+          for (const field of invalidFields) {
+            pushWarning(warnings, "invalid_generated_transaction", `${table} row ${row.id} has invalid ${field}`, {
+              table,
+              id: row.id,
+              field
+            });
+          }
+        }
+      }
+
       const orphanPlanned = db.prepare(`
         SELECT pt.*
         FROM planned_transactions pt
@@ -188,6 +604,10 @@ export function createCashflowBackupService({
           details: row
         });
       }
+
+      validatePlanningSourceLinks(warnings, db);
+      validateOccurrenceKeys(warnings, db, confirmedRows);
+      validateLedgerRows(warnings, confirmedRows, ledgerCurrency);
 
       const invalidPending = db.prepare(`
         SELECT *

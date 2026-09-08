@@ -42,26 +42,6 @@
   }
 }
 
-.cashflow-toolbar {
-  align-items: center;
-}
-
-.cashflow-toolbar__summary {
-  display: grid;
-  gap: 0.15rem;
-}
-
-.cashflow-toolbar__summary span {
-  color: var(--muted-text);
-  font-size: 0.92rem;
-}
-
-.cashflow-toolbar__actions {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-}
-
 .cashflow-m2m {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
@@ -111,6 +91,14 @@
 
   .cashflow-m2m__controls {
     grid-template-columns: repeat(2, minmax(0, auto));
+    justify-content: start;
+  }
+
+  .cashflow-budget-row {
+    grid-template-columns: 1fr;
+  }
+
+  .cashflow-budget-row__actions {
     justify-content: start;
   }
 }
@@ -172,15 +160,6 @@
   color: var(--warn);
 }
 
-.cashflow-stats {
-  align-items: stretch;
-}
-
-.cashflow-stat small {
-  color: var(--muted-text);
-  font-size: 0.78rem;
-}
-
 .cashflow-budget-panel {
   display: grid;
   gap: 0.75rem;
@@ -190,6 +169,71 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.55rem;
+}
+
+.cashflow-list {
+  display: grid;
+  gap: 0.65rem;
+  min-width: 0;
+}
+
+.cashflow-budget-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 0.9fr) auto;
+  gap: 0.65rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.cashflow-budget-row__main,
+.cashflow-budget-row__edit {
+  display: grid;
+  gap: 0.22rem;
+  min-width: 0;
+}
+
+.cashflow-budget-row__main strong,
+.cashflow-budget-row__main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cashflow-budget-row__main span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.cashflow-budget-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+.cashflow-inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.cashflow-inline-form input {
+  min-width: min(280px, 100%);
+}
+
+.cashflow-table--compact {
+  min-width: 760px;
+}
+
+.cashflow-table--compact td small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 .cashflow-funding-overview {
@@ -534,56 +578,6 @@
   display: grid;
   gap: 0.4rem;
   min-width: 6rem;
-}
-
-.cashflow-row-action {
-  min-height: 34px;
-  padding: 0.4rem 0.8rem;
-  background: rgba(125, 211, 252, 0.12);
-  border: 1px solid rgba(125, 211, 252, 0.28);
-  border-radius: 0.6rem;
-  color: var(--accent);
-  font-size: 0.83rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.16s ease, border-color 0.16s ease;
-}
-
-.cashflow-row-action:hover {
-  background: rgba(125, 211, 252, 0.18);
-  border-color: rgba(125, 211, 252, 0.4);
-}
-
-.cashflow-modal-actions {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 0.8rem;
-  margin-top: 1.2rem;
-  padding-top: 1rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.cashflow-action-button {
-  padding: 0.6rem 1rem;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 0.7rem;
-  color: var(--text);
-  font-size: 0.85rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.16s ease, border-color 0.16s ease;
-}
-
-.cashflow-action-button:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.18);
-}
-
-.cashflow-status-cell {
-  display: grid;
-  gap: 0.4rem;
-  min-width: 11rem;
 }
 
 .cashflow-warning-list {
@@ -1467,27 +1461,9 @@ fieldset legend {
   margin-bottom: 0;
 }
 
-.btn-small {
-  padding: 0.35rem 0.6rem;
-  background: rgba(125, 211, 252, 0.1);
-  border: 1px solid rgba(125, 211, 252, 0.2);
-  border-radius: 0.5rem;
-  color: var(--accent);
-  font-size: 0.8rem;
-  cursor: pointer;
-  transition: all 0.16s ease;
-}
-
-.btn-small:hover {
-  background: rgba(125, 211, 252, 0.2);
-  border-color: var(--accent);
-}
-
 .cashflow-action,
 .btn-primary,
 .btn-small,
-.cashflow-action-button,
-.cashflow-row-action,
 .tab-button {
   display: inline-flex;
   align-items: center;
@@ -1514,8 +1490,6 @@ fieldset legend {
 .cashflow-action:hover,
 .btn-primary:hover,
 .btn-small:hover,
-.cashflow-action-button:hover,
-.cashflow-row-action:hover,
 .tab-button:hover {
   transform: translateY(-1px);
 }
@@ -1523,8 +1497,6 @@ fieldset legend {
 .cashflow-action:focus-visible,
 .btn-primary:focus-visible,
 .btn-small:focus-visible,
-.cashflow-action-button:focus-visible,
-.cashflow-row-action:focus-visible,
 .tab-button:focus-visible {
   outline: none;
   border-color: rgba(125, 211, 252, 0.72);
@@ -1534,8 +1506,6 @@ fieldset legend {
 .cashflow-action:disabled,
 .btn-primary:disabled,
 .btn-small:disabled,
-.cashflow-action-button:disabled,
-.cashflow-row-action:disabled,
 .tab-button:disabled {
   transform: none;
 }
@@ -1557,9 +1527,7 @@ fieldset legend {
 }
 
 .cashflow-action--secondary,
-.btn-small,
-.cashflow-action-button,
-.cashflow-row-action {
+.btn-small {
   padding: 0.48rem 0.72rem;
   background: rgba(30, 41, 59, 0.72);
   border-color: rgba(148, 163, 184, 0.22);
@@ -1568,9 +1536,7 @@ fieldset legend {
 }
 
 .cashflow-action--secondary:hover,
-.btn-small:hover,
-.cashflow-action-button:hover,
-.cashflow-row-action:hover {
+.btn-small:hover {
   background: rgba(51, 65, 85, 0.86);
   border-color: rgba(148, 163, 184, 0.36);
   color: rgba(248, 250, 252, 1);
@@ -1596,8 +1562,7 @@ fieldset legend {
 }
 
 .cashflow-table .btn-small,
-.cashflow-row-actions .btn-small,
-.cashflow-row-action {
+.cashflow-row-actions .btn-small {
   width: 100%;
 }
 
@@ -1664,14 +1629,6 @@ fieldset legend {
   .cashflow-toggle-grid,
   .cashflow-inline-grid {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .cashflow-toolbar {
-    align-items: stretch;
-  }
-
-  .cashflow-toolbar__actions {
-    justify-content: space-between;
   }
 
   .cashflow-table {

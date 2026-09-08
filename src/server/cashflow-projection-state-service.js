@@ -1,6 +1,8 @@
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
-import { requireIsoMonth } from "./cashflow-date-utils.js";
+import { requireIsoMonth, todayInTimezone } from "./cashflow-date-utils.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireNumber } from "./cashflow-input-validation.js";
+import { addMoneyAmounts, multiplyMoney, roundMoneyAmount, subtractMoneyAmounts } from "./cashflow-money-utils.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
 export function createCashflowProjectionStateService({
@@ -94,7 +96,7 @@ export function createCashflowProjectionStateService({
         confirmedCount: 0
       };
 
-      current.confirmedAmount += Number(row.amount || 0);
+      current.confirmedAmount = addMoneyAmounts(current.confirmedAmount, row.amount);
       current.confirmedCount += 1;
       progress.set(key, current);
     }
@@ -147,65 +149,76 @@ export function createCashflowProjectionStateService({
     const pending = pendingOccurrenceRow(db, occurrenceKey);
     if (!pending) return null;
 
-    const previousLedgerAmount = Number(pending.ledger_amount || 0);
-    const nextLedgerAmount = Number(converted.ledgerAmount || 0);
-
-    db.prepare(`
-      UPDATE pending_transactions
-      SET
-        name = ?,
-        currency = ?,
-        amount = ?,
-        type = ?,
-        date = ?,
-        source_recurring_expense_id = ?,
-        source_recurring_income_id = ?,
-        source_one_off_id = ?,
-        source_flex_id = ?,
-        source_goal_id = ?,
-        fx_rate = ?,
-        buffered_fx_rate = ?,
-        ledger_currency = ?,
-        status = ?,
-        funded_amount = ?,
-        requested_amount = ?,
-        ledger_amount = ?,
-        note = ?,
-        updated_at = datetime('now')
-      WHERE id = ?
-    `).run(
-      tx.name,
-      tx.currency,
-      tx.fundedAmount,
-      tx.type,
-      tx.date,
-      tx.sourceRecurringExpenseId || null,
-      tx.sourceRecurringIncomeId || null,
-      tx.sourceOneOffId || null,
-      tx.sourceFlexId || null,
-      tx.sourceGoalId || null,
-      converted.fx,
-      converted.buffered,
-      converted.ledgerCurrency || "PLN",
-      normalizePendingStatus(tx.status),
-      tx.fundedAmount,
-      tx.requestedAmount,
-      converted.ledgerAmount,
-      tx.note || null,
-      pending.id
-    );
-
+    // Pending rows are actionable user decisions. Ordinary projection rebuilds must
+    // not overwrite edits; the explicit pending-recalculation action replaces them.
     return {
       ...pending,
-      ledger_amount: nextLedgerAmount,
-      ledger_amount_delta: nextLedgerAmount - previousLedgerAmount
+      ledger_amount_delta: 0
     };
   }
 
-  function recalculatePlanningRunningBalances(db, userId = null) {
+  function currentLedgerCurrency(db) {
     const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
+    return settings.ledger_currency || "PLN";
+  }
+
+  function confirmedLedgerAmount(row) {
+    if (row.ledger_amount !== null && row.ledger_amount !== undefined) {
+      return roundMoneyAmount(row.ledger_amount);
+    }
+
+    return multiplyMoney(row.amount, row.buffered_fx_rate || row.fx_rate || 1);
+  }
+
+  function confirmedRowsForCurrentLedger(db, userId) {
+    if (!userId) return [];
+
+    const ledgerCurrency = currentLedgerCurrency(db);
+    return loadAllConfirmedTransactions(userId)
+      .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
+  }
+
+  function confirmedBalanceAsOf(db, userId, cutoffDate = null) {
+    const rows = confirmedRowsForCurrentLedger(db, userId)
+      .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
+
+    if (!rows.length) return 0;
+
+    const latest = rows.at(-1);
+    if (latest.running_balance_pln !== null && latest.running_balance_pln !== undefined) {
+      return roundMoneyAmount(latest.running_balance_pln);
+    }
+
+    return roundMoneyAmount(rows.reduce((balance, row) => {
+      const amount = confirmedLedgerAmount(row);
+      return row.type === "income"
+        ? addMoneyAmounts(balance, amount)
+        : subtractMoneyAmounts(balance, amount);
+    }, 0));
+  }
+
+  function confirmedRowsAfterDate(db, userId, date) {
+    return confirmedRowsForCurrentLedger(db, userId)
+      .filter(row => String(row.date || "") > date)
+      .map(row => ({
+        ...row,
+        ledger_amount: confirmedLedgerAmount(row)
+      }));
+  }
+
+  function recalculatePlanningRunningBalances(db, userId = null) {
+    const settings = db.prepare("SELECT ledger_currency, timezone FROM settings WHERE id = 1").get() || {};
     const ledgerCurrency = settings.ledger_currency || "PLN";
+    const today = todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
     const rows = [
+      ...confirmedRowsAfterDate(db, userId, today).map(row => ({
+        id: row.id,
+        type: row.type,
+        ledger_amount: row.ledger_amount,
+        date: row.date,
+        created_at: row.created_at,
+        bucket: "confirmed"
+      })),
       ...db.prepare(`
         SELECT id, type, ledger_amount, date, created_at, 'pending' AS bucket
         FROM pending_transactions
@@ -220,7 +233,12 @@ export function createCashflowProjectionStateService({
       const dateCompare = String(a.date).localeCompare(String(b.date));
       if (dateCompare !== 0) return dateCompare;
 
-      const bucketOrder = a.bucket === b.bucket ? 0 : a.bucket === "pending" ? -1 : 1;
+      const bucketRanks = {
+        confirmed: 0,
+        pending: 1,
+        future: 2
+      };
+      const bucketOrder = (bucketRanks[a.bucket] ?? 99) - (bucketRanks[b.bucket] ?? 99);
       if (bucketOrder !== 0) return bucketOrder;
 
       const createdCompare = String(a.created_at).localeCompare(String(b.created_at));
@@ -242,7 +260,7 @@ export function createCashflowProjectionStateService({
       `).all(ledgerCurrency)
     ];
 
-    let balance = userId ? latestConfirmedBalance(userId) : 0;
+    let balance = userId ? confirmedBalanceAsOf(db, userId, today) : 0;
 
     const updatePending = db.prepare(`
       UPDATE pending_transactions
@@ -265,18 +283,22 @@ export function createCashflowProjectionStateService({
     }
 
     for (const row of rows) {
-      const ledgerAmount = Number(row.ledger_amount || 0);
+      const ledgerAmount = roundMoneyAmount(row.ledger_amount);
 
       if (row.type === "income") {
-        balance += ledgerAmount;
+        balance = addMoneyAmounts(balance, ledgerAmount);
       } else {
-        balance -= ledgerAmount;
+        balance = subtractMoneyAmounts(balance, ledgerAmount);
+      }
+
+      if (row.bucket === "confirmed") {
+        continue;
       }
 
       if (row.bucket === "pending") {
-        updatePending.run(balance, row.id);
+        updatePending.run(roundMoneyAmount(balance), row.id);
       } else {
-        updateFuture.run(balance, row.id);
+        updateFuture.run(roundMoneyAmount(balance), row.id);
       }
     }
   }
@@ -285,7 +307,7 @@ export function createCashflowProjectionStateService({
     const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
     const ledgerCurrency = settings.ledger_currency || "PLN";
 
-    return db.prepare(`
+    return roundMoneyAmount(db.prepare(`
       SELECT COALESCE(SUM(
         CASE
           WHEN type = 'income' THEN COALESCE(ledger_amount, 0)
@@ -294,15 +316,17 @@ export function createCashflowProjectionStateService({
       ), 0) AS value
       FROM pending_transactions
       WHERE COALESCE(ledger_currency, 'PLN') = ?
-    `).get(ledgerCurrency).value;
+    `).get(ledgerCurrency).value);
   }
 
-  function planningOpeningBalance(db, userId) {
-    return latestConfirmedBalance(userId) + Number(pendingNetBalance(db) || 0);
+  function planningOpeningBalance(db, userId, { includePending = true } = {}) {
+    return addMoneyAmounts(latestConfirmedBalance(userId), includePending ? pendingNetBalance(db) : 0);
   }
 
   return {
+    confirmedBalanceAsOf,
     confirmedOccurrenceKeys,
+    confirmedRowsAfterDate,
     confirmedOneOffProgress,
     deletePendingOccurrence,
     findConfirmedOccurrence,

@@ -114,6 +114,13 @@ function syncCashflowAnchorFields(modal) {
   applyFlexVisibility();
 }
 
+export function normalizeCashflowNumericInput(value) {
+  const raw = String(value ?? "").trim();
+  return /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:[eE][+-]?\d+)?$/.test(raw)
+    ? raw.replace(",", ".")
+    : raw;
+}
+
 function coerceCashflowModalPayload(entityType, form) {
   const formData = new FormData(form);
   const data = Object.fromEntries(formData);
@@ -133,7 +140,9 @@ function coerceCashflowModalPayload(entityType, form) {
     if (data[field] === "" || data[field] === undefined) {
       delete data[field];
     } else if (data[field] !== undefined) {
-      data[field] = Number(data[field]);
+      const normalized = normalizeCashflowNumericInput(data[field]);
+      const parsed = Number(normalized);
+      data[field] = Number.isFinite(parsed) ? parsed : data[field];
     }
   }
 

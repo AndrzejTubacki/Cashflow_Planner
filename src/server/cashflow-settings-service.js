@@ -6,6 +6,7 @@ import {
   normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
+import { multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 import { badRequest, conflict } from "./cashflow-user-utils.js";
 
@@ -140,8 +141,8 @@ export function createCashflowSettingsService({
         ledgerSwitch = {
           oldCurrency: previousLedgerCurrency,
           newCurrency: nextLedgerCurrency,
-          oldBalance,
-          convertedOpeningBalance: oldBalance * rate,
+          oldBalance: roundMoneyAmount(oldBalance),
+          convertedOpeningBalance: multiplyMoney(oldBalance, rate),
           rate,
           rateDate,
           source
@@ -165,7 +166,7 @@ export function createCashflowSettingsService({
 
         if (ledgerSwitch) {
           const conversionId = generateId("pending-ledger-currency");
-          const convertedAmount = Math.abs(ledgerSwitch.convertedOpeningBalance);
+          const convertedAmount = roundMoneyAmount(Math.abs(ledgerSwitch.convertedOpeningBalance));
           const conversionType = ledgerSwitch.convertedOpeningBalance >= 0 ? "income" : "expense";
           const note = JSON.stringify({
             kind: "ledger_currency_conversion",
@@ -202,8 +203,8 @@ export function createCashflowSettingsService({
               id, name, currency, amount, type, date,
               fx_rate, buffered_fx_rate, ledger_currency, status,
               funded_amount, requested_amount, ledger_amount, note,
-              occurrence_key, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+              pending_origin, occurrence_key, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 'pending', ?, ?, ?, ?, 'system', ?, datetime('now'), datetime('now'))
           `).run(
             conversionId,
             `Opening balance conversion ${ledgerSwitch.oldCurrency} to ${ledgerSwitch.newCurrency}`,

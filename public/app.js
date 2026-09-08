@@ -3,6 +3,7 @@ import {
   renderCashflowPage
 } from "./app/cashflow.js";
 import {
+  renderBudgetSelectionPage,
   renderSetupPage,
   renderUserSelectionPage
 } from "./app/cashflow/session-pages.js";
@@ -18,11 +19,29 @@ import {
 const root = document.getElementById("cashflowRoot");
 
 const state = {
+  accountSession: null,
+  accounts: [],
+  auth: {
+    activeMode: "none",
+    internal: {
+      allowPasswordLogin: true
+    }
+  },
+  budgets: [],
+  budgetManager: {
+    accounts: [],
+    budgets: [],
+    invitations: [],
+    lastInvitation: null,
+    members: []
+  },
   cashflow: null,
+  csrfToken: "",
   error: "",
   message: "",
   users: [],
-  selectedUserId: localStorage.getItem("cashflow_user_id") || "",
+  selectedAccountId: localStorage.getItem("cashflow_account_id") || "",
+  selectedUserId: localStorage.getItem("cashflow_budget_id") || localStorage.getItem("cashflow_user_id") || "",
   validationResult: null,
   fx: null,
   activeTab: sessionStorage.getItem("cashflow_active_tab") || "ledger"
@@ -33,15 +52,29 @@ function selectedUserId() {
 }
 
 const apiClient = createCashflowApiClient({
-  getUserId: selectedUserId
+  getBudgetId: selectedUserId,
+  getCsrfToken: () => state.csrfToken
 });
 
 function clearSelectedUserState() {
   state.selectedUserId = "";
+  state.selectedAccountId = "";
+  state.accountSession = null;
   state.cashflow = null;
+  state.csrfToken = "";
   state.error = "";
   state.message = "";
+  state.budgets = [];
+  state.budgetManager = {
+    accounts: [],
+    budgets: [],
+    invitations: [],
+    lastInvitation: null,
+    members: []
+  };
   state.validationResult = null;
+  localStorage.removeItem("cashflow_account_id");
+  localStorage.removeItem("cashflow_budget_id");
   localStorage.removeItem("cashflow_user_id");
 }
 
@@ -53,9 +86,22 @@ function enforceActiveTabPermissions() {
 }
 
 function render() {
+  if (state.selectedAccountId && !selectedUserId()) {
+    root.innerHTML = renderBudgetSelectionPage({
+      account: state.accountSession,
+      budgets: state.budgets,
+      error: state.error,
+      message: state.message
+    });
+    attachShellHandlers();
+    return;
+  }
+
   if (!selectedUserId()) {
     root.innerHTML = renderUserSelectionPage({
+      accounts: state.accounts.length ? state.accounts : state.users,
       users: state.users,
+      auth: state.auth,
       error: state.error,
       message: state.message
     });
@@ -83,14 +129,95 @@ async function loadUsers(messageKey = "") {
   state.cashflow = null;
 
   try {
-    const result = await apiClient.json("/api/users", { cache: "no-store", scoped: false });
-    state.users = Array.isArray(result.users) ? result.users : [];
+    const authResult = await apiClient.json("/api/auth/config", { cache: "no-store", scoped: false }).catch(() => ({
+      auth: {
+        activeMode: "none",
+        internal: {
+          allowPasswordLogin: true
+        }
+      }
+    }));
+    state.auth = authResult.auth || state.auth;
+
+    if (state.auth.activeMode !== "none" && !state.selectedAccountId && !selectedUserId()) {
+      const sessionResult = await apiClient.json("/api/session", { cache: "no-store", scoped: false }).catch(() => null);
+      const session = sessionResult?.session || {};
+      if (session.authenticated && session.accountId) {
+        state.csrfToken = String(sessionResult?.csrfToken || "");
+        state.selectedAccountId = String(session.accountId || "").trim();
+        state.accountSession = session;
+        localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+        await loadBudgets(messageKey);
+        return;
+      }
+    }
+
+    const shouldLoadPublicSelectors = state.auth.activeMode === "none";
+    const [accountsResult, usersResult] = await Promise.all([
+      shouldLoadPublicSelectors
+        ? apiClient.json("/api/accounts", { cache: "no-store", scoped: false }).catch(() => ({ accounts: [] }))
+        : Promise.resolve({ accounts: [] }),
+      shouldLoadPublicSelectors
+        ? apiClient.json("/api/users", { cache: "no-store", scoped: false }).catch(() => ({ users: [] }))
+        : Promise.resolve({ users: [] })
+    ]);
+    state.accounts = Array.isArray(accountsResult.accounts) ? accountsResult.accounts : [];
+    state.users = Array.isArray(usersResult.users) ? usersResult.users : [];
     state.message = messageKey ? t(null, messageKey) : "";
   } catch (error) {
-    state.error = error.message || t(null, "Failed to list users");
+    state.error = error.message || t(null, "Failed to list accounts");
   }
 
   render();
+}
+
+async function loadBudgets(messageKey = "") {
+  state.error = "";
+  state.message = "";
+
+  try {
+    const result = await apiClient.json("/api/budgets", { cache: "no-store", scoped: false });
+    state.budgets = Array.isArray(result.budgets) ? result.budgets : [];
+    state.message = messageKey ? t(null, messageKey) : "";
+  } catch (error) {
+    state.error = error.message || t(null, "Failed to list budgets");
+  }
+
+  render();
+}
+
+async function loadBudgetManagerData({ preserveInvitation = false } = {}) {
+  if (!state.cashflow?.session?.accountId) return;
+
+  const budgetId = selectedUserId();
+  const manager = {
+    accounts: [],
+    budgets: [],
+    invitations: [],
+    lastInvitation: preserveInvitation ? state.budgetManager.lastInvitation : null,
+    members: []
+  };
+
+  const [accountsResult, budgetsResult] = await Promise.all([
+    apiClient.json("/api/accounts", { cache: "no-store", scoped: false }).catch(() => ({ accounts: [] })),
+    apiClient.json("/api/budgets", { cache: "no-store", scoped: false }).catch(() => ({ budgets: [] }))
+  ]);
+  manager.accounts = Array.isArray(accountsResult.accounts) ? accountsResult.accounts : [];
+  manager.budgets = Array.isArray(budgetsResult.budgets) ? budgetsResult.budgets : [];
+
+  const currentBudget = manager.budgets.find(budget => budget.id === budgetId);
+  const currentRole = currentBudget?.role || state.cashflow?.session?.budgetRole || "";
+
+  if (budgetId && (currentRole === "owner" || currentRole === "manager")) {
+    const [membersResult, invitationsResult] = await Promise.all([
+      apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/members`, { cache: "no-store", scoped: false }).catch(() => ({ members: [] })),
+      apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/invitations`, { cache: "no-store", scoped: false }).catch(() => ({ invitations: [] }))
+    ]);
+    manager.members = Array.isArray(membersResult.members) ? membersResult.members : [];
+    manager.invitations = Array.isArray(invitationsResult.invitations) ? invitationsResult.invitations : [];
+  }
+
+  state.budgetManager = manager;
 }
 
 async function loadCashflow(messageKey = "") {
@@ -104,6 +231,10 @@ async function loadCashflow(messageKey = "") {
     await loadLocale(locale);
     document.documentElement.lang = locale;
     enforceActiveTabPermissions();
+    state.accountSession = state.cashflow.session || state.accountSession;
+    state.selectedAccountId = state.cashflow.session?.accountId || state.selectedAccountId;
+    if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+    await loadBudgetManagerData({ preserveInvitation: true });
     state.message = messageKey ? t(locale, messageKey) : "";
   } catch (error) {
     state.error = error.message || t(null, "Failed to load cashflow");
@@ -116,6 +247,7 @@ async function resumeSelectedUser() {
   try {
     const result = await apiClient.json("/api/session", { cache: "no-store" });
     const session = result?.session || {};
+    state.csrfToken = String(result?.csrfToken || "");
 
     if (!session.authenticated || session.userId !== selectedUserId()) {
       const error = new Error("Selected user is no longer available. Choose a user to continue.");
@@ -123,6 +255,9 @@ async function resumeSelectedUser() {
       throw error;
     }
 
+    state.accountSession = session;
+    state.selectedAccountId = session.accountId || state.selectedAccountId;
+    if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
     await loadCashflow();
   } catch (error) {
     if (error?.status === 401 || error?.status === 404) {
@@ -138,20 +273,196 @@ async function resumeSelectedUser() {
   }
 }
 
+async function resumeSelectedAccount() {
+  try {
+    const result = await apiClient.json("/api/session", { cache: "no-store", scoped: false });
+    const session = result?.session || {};
+    state.csrfToken = String(result?.csrfToken || "");
+
+    if (!session.authenticated || session.accountId !== state.selectedAccountId) {
+      const error = new Error("Selected account is no longer available. Choose an account to continue.");
+      error.status = 404;
+      throw error;
+    }
+
+    state.accountSession = session;
+    await loadBudgets();
+  } catch (error) {
+    if (error?.status === 401 || error?.status === 404) {
+      clearSelectedUserState();
+      await loadLocale("en");
+      document.documentElement.lang = "en";
+      await loadUsers("Selected account is no longer available. Choose an account to continue.");
+      return;
+    }
+
+    state.error = error.message || t(null, "Failed to load session");
+    render();
+  }
+}
+
 function attachShellHandlers() {
+  root.querySelector("[data-cashflow-external-login]")?.addEventListener("click", async () => {
+    try {
+      const result = await apiClient.json("/api/auth/external/login", {
+        method: "POST",
+        body: {},
+        scoped: false
+      });
+      state.csrfToken = String(result?.csrfToken || "");
+      state.selectedAccountId = String(result?.session?.accountId || "").trim();
+      state.accountSession = result?.session || null;
+      state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
+      state.selectedUserId = "";
+      if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+      localStorage.removeItem("cashflow_budget_id");
+      localStorage.removeItem("cashflow_user_id");
+      render();
+    } catch (error) {
+      state.error = error.message || t(null, "Failed to log in with external authentication");
+      render();
+    }
+  });
+
+  root.querySelectorAll("[data-cashflow-provider-login]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const providerId = button.getAttribute("data-cashflow-provider-login") || "";
+      if (!providerId) return;
+
+      try {
+        const result = await apiClient.json(`/api/auth/providers/${encodeURIComponent(providerId)}/login/start`, {
+          method: "POST",
+          body: {},
+          scoped: false
+        });
+        if (result?.authorizationUrl) {
+          window.location.assign(result.authorizationUrl);
+          return;
+        }
+        throw new Error(t(null, "Provider login did not return an authorization URL"));
+      } catch (error) {
+        state.error = error.message || t(null, "Failed to start provider login");
+        render();
+      }
+    });
+  });
+
+  root.querySelector("[data-cashflow-internal-login-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    try {
+      const result = await apiClient.json("/api/auth/internal/login", {
+        method: "POST",
+        body: Object.fromEntries(formData),
+        scoped: false
+      });
+      state.csrfToken = String(result?.csrfToken || "");
+      state.selectedAccountId = String(result?.session?.accountId || "").trim();
+      state.accountSession = result?.session || null;
+      state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
+      state.selectedUserId = "";
+      if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+      localStorage.removeItem("cashflow_budget_id");
+      localStorage.removeItem("cashflow_user_id");
+      render();
+    } catch (error) {
+      state.error = error.message || t(null, "Failed to log in");
+      render();
+    }
+  });
+
+  root.querySelector("[data-cashflow-password-token-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    try {
+      await apiClient.json("/api/auth/internal/password", {
+        method: "POST",
+        body: Object.fromEntries(formData),
+        scoped: false
+      });
+      await loadUsers("Password set. You can log in now.");
+    } catch (error) {
+      state.error = error.message || t(null, "Failed to set internal login password");
+      render();
+    }
+  });
+
+  root.querySelector("[data-cashflow-internal-register-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    try {
+      const result = await apiClient.json("/api/auth/internal/register", {
+        method: "POST",
+        body: Object.fromEntries(formData),
+        scoped: false
+      });
+      state.csrfToken = String(result?.csrfToken || "");
+      state.selectedAccountId = String(result?.session?.accountId || "").trim();
+      state.selectedUserId = String(result?.session?.budgetId || "").trim();
+      state.accountSession = result?.session || null;
+      state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
+      if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+      if (state.selectedUserId) {
+        localStorage.setItem("cashflow_budget_id", state.selectedUserId);
+        localStorage.setItem("cashflow_user_id", state.selectedUserId);
+        await loadCashflow("Account registered");
+      } else {
+        render();
+      }
+    } catch (error) {
+      state.error = error.message || t(null, "Failed to register account");
+      render();
+    }
+  });
+
+  root.querySelectorAll("[data-cashflow-select-account]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const accountId = button.getAttribute("data-cashflow-select-account");
+      if (!accountId) return;
+
+      try {
+        const result = await apiClient.json("/api/session/select-account", {
+          method: "POST",
+          body: { accountId },
+          scoped: false
+        });
+        state.csrfToken = String(result?.csrfToken || "");
+        state.selectedAccountId = String(result?.session?.accountId || accountId).trim();
+        state.accountSession = result?.session || null;
+        state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
+        state.selectedUserId = "";
+        localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+        localStorage.removeItem("cashflow_budget_id");
+        render();
+      } catch (error) {
+        state.error = error.message || t(null, "Failed to select account");
+        render();
+      }
+    });
+  });
+
   root.querySelectorAll("[data-cashflow-select-user]").forEach(button => {
     button.addEventListener("click", async () => {
       const userId = button.getAttribute("data-cashflow-select-user");
       if (!userId) return;
 
       try {
-        await apiClient.json("/api/session/select", {
+        const result = await apiClient.json("/api/session/select", {
           method: "POST",
           body: { userId },
           scoped: false
         });
-        state.selectedUserId = userId;
-        localStorage.setItem("cashflow_user_id", userId);
+        const session = result?.session || {};
+        state.csrfToken = String(result?.csrfToken || "");
+        state.selectedAccountId = String(session.accountId || "").trim();
+        state.selectedUserId = String(session.budgetId || session.userId || userId).trim();
+        state.accountSession = session;
+        if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+        localStorage.setItem("cashflow_budget_id", state.selectedUserId);
+        localStorage.setItem("cashflow_user_id", state.selectedUserId);
         await loadCashflow();
       } catch (error) {
         state.error = error.message || t(null, "Failed to select user");
@@ -160,22 +471,94 @@ function attachShellHandlers() {
     });
   });
 
-  root.querySelector("[data-cashflow-create-user-form]")?.addEventListener("submit", async (event) => {
+  root.querySelector("[data-cashflow-create-account-form]")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
 
     try {
-      const result = await apiClient.json("/api/users", {
+      const result = await apiClient.json("/api/accounts", {
         method: "POST",
         body: Object.fromEntries(formData),
         scoped: false
       });
-      const userId = result?.session?.userId || formData.get("userId");
-      state.selectedUserId = String(userId || "").trim();
-      localStorage.setItem("cashflow_user_id", state.selectedUserId);
-      await loadCashflow();
+      state.csrfToken = String(result?.csrfToken || "");
+      state.selectedAccountId = String(result?.session?.accountId || formData.get("userId") || "").trim();
+      state.accountSession = result?.session || null;
+      state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
+      localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+      render();
     } catch (error) {
-      state.error = error.message || t(null, "Failed to create user");
+      state.error = error.message || t(null, "Failed to create account");
+      render();
+    }
+  });
+
+  root.querySelectorAll("[data-cashflow-select-budget]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const budgetId = button.getAttribute("data-cashflow-select-budget");
+      if (!budgetId) return;
+
+      try {
+        const result = await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/select`, {
+          method: "POST",
+          body: {},
+          scoped: false
+        });
+        state.selectedUserId = budgetId;
+        state.accountSession = result?.session || state.accountSession;
+        localStorage.setItem("cashflow_budget_id", budgetId);
+        localStorage.setItem("cashflow_user_id", budgetId);
+        await loadCashflow();
+      } catch (error) {
+        state.error = error.message || t(null, "Failed to select budget");
+        render();
+      }
+    });
+  });
+
+  root.querySelector("[data-cashflow-create-budget-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    try {
+      const created = await apiClient.json("/api/budgets", {
+        method: "POST",
+        body: Object.fromEntries(formData),
+        scoped: false
+      });
+      const budgetId = created?.budget?.id || "";
+      if (budgetId) {
+        await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/select`, {
+          method: "POST",
+          body: {},
+          scoped: false
+        });
+        state.selectedUserId = budgetId;
+        localStorage.setItem("cashflow_budget_id", budgetId);
+        localStorage.setItem("cashflow_user_id", budgetId);
+        await loadCashflow();
+      } else {
+        await loadBudgets("Budget created");
+      }
+    } catch (error) {
+      state.error = error.message || t(null, "Failed to create budget");
+      render();
+    }
+  });
+
+  root.querySelector("[data-cashflow-accept-invitation-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+
+    try {
+      await apiClient.json("/api/invitations/accept", {
+        method: "POST",
+        body: Object.fromEntries(formData),
+        scoped: false
+      });
+      await loadBudgets("Invitation accepted");
+    } catch (error) {
+      state.error = error.message || t(null, "Failed to accept invitation");
       render();
     }
   });
@@ -186,8 +569,6 @@ function attachShellHandlers() {
     const formData = new FormData(form);
     const payload = Object.fromEntries(formData);
     payload.future_periods = Number(payload.future_periods || 11);
-    payload.opening_balance = Number(payload.opening_balance || 0);
-    payload.income_amount = Number(payload.income_amount || 0);
     payload.income_anchor_day = Number(payload.income_anchor_day || 1);
     payload.income_enabled = form.querySelector("input[name='income_enabled']")?.checked ? 1 : 0;
 
@@ -231,6 +612,45 @@ window.addEventListener("cashflow-refresh", () => {
   } else {
     void loadUsers();
   }
+});
+
+window.addEventListener("cashflow-budget-manager-refresh", async () => {
+  try {
+    await loadBudgetManagerData();
+    await loadCashflow();
+  } catch (error) {
+    state.error = error.message || t(null, "Failed to refresh budget manager");
+    render();
+  }
+});
+
+window.addEventListener("cashflow-budget-invitation-created", async (event) => {
+  try {
+    state.budgetManager.lastInvitation = event.detail?.invitation || null;
+    await loadBudgetManagerData({ preserveInvitation: true });
+    render();
+  } catch (error) {
+    state.error = error.message || t(null, "Failed to refresh budget manager");
+    render();
+  }
+});
+
+window.addEventListener("cashflow-budget-selected", async (event) => {
+  const budgetId = event.detail?.budgetId || "";
+  if (!budgetId) return;
+  state.selectedUserId = budgetId;
+  state.accountSession = event.detail?.session || state.accountSession;
+  localStorage.setItem("cashflow_budget_id", budgetId);
+  localStorage.setItem("cashflow_user_id", budgetId);
+  await loadCashflow("Budget selected");
+});
+
+window.addEventListener("cashflow-budget-selection-cleared", async () => {
+  state.selectedUserId = "";
+  state.cashflow = null;
+  localStorage.removeItem("cashflow_budget_id");
+  localStorage.removeItem("cashflow_user_id");
+  await loadBudgets("Budget selection cleared");
 });
 
 window.addEventListener("cashflow-saved", () => {
@@ -308,6 +728,8 @@ window.addEventListener("cashflow-logout", async () => {
 
 if (selectedUserId()) {
   void resumeSelectedUser();
+} else if (state.selectedAccountId) {
+  void resumeSelectedAccount();
 } else {
   void loadUsers();
 }

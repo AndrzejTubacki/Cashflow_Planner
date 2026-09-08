@@ -1,6 +1,7 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
-import { hasOwn, requireNumber } from "./cashflow-input-validation.js";
+import { hasOwn, requireMoneyAmount, requireNumber } from "./cashflow-input-validation.js";
+import { multiplyMoney } from "./cashflow-money-utils.js";
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
 import { badRequest, notFound } from "./cashflow-user-utils.js";
 
@@ -77,8 +78,8 @@ export function createCashflowPendingConfirmationService({
       }
 
       amount = hasOwn(input, "amount")
-        ? requireNumber(input.amount, "amount", { min: 0 })
-        : requireNumber(pending.funded_amount ?? pending.amount, "amount", { min: 0 });
+        ? requireMoneyAmount(input.amount, "amount", { min: 0 })
+        : requireMoneyAmount(pending.funded_amount ?? pending.amount, "amount", { min: 0 });
       if (hasOwn(input, "fx_rate")) requireNumber(input.fx_rate, "fx_rate", { min: 0, exclusiveMin: true });
       if (hasOwn(input, "buffered_fx_rate")) {
         requireNumber(input.buffered_fx_rate, "buffered_fx_rate", { min: 0, exclusiveMin: true });
@@ -150,7 +151,7 @@ export function createCashflowPendingConfirmationService({
             pending.source_flex_id || null,
             pending.source_goal_id || null,
             occurrenceKey,
-            amount * fx.bufferedFxRate
+            multiplyMoney(amount, fx.bufferedFxRate)
           );
 
           return ledgerDb.prepare("SELECT * FROM confirmed_transactions WHERE id = ?").get(id);

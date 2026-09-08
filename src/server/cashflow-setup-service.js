@@ -1,7 +1,7 @@
 import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { todayInTimezone } from "./cashflow-date-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
-import { hasOwn, requireBoolean, requireNumber } from "./cashflow-input-validation.js";
+import { hasOwn, requireBoolean, requireMoneyAmount, requireNumber } from "./cashflow-input-validation.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
@@ -55,7 +55,7 @@ export function createCashflowSetupService({
     const futurePeriods = setupSettings.future_periods;
     const today = todayInTimezone(timezone);
     const openingBalance = hasOwn(input, "opening_balance")
-      ? requireNumber(input.opening_balance, "opening_balance")
+      ? requireMoneyAmount(input.opening_balance, "opening_balance")
       : 0;
     if (openingBalance < 0) {
       throw badRequest("Opening balance must be a non-negative number", [{
@@ -67,7 +67,7 @@ export function createCashflowSetupService({
       ? requireBoolean(input.income_enabled, "income_enabled") === 1
       : false;
     const incomeAmount = hasOwn(input, "income_amount")
-      ? requireNumber(input.income_amount, "income_amount", { min: 0 })
+      ? requireMoneyAmount(input.income_amount, "income_amount", { min: 0 })
       : 0;
     const incomeName = String(input.income_name || "Income").trim() || "Income";
     const incomeAnchorDay = hasOwn(input, "income_anchor_day")
@@ -112,8 +112,8 @@ export function createCashflowSetupService({
               id, name, currency, amount, type, date,
               fx_rate, buffered_fx_rate, ledger_currency, status,
               funded_amount, requested_amount, ledger_amount, note,
-              occurrence_key, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 'pending', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+              pending_origin, occurrence_key, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, 'pending', ?, ?, ?, ?, 'system', ?, datetime('now'), datetime('now'))
           `).run(
             id,
             "Opening balance",

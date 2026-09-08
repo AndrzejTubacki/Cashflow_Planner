@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { asNumber, formatMoney, formatPercent, t } from "./shared.js";
 
 const EMPTY_VALUE = "-";
@@ -101,7 +102,7 @@ function renderDonutSegment({ cx, cy, r, strokeWidth, startAngle, endAngle, clas
   `;
 }
 
-function renderFundingPie(locale, item, label, ledgerCurrency = "PLN") {
+function renderFundingPie(locale, item, label, ledgerCurrency = DEFAULT_LEDGER_CURRENCY) {
   const parts = fundingParts(item);
   const total = Math.max(parts.target, parts.confirmed + parts.pending + parts.future + parts.remaining, 0.0001);
 
@@ -208,7 +209,7 @@ function renderFundingPie(locale, item, label, ledgerCurrency = "PLN") {
 }
 
 function renderFundingOverview(locale, cashflow) {
-  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY;
   const goals = cashflow?.goals || [];
   const flex = cashflow?.flexTransactions || [];
 

@@ -32,7 +32,9 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_FX
     if (error?.name === "AbortError") {
       throw gatewayTimeout("External request timed out");
     }
-    throw error;
+    throw gatewayTimeout(error?.message
+      ? `External request failed: ${error.message}`
+      : "External request failed");
   } finally {
     clearTimeout(timeout);
   }

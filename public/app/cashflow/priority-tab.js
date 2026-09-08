@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { asNumber, formatMoney, t } from "./shared.js";
 
 const EMPTY_VALUE = "-";
@@ -48,7 +49,7 @@ export function renderPriorityTab(locale, cashflow) {
               <td>${escapeHtml(String(item.priority ?? EMPTY_VALUE))}</td>
               <td>${escapeHtml(item.label)}</td>
               <td>${escapeHtml(item.name || EMPTY_VALUE)}</td>
-              <td>${formatMoney(item.amount, item.currency || "PLN", locale)}</td>
+              <td>${formatMoney(item.amount, item.currency || DEFAULT_LEDGER_CURRENCY, locale)}</td>
               <td>
                 <button class="btn-small" data-edit-tx="${escapeHtml(item.id)}" data-edit-entity="${escapeHtml(item.entityType)}">${escapeHtml(t(locale, "Edit"))}</button>
               </td>

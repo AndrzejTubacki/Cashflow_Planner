@@ -13,6 +13,10 @@ export function badRequest(message, details = null) {
   return createHttpError(message, 400, details);
 }
 
+export function unauthorized(message = "Authentication required", details = null) {
+  return createHttpError(message, 401, details);
+}
+
 export function forbidden(message = "Admin permission required", details = null) {
   return createHttpError(message, 403, details);
 }

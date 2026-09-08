@@ -53,6 +53,13 @@ export function createCashflowStoragePaths(dataDir) {
       .some(entry => entry.isFile() && /^ledger_\d{4}\.sqlite$/.test(entry.name));
   }
 
+  function deleteCashflowUserStorage(userId) {
+    const dir = userDataDir(userId, { create: false });
+    if (!fs.existsSync(dir)) return false;
+    fs.rmSync(dir, { recursive: true, force: true });
+    return true;
+  }
+
   function userDataDirExists(userId) {
     return fs.existsSync(userDataDir(userId, { create: false }));
   }
@@ -105,6 +112,7 @@ export function createCashflowStoragePaths(dataDir) {
     backupDir,
     backupRootDir,
     cashflowUserStorageExists,
+    deleteCashflowUserStorage,
     directorySizeBytes,
     ledgerDbPath,
     listCashflowUserIds,

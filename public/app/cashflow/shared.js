@@ -1,4 +1,5 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_TIMEZONE } from "./constants.js";
 
 const DEFAULT_LOCALE = "en";
 const loadedLocales = new Map();
@@ -71,13 +72,22 @@ function hasPermission(cashflow = null, permission = "") {
     && cashflow.session.permissions.includes(permission);
 }
 
+function hasCapability(cashflow = null, capability = "") {
+  if (Array.isArray(cashflow?.session?.capabilities)) {
+    return cashflow.session.capabilities.includes(capability);
+  }
+
+  // Compatibility with the pre-capability session response during rolling upgrades.
+  return hasPermission(cashflow, "admin");
+}
+
 function todayForCashflow(cashflow = null, now = new Date()) {
   const serverToday = String(cashflow?.today || "");
   if (/^\d{4}-\d{2}-\d{2}$/.test(serverToday)) {
     return serverToday;
   }
 
-  const timezone = String(cashflow?.settings?.timezone || "Europe/Warsaw");
+  const timezone = String(cashflow?.settings?.timezone || DEFAULT_TIMEZONE);
 
   try {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -164,14 +174,14 @@ function renderProjectionWarnings(locale, cashflow) {
   const projectionFailed = latestSnapshot && Number(latestSnapshot.generation_succeeded) === 0;
 
   const warnings = [];
-  const canAdmin = hasPermission(cashflow, "admin");
+  const canMaintain = hasCapability(cashflow, "budget:maintain");
 
   if (missingFxRates.length) {
     warnings.push(`
       <div class="detail-note cashflow-warning" data-cashflow-missing-fx>
         <strong>${escapeHtml(t(locale, "Missing FX rates"))}</strong>
         <span>${escapeHtml(missingFxRates.join(", "))}</span>
-        ${canAdmin ? `<button type="button" class="btn-small" data-cashflow-refresh-fx>
+        ${canMaintain ? `<button type="button" class="btn-small" data-cashflow-refresh-fx>
           ${escapeHtml(t(locale, "Fetch NBP rates"))}
         </button>` : ""}
       </div>
@@ -183,7 +193,7 @@ function renderProjectionWarnings(locale, cashflow) {
       <div class="detail-note cashflow-warning" data-cashflow-projection-failed>
         <strong>${escapeHtml(t(locale, "Last projection failed"))}</strong>
         <span>${escapeHtml(latestSnapshot.snapshot_timestamp || "")}</span>
-        ${canAdmin ? `<button type="button" class="btn-small" data-cashflow-run-jobs>
+        ${canMaintain ? `<button type="button" class="btn-small" data-cashflow-run-jobs>
           ${escapeHtml(t(locale, "Regenerate"))}
         </button>` : ""}
       </div>
@@ -238,6 +248,7 @@ export {
   formatMoney,
   formatPercent,
   groupBy,
+  hasCapability,
   hasPermission,
   localeOf,
   loadLocale,

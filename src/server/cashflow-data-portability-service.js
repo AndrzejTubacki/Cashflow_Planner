@@ -1,6 +1,7 @@
 import { requireIsoDate } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { validateFullImportRows } from "./cashflow-import-validation.js";
+import { roundMoneyAmount } from "./cashflow-money-utils.js";
 import {
   OPERATIONAL_SETTINGS_COLUMNS,
   validateAndNormalizeSettings
@@ -218,11 +219,14 @@ function normalizeCsvOneOff({ rowNumber, row }, generateId) {
   if (!amountText) {
     details.push({ row: rowNumber, field: "amount", reason: "required" });
   } else {
-    amount = Number(amountText);
+    const normalizedAmountText = amountText.replace(",", ".");
+    amount = Number(normalizedAmountText);
     if (!Number.isFinite(amount)) {
       details.push({ row: rowNumber, field: "amount", reason: "must_be_numeric" });
     } else if (amount < 0) {
       details.push({ row: rowNumber, field: "amount", reason: "must_be_non_negative" });
+    } else {
+      amount = roundMoneyAmount(amount);
     }
   }
 

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cashflow-data
+  namespace: cashflow-staging
+  labels:
+    app.kubernetes.io/name: cashflow
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # Example storage class. Change or remove for your cluster.
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 1Gi

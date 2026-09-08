@@ -1,8 +1,8 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { asNumber, formatMoney, renderStatusBadge, t, transactionTypeLabel } from "./shared.js";
 
 const EMPTY_VALUE = "-";
-const DEFAULT_LEDGER_CURRENCY = "PLN";
 
 function normalizeCurrencyCode(currency) {
   return String(currency || DEFAULT_LEDGER_CURRENCY).trim().toUpperCase() || DEFAULT_LEDGER_CURRENCY;
@@ -127,6 +127,8 @@ function renderTransactionRow(tx, locale, options = {}) {
     ? options.canDelete(tx)
     : Boolean(options.canDelete);
   const deleteEntityType = options.deleteEntityType || entityType;
+  const deleteLabel = options.deleteLabel || "Delete";
+  const deleteConfirm = options.deleteConfirm || "";
 
   const runningBalance = tx.running_balance ?? tx.runningBalance;
 
@@ -160,7 +162,7 @@ function renderTransactionRow(tx, locale, options = {}) {
           ? `<button class="btn-small" data-edit-tx="${escapeHtml(tx.id)}" data-edit-entity="${escapeHtml(entityType)}">${escapeHtml(t(locale, "Edit"))}</button>`
           : ""}
         ${canDelete
-          ? `<button type="button" class="btn-small" data-cashflow-delete-tx="${escapeHtml(tx.id)}" data-cashflow-delete-entity="${escapeHtml(deleteEntityType)}">${escapeHtml(t(locale, "Delete"))}</button>`
+          ? `<button type="button" class="btn-small" data-cashflow-delete-tx="${escapeHtml(tx.id)}" data-cashflow-delete-entity="${escapeHtml(deleteEntityType)}" data-cashflow-delete-confirm="${escapeHtml(deleteConfirm)}">${escapeHtml(t(locale, deleteLabel))}</button>`
           : ""}
       </td>
     </tr>

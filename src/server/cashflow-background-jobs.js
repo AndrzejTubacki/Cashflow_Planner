@@ -1,4 +1,6 @@
-﻿import { DEFAULT_TIMEZONE, NOTIFICATION_DELIVERY_TIME } from "./cashflow-constants.js";
+﻿import crypto from "node:crypto";
+
+import { DEFAULT_TIMEZONE, NOTIFICATION_DELIVERY_TIME } from "./cashflow-constants.js";
 import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
 
 export function createCashflowBackgroundJobs({
@@ -9,6 +11,7 @@ export function createCashflowBackgroundJobs({
   logServerEvent,
   maybeRunAutomaticBackup,
   moveDueFutureTransactionsToPending,
+  openPlanningDb = null,
   queueDailyPendingSummary,
   queueMissingIncomeNotifications,
   refreshNbpFxCacheForAllUsers,
@@ -20,7 +23,7 @@ export function createCashflowBackgroundJobs({
   let tickRunning = false;
 
   function startBackgroundJobs() {
-    setInterval(() => {
+    return setInterval(() => {
       tickPerUserJobs().catch(err => logError("cashflow_background_tick_failed", err));
     }, 60_000);
   }
@@ -57,6 +60,88 @@ export function createCashflowBackgroundJobs({
     return true;
   }
 
+  function localTimeReached(localTime, scheduledTime) {
+    return String(localTime || "") >= String(scheduledTime || "00:00");
+  }
+
+  function persistedRunExists(userId, jobName, runKey) {
+    if (typeof openPlanningDb !== "function") return false;
+    let db = null;
+    try {
+      db = openPlanningDb(userId, { create: false });
+      return Boolean(db.prepare(`
+        SELECT 1
+        FROM event_log
+        WHERE action = 'background_job_success'
+          AND entity_type = ?
+          AND entity_id = ?
+        LIMIT 1
+      `).get(`background_job:${jobName}`, runKey));
+    } catch (error) {
+      logError("cashflow_background_schedule_state_read_failed", {
+        userId,
+        jobName,
+        runKey,
+        error: error.message
+      });
+      return false;
+    } finally {
+      db?.close();
+    }
+  }
+
+  function recordPersistedRun(userId, jobName, runKey, details = {}) {
+    if (typeof openPlanningDb !== "function") return;
+    let db = null;
+    try {
+      db = openPlanningDb(userId);
+      db.prepare(`
+        INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp)
+        VALUES (?, 'background_job_success', ?, ?, ?, datetime('now'))
+      `).run(
+        `background_${crypto.randomUUID()}`,
+        `background_job:${jobName}`,
+        runKey,
+        JSON.stringify(details || {})
+      );
+    } catch (error) {
+      logError("cashflow_background_schedule_state_write_failed", {
+        userId,
+        jobName,
+        runKey,
+        error: error.message
+      });
+    } finally {
+      db?.close();
+    }
+  }
+
+  async function runDailyJobOnce({
+    userId,
+    jobName,
+    runKey,
+    localTime,
+    scheduledTime,
+    work
+  }) {
+    if (!localTimeReached(localTime, scheduledTime)) return null;
+
+    const memoryKey = `${jobName}:${userId}:${runKey}`;
+    if (!shouldRun(memoryKey)) return null;
+    if (persistedRunExists(userId, jobName, runKey)) return null;
+
+    try {
+      const result = await work();
+      recordPersistedRun(userId, jobName, runKey, {
+        scheduledTime
+      });
+      return result ?? true;
+    } catch (error) {
+      lastRunKeys.delete(memoryKey);
+      throw error;
+    }
+  }
+
   async function tickPerUserJobs() {
     if (tickRunning) {
       logServerEvent("cashflow_background_tick_skipped", {
@@ -77,42 +162,75 @@ export function createCashflowBackgroundJobs({
           const local = localParts(timezone, currentTime);
           const today = todayInTimezone(timezone, currentTime);
 
-          if (local.time === "00:00" && shouldRun(`midnight:${userId}:${local.date}`)) {
-            const created = moveDueFutureTransactionsToPending(userId, today);
-            const pendingSummaryCount = queueDailyPendingSummary(userId);
-            const missingIncomeCount = queueMissingIncomeNotifications(userId);
+          await runDailyJobOnce({
+            userId,
+            jobName: "midnight",
+            runKey: local.date,
+            localTime: local.time,
+            scheduledTime: "00:00",
+            work: () => {
+              const created = moveDueFutureTransactionsToPending(userId, today);
+              const pendingSummaryCount = queueDailyPendingSummary(userId);
+              const missingIncomeCount = queueMissingIncomeNotifications(userId);
 
-            logServerEvent("cashflow_midnight_job_completed", {
-              userId,
-              transactionsCreated: created,
-              pendingSummaryCount,
-              missingIncomeCount
-            });
-          }
+              logServerEvent("cashflow_midnight_job_completed", {
+                userId,
+                transactionsCreated: created,
+                pendingSummaryCount,
+                missingIncomeCount
+              });
+              return { created, pendingSummaryCount, missingIncomeCount };
+            }
+          });
 
-          if (local.time === "08:00" && shouldRun(`fx:${userId}:${local.date}`)) {
-            const result = typeof refreshNbpFxCacheForUser === "function"
-              ? await refreshNbpFxCacheForUser(userId, today)
-              : { users: await refreshNbpFxCacheForAllUsers(today) };
-            logServerEvent("cashflow_fx_refresh_completed", {
-              userId,
-              result
-            });
-          }
+          await runDailyJobOnce({
+            userId,
+            jobName: "fx",
+            runKey: local.date,
+            localTime: local.time,
+            scheduledTime: "08:00",
+            work: async () => {
+              const result = typeof refreshNbpFxCacheForUser === "function"
+                ? await refreshNbpFxCacheForUser(userId, today)
+                : { users: await refreshNbpFxCacheForAllUsers(today) };
+              logServerEvent("cashflow_fx_refresh_completed", {
+                userId,
+                result
+              });
+              return result;
+            }
+          });
 
           const deliveryTime = settings.notification_delivery_time || NOTIFICATION_DELIVERY_TIME;
-          if (local.time === deliveryTime && shouldRun(`notify:${userId}:${local.date}:${deliveryTime}`)) {
-            const sent = await sendQueuedNotifications(userId);
-            if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
+          await runDailyJobOnce({
+            userId,
+            jobName: "notify",
+            runKey: `${local.date}:${deliveryTime}`,
+            localTime: local.time,
+            scheduledTime: deliveryTime,
+            work: async () => {
+              const sent = await sendQueuedNotifications(userId);
+              if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
+              return { sent };
+            }
+          });
+
+          const backupResult = maybeRunAutomaticBackup(userId);
+          if (backupResult) {
+            logServerEvent("cashflow_auto_backup_completed", { userId, ...backupResult });
           }
 
-          if (local.time === "03:30" && shouldRun(`backup:${userId}:${local.date}`)) {
-            const result = maybeRunAutomaticBackup(userId);
-            if (result) {
-              logServerEvent("cashflow_auto_backup_completed", { userId, ...result });
+          await runDailyJobOnce({
+            userId,
+            jobName: "maintenance",
+            runKey: local.date,
+            localTime: local.time,
+            scheduledTime: "03:30",
+            work: () => {
+              cleanupOperationalData(userId, "daily_maintenance");
+              return true;
             }
-            cleanupOperationalData(userId, "daily_maintenance");
-          }
+          });
         } catch (err) {
           logError("cashflow_background_user_failed", {
             userId,

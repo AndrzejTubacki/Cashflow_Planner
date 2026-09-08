@@ -1,6 +1,10 @@
 :root {
   --bg: #16202f;
   --bg-accent: #22344d;
+  --app-background:
+    radial-gradient(circle at top left, rgba(72, 157, 255, 0.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(96, 173, 124, 0.14), transparent 24%),
+    linear-gradient(180deg, var(--bg-accent), var(--bg));
   --panel: rgba(32, 44, 64, 0.88);
   --panel-strong: rgba(39, 54, 78, 0.96);
   --line: rgba(157, 177, 206, 0.22);
@@ -26,14 +30,8 @@ body {
 
 body {
   margin: 0;
+  min-height: 100dvh;
   background-color: var(--bg);
-  background:
-    radial-gradient(circle at top left, rgba(72, 157, 255, 0.18), transparent 28%),
-    radial-gradient(circle at top right, rgba(96, 173, 124, 0.14), transparent 24%),
-    linear-gradient(180deg, var(--bg-accent), var(--bg));
-  background-attachment: fixed;
-  background-repeat: no-repeat;
-  background-size: 100vw 100vh;
   color: var(--text);
   font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
@@ -60,10 +58,25 @@ a {
 }
 
 .page-shell {
+  position: relative;
+  min-height: 100dvh;
   width: 100%;
 }
 
+.page-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--app-background);
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
 .page {
+  position: relative;
+  z-index: 1;
   max-width: 1680px;
   margin: 0 auto;
   padding: 28px 32px 56px;

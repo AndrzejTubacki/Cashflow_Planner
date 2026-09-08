@@ -1,5 +1,7 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { renderAdminTab } from "./admin-tab.js";
+import { renderBudgetManagerTab } from "./budget-manager-tab.js";
 import { attachCashflowHandlers } from "./handlers.js";
 import { renderLedgerTab } from "./ledger-tab.js";
 import { renderOneOffTab } from "./one-off-tab.js";
@@ -15,6 +17,7 @@ import {
 } from "./target-tabs.js";
 import {
   formatMessage,
+  hasCapability,
   hasPermission,
   localeOf,
   renderProjectionWarnings,
@@ -52,8 +55,8 @@ function renderValidationResult(locale, validationResult = null) {
   `;
 }
 
-function normalizeCurrencyList(value, ledgerCurrency = "PLN") {
-  const activeLedgerCurrency = String(ledgerCurrency || "PLN").trim().toUpperCase();
+function normalizeCurrencyList(value, ledgerCurrency = DEFAULT_LEDGER_CURRENCY) {
+  const activeLedgerCurrency = String(ledgerCurrency || DEFAULT_LEDGER_CURRENCY).trim().toUpperCase();
   const raw = Array.isArray(value)
     ? value
     : (() => {
@@ -86,9 +89,9 @@ function parseFxRates(cashflow = null, fx = null) {
   }
 }
 
-function renderFxRateChip(currency, rates, ledgerCurrency = "PLN") {
+function renderFxRateChip(currency, rates, ledgerCurrency = DEFAULT_LEDGER_CURRENCY) {
   const normalizedCurrency = String(currency || "").trim().toUpperCase();
-  const normalizedLedgerCurrency = String(ledgerCurrency || "PLN").trim().toUpperCase();
+  const normalizedLedgerCurrency = String(ledgerCurrency || DEFAULT_LEDGER_CURRENCY).trim().toUpperCase();
   const pairKey = `${normalizedCurrency}/${normalizedLedgerCurrency}`.toLowerCase();
   const legacyKey = normalizedCurrency.toLowerCase();
   const rate = Number(
@@ -110,7 +113,7 @@ function renderFxRateChip(currency, rates, ledgerCurrency = "PLN") {
 
 function renderFxTopBar(locale, cashflow = null, fx = null) {
   const rates = parseFxRates(cashflow, fx);
-  const ledgerCurrency = String(cashflow?.settings?.ledger_currency || "PLN").trim().toUpperCase();
+  const ledgerCurrency = String(cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY).trim().toUpperCase();
   const configuredCurrencies = normalizeCurrencyList(cashflow?.settings?.fx_used_currencies, ledgerCurrency);
   const rateCurrencies = Object.keys(rates || {})
     .map(currency => {
@@ -165,7 +168,8 @@ function renderCashflowPageContent({
   message = "",
   validationResult = null,
   fx = null,
-  activeTab = "ledger"
+  activeTab = "ledger",
+  budgetManager = {}
 }) {
   const locale = localeOf(cashflow);
 
@@ -191,9 +195,12 @@ function renderCashflowPageContent({
     { id: "goals", label: t(locale, "Goals") },
     { id: "flex", label: t(locale, "Flex") },
     { id: "priority", label: t(locale, "Priorities") },
+    { id: "budgets", label: t(locale, "Budgets") },
     { id: "settings", label: t(locale, "Settings") }
   ];
   const canAdmin = hasPermission(cashflow, "admin");
+  const canMaintain = hasCapability(cashflow, "budget:maintain");
+  const canValidate = hasCapability(cashflow, "budget:validate");
   const effectiveActiveTab = activeTab === "admin" && !canAdmin ? "ledger" : activeTab;
 
   if (canAdmin) {
@@ -223,13 +230,13 @@ function renderCashflowPageContent({
               ${escapeHtml(t(locale, "User"))}: <strong>${escapeHtml(cashflow.session.displayName || cashflow.session.userId)}</strong>
             </span>
           ` : ""}
-          ${canAdmin ? `<button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
+          ${canMaintain ? `<button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
             ${escapeHtml(t(locale, "Refresh FX"))}
-          </button>
-          <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-validate>
+          </button>` : ""}
+          ${canValidate ? `<button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-validate>
             ${escapeHtml(t(locale, "Validate"))}
-          </button>
-          <button type="button" class="cashflow-action cashflow-action--primary" data-cashflow-run-jobs>
+          </button>` : ""}
+          ${canMaintain ? `<button type="button" class="cashflow-action cashflow-action--primary" data-cashflow-run-jobs>
             ${escapeHtml(t(locale, "Regenerate"))}
           </button>` : ""}
           <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-logout>
@@ -251,9 +258,14 @@ function renderCashflowPageContent({
       ${renderProjectionWarnings(locale, cashflow)}
 
       <div class="cashflow-tabs" data-cashflow-tabs>
-        <div class="tab-buttons">
+        <div class="tab-buttons" role="tablist" aria-label="${escapeHtml(t(locale, "Cashflow sections"))}">
           ${tabs.map(tab => `
-            <button class="tab-button${effectiveActiveTab === tab.id ? " active" : ""}" data-cashflow-tab="${tab.id}">
+            <button
+              class="tab-button${effectiveActiveTab === tab.id ? " active" : ""}"
+              data-cashflow-tab="${tab.id}"
+              role="tab"
+              aria-selected="${effectiveActiveTab === tab.id ? "true" : "false"}"
+            >
               ${escapeHtml(tab.label)}
             </button>
           `).join("")}
@@ -267,6 +279,7 @@ function renderCashflowPageContent({
           ${effectiveActiveTab === "goals" ? renderGoalsTab(locale, cashflow) : ""}
           ${effectiveActiveTab === "flex" ? renderFlexTab(locale, cashflow) : ""}
           ${effectiveActiveTab === "priority" ? renderPriorityTab(locale, cashflow) : ""}
+          ${effectiveActiveTab === "budgets" ? renderBudgetManagerTab(locale, cashflow, budgetManager) : ""}
           ${effectiveActiveTab === "settings" ? renderSettingsTab(locale, cashflow) : ""}
           ${effectiveActiveTab === "admin" && canAdmin ? renderAdminTab(locale, cashflow) : ""}
         </div>

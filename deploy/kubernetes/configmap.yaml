@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cashflow-config
+  namespace: cashflow-staging
+  labels:
+    app.kubernetes.io/name: cashflow
+data:
+  PORT: "3000"
+  NODE_ENV: "production"
+  DATA_DIR: "/app/data"
+  LOGS_DIR: "/app/logs"
+  CASHFLOW_JSON_LIMIT: "10mb"
+  CASHFLOW_LOG_TIMEZONE: "Europe/Warsaw"
+  CASHFLOW_FX_FETCH_TIMEOUT_MS: "10000"
+  CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS: "5000"
+  CASHFLOW_MIRROR_LOGS_TO_STDOUT: "1"
+  CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET: "0"
+  CASHFLOW_DELETED_BUDGET_RECOVERY_RETENTION_COUNT: "5"
+  CASHFLOW_GLOBAL_MIGRATION_RECOVERY_RETENTION_COUNT: "2"

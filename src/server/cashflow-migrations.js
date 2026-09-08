@@ -13,6 +13,25 @@ export function applyLedgerMigrations(db, {
     }
   };
 
+  const moneyRoundExpr = (expression) => `
+    CASE
+      WHEN ${expression} IS NULL THEN NULL
+      ELSE (CASE WHEN ${expression} < 0 THEN -1 ELSE 1 END) *
+        ROUND((ABS(${expression}) * 100) + 0.00000001, 0) / 100
+    END
+  `;
+
+  const roundColumnsIfPresent = (tableName, columnNames) => {
+    const existingColumns = columns(tableName);
+    const assignments = columnNames
+      .filter(columnName => existingColumns.includes(columnName))
+      .map(columnName => `${columnName} = ${moneyRoundExpr(columnName)}`);
+
+    if (assignments.length) {
+      db.prepare(`UPDATE ${tableName} SET ${assignments.join(", ")}`).run();
+    }
+  };
+
   db.transaction(() => {
     if (currentVersion < 2) {
       beforeStep(2, db);
@@ -69,7 +88,33 @@ export function applyLedgerMigrations(db, {
 
       db.pragma("user_version = 4");
     }
+
+    if (currentVersion < 5) {
+      beforeStep(5, db);
+      roundColumnsIfPresent("confirmed_transactions", [
+        "amount",
+        "running_balance_pln",
+        "ledger_amount"
+      ]);
+
+      db.pragma("user_version = 5");
+    }
   })();
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_confirmed_source_recurring_expense
+      ON confirmed_transactions(source_recurring_expense_id);
+    CREATE INDEX IF NOT EXISTS idx_confirmed_source_recurring_income
+      ON confirmed_transactions(source_recurring_income_id);
+    CREATE INDEX IF NOT EXISTS idx_confirmed_source_one_off
+      ON confirmed_transactions(source_one_off_id);
+    CREATE INDEX IF NOT EXISTS idx_confirmed_source_goal
+      ON confirmed_transactions(source_goal_id);
+    CREATE INDEX IF NOT EXISTS idx_confirmed_source_flex
+      ON confirmed_transactions(source_flex_id);
+    CREATE INDEX IF NOT EXISTS idx_confirmed_occurrence_key
+      ON confirmed_transactions(occurrence_key);
+  `);
 }
 
 export function applyPlanningMigrations(db, {
@@ -97,6 +142,27 @@ export function applyPlanningMigrations(db, {
 
     if (!columns(tableName).includes(columnName)) {
       db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${ddl}`);
+    }
+  };
+
+  const moneyRoundExpr = (expression) => `
+    CASE
+      WHEN ${expression} IS NULL THEN NULL
+      ELSE (CASE WHEN ${expression} < 0 THEN -1 ELSE 1 END) *
+        ROUND((ABS(${expression}) * 100) + 0.00000001, 0) / 100
+    END
+  `;
+
+  const roundColumnsIfPresent = (tableName, columnNames) => {
+    if (!tableExists(tableName)) return;
+
+    const existingColumns = columns(tableName);
+    const assignments = columnNames
+      .filter(columnName => existingColumns.includes(columnName))
+      .map(columnName => `${columnName} = ${moneyRoundExpr(columnName)}`);
+
+    if (assignments.length) {
+      db.prepare(`UPDATE ${tableName} SET ${assignments.join(", ")}`).run();
     }
   };
 
@@ -142,7 +208,7 @@ export function applyPlanningMigrations(db, {
 
       db.prepare(`
         UPDATE pending_transactions
-        SET ledger_amount = amount * COALESCE(buffered_fx_rate, fx_rate, 1)
+        SET ledger_amount = ROUND(amount * COALESCE(buffered_fx_rate, fx_rate, 1), 2)
         WHERE ledger_amount IS NULL
       `).run();
 
@@ -586,5 +652,89 @@ export function applyPlanningMigrations(db, {
 
       db.pragma("user_version = 14");
     }
+
+    if (currentVersion < 15) {
+      beforeStep(15, db);
+      addColumnIfMissing(
+        "pending_transactions",
+        "pending_origin",
+        "pending_origin TEXT NOT NULL DEFAULT 'projection' CHECK (pending_origin IN ('projection', 'scheduled', 'manual', 'system'))"
+      );
+
+      if (tableExists("pending_transactions")) {
+        db.prepare(`
+          UPDATE pending_transactions
+          SET pending_origin = CASE
+                WHEN pending_origin IN ('projection', 'scheduled', 'manual', 'system') THEN pending_origin
+                ELSE 'projection'
+              END
+        `).run();
+      }
+
+      db.pragma("user_version = 15");
+    }
+
+    if (currentVersion < 16) {
+      beforeStep(16, db);
+
+      roundColumnsIfPresent("settings", ["minimum_reserve_amount"]);
+      roundColumnsIfPresent("ledger_currency_events", ["old_balance", "converted_opening_balance"]);
+      roundColumnsIfPresent("recurring_expenses", ["amount"]);
+      roundColumnsIfPresent("recurring_incomes", ["amount"]);
+      roundColumnsIfPresent("flex_transactions", ["amount", "min_amount", "max_amount"]);
+      roundColumnsIfPresent("goals", ["amount"]);
+      roundColumnsIfPresent("one_off_transactions", ["amount"]);
+      roundColumnsIfPresent("pending_transactions", [
+        "amount",
+        "funded_amount",
+        "requested_amount",
+        "ledger_amount",
+        "running_balance"
+      ]);
+      roundColumnsIfPresent("future_transactions", [
+        "amount",
+        "funded_amount",
+        "requested_amount",
+        "ledger_amount",
+        "running_balance"
+      ]);
+      roundColumnsIfPresent("projection_snapshots", [
+        "total_projected_income",
+        "total_projected_expenses",
+        "available_balance"
+      ]);
+
+      db.pragma("user_version = 16");
+    }
   })();
+
+  if (tableExists("future_transactions")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_future_source_recurring_expense
+        ON future_transactions(source_recurring_expense_id);
+      CREATE INDEX IF NOT EXISTS idx_future_source_recurring_income
+        ON future_transactions(source_recurring_income_id);
+      CREATE INDEX IF NOT EXISTS idx_future_source_one_off
+        ON future_transactions(source_one_off_id);
+      CREATE INDEX IF NOT EXISTS idx_future_source_goal
+        ON future_transactions(source_goal_id);
+      CREATE INDEX IF NOT EXISTS idx_future_source_flex
+        ON future_transactions(source_flex_id);
+    `);
+  }
+
+  if (tableExists("pending_transactions")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_pending_source_recurring_expense
+        ON pending_transactions(source_recurring_expense_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_source_recurring_income
+        ON pending_transactions(source_recurring_income_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_source_one_off
+        ON pending_transactions(source_one_off_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_source_goal
+        ON pending_transactions(source_goal_id);
+      CREATE INDEX IF NOT EXISTS idx_pending_source_flex
+        ON pending_transactions(source_flex_id);
+    `);
+  }
 }

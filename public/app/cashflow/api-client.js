@@ -10,6 +10,8 @@ export class CashflowApiError extends Error {
 }
 
 export function createCashflowApiClient({
+  getBudgetId = null,
+  getCsrfToken = () => "",
   getUserId = () => "",
   fetchImpl = globalThis.fetch
 } = {}) {
@@ -25,11 +27,22 @@ export function createCashflowApiClient({
       ...fetchOptions
     } = options;
     const headers = { ...providedHeaders };
+    const budgetId = typeof getBudgetId === "function"
+      ? String(getBudgetId() || "").trim()
+      : "";
     const userId = String(getUserId() || "").trim();
+    const csrfToken = String(getCsrfToken() || "").trim();
     let requestBody = body;
 
-    if (scoped && userId) {
+    if (scoped && budgetId) {
+      headers["x-cashflow-budget-id"] = budgetId;
+    } else if (scoped && userId) {
       headers["x-cashflow-user-id"] = userId;
+    }
+
+    const method = String(fetchOptions.method || "GET").toUpperCase();
+    if (!["GET", "HEAD", "OPTIONS"].includes(method) && csrfToken) {
+      headers["x-cashflow-csrf-token"] = csrfToken;
     }
 
     const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
@@ -49,6 +62,7 @@ export function createCashflowApiClient({
     }
 
     const response = await fetchImpl(url, {
+      credentials: "same-origin",
       ...fetchOptions,
       headers,
       body: requestBody

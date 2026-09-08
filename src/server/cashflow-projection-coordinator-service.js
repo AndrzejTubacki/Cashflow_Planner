@@ -1,8 +1,12 @@
 import { cashflowErrorMessage, cashflowErrorStack } from "./cashflow-error-utils.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { todayInTimezone } from "./cashflow-date-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
+import { addMoneyAmounts, roundMoneyAmount } from "./cashflow-money-utils.js";
 
 export function createCashflowProjectionCoordinatorService({
   collectCurrenciesForFxSnapshot,
+  confirmedBalanceAsOf = null,
   ensureFxCacheForMutation,
   getCachedFxSnapshot,
   latestConfirmedBalance,
@@ -58,8 +62,10 @@ export function createCashflowProjectionCoordinatorService({
   }
 
 
-  function withProjectionStatus(userId, result) {
-    const projection = regenerateProjectionsAfterMutation(userId);
+  function withProjectionStatus(userId, result, options = {}) {
+    const projection = options.preservePending
+      ? regenerateProjectionsPreservingPendingAfterMutation(userId)
+      : regenerateProjectionsAfterMutation(userId);
 
     if (result && typeof result === "object" && !Array.isArray(result)) {
       return {
@@ -77,13 +83,31 @@ export function createCashflowProjectionCoordinatorService({
   async function regenerateProjectionsWithFxRefresh(userId, options = {}) {
     const {
       date = null,
+      allowCachedFxOnRefreshFailure = false,
       refreshFxFirst = true
     } = options;
 
     let fxRefresh = null;
 
     if (refreshFxFirst) {
-      fxRefresh = await refreshNbpFxCacheForUser(userId, date);
+      try {
+        fxRefresh = await refreshNbpFxCacheForUser(userId, date);
+      } catch (error) {
+        if (!allowCachedFxOnRefreshFailure) {
+          throw error;
+        }
+
+        logCashflowError("cashflow_fx_refresh_failed_using_cache", error, {
+          userId
+        });
+
+        fxRefresh = {
+          ok: false,
+          provider_refresh_failed: true,
+          status: Number(error.status || 500),
+          error: cashflowErrorMessage(error)
+        };
+      }
     }
 
     regenerateProjectionsAfterClearingNegativePending(userId);
@@ -96,15 +120,27 @@ export function createCashflowProjectionCoordinatorService({
   }
 
   function regenerateProjectionsAfterMutation(userId) {
+    return projectionStatusFor(userId, () => regenerateProjectionsAfterClearingNegativePending(userId), {
+      logKind: "cashflow_projection_after_mutation_failed"
+    });
+  }
+
+  function regenerateProjectionsPreservingPendingAfterMutation(userId) {
+    return projectionStatusFor(userId, () => regenerateProjections(userId), {
+      logKind: "cashflow_projection_preserve_pending_after_mutation_failed"
+    });
+  }
+
+  function projectionStatusFor(userId, regenerateFn, { logKind }) {
     try {
-      regenerateProjectionsAfterClearingNegativePending(userId);
+      regenerateFn();
 
       return {
         projection_ok: true,
         projection_error: null
       };
     } catch (error) {
-      logCashflowError("cashflow_projection_after_mutation_failed", error, {
+      logCashflowError(logKind, error, {
         userId
       });
 
@@ -135,16 +171,41 @@ export function createCashflowProjectionCoordinatorService({
 
     const db = openPlanningDb(userId);
     try {
-      const confirmedBalance = Number(latestConfirmedBalance(userId) || 0);
-      const pendingBalance = Number(pendingNetBalance(db) || 0);
-      const openingBalance = confirmedBalance + pendingBalance;
+      const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
+      const today = todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
+      const confirmedBalance = roundMoneyAmount(typeof confirmedBalanceAsOf === "function"
+        ? confirmedBalanceAsOf(db, userId, today)
+        : latestConfirmedBalance(userId));
+      const pendingBalance = roundMoneyAmount(pendingNetBalance(db));
+      const clearablePendingBalance = roundMoneyAmount(db.prepare(`
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN type = 'income' THEN COALESCE(ledger_amount, 0)
+            ELSE -COALESCE(ledger_amount, 0)
+          END
+        ), 0) AS value
+        FROM pending_transactions
+        WHERE COALESCE(pending_origin, 'projection') IN ('projection', 'scheduled')
+      `).get().value);
+      const openingBalance = addMoneyAmounts(confirmedBalance, pendingBalance);
+      const clearableOpeningBalance = addMoneyAmounts(confirmedBalance, clearablePendingBalance);
 
-      if (confirmedBalance >= 0 && pendingBalance < 0 && openingBalance < 0) {
-        const result = db.prepare("DELETE FROM pending_transactions").run();
+      if (
+        confirmedBalance >= 0 &&
+        pendingBalance < 0 &&
+        openingBalance < 0 &&
+        clearablePendingBalance < 0 &&
+        clearableOpeningBalance < 0
+      ) {
+        const result = db.prepare(`
+          DELETE FROM pending_transactions
+          WHERE COALESCE(pending_origin, 'projection') IN ('projection', 'scheduled')
+        `).run();
         logServerEvent("cashflow_pending_cleared_negative_opening_balance", {
           userId,
           confirmedBalance,
           pendingBalance,
+          clearablePendingBalance,
           deletedPendingCount: result.changes || 0
         });
         return result.changes || 0;

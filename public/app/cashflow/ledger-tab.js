@@ -1,33 +1,34 @@
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { renderFundingOverview } from "./funding.js";
 import { renderBudgetPeriodStats } from "./periods.js";
-import { formatMoney, groupBy, hasPermission, renderDetailsPanel, t } from "./shared.js";
+import { formatMoney, groupBy, hasCapability, renderDetailsPanel, t } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
 const EMPTY_VALUE = "-";
 
 export function renderLedgerTab(locale, cashflow) {
-  const ledgerCurrency = cashflow?.settings?.ledger_currency || "PLN";
-  const canAdmin = hasPermission(cashflow, "admin");
+  const ledgerCurrency = cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY;
+  const canMaintain = hasCapability(cashflow, "budget:maintain");
   const pending = (cashflow?.pendingTransactions || []).map(p => ({
     ...p,
     entityType: "pending",
     name: p.name || p.description || p.title || t(locale, "Pending"),
-    currency: p.currency || "PLN"
+    currency: p.currency || DEFAULT_LEDGER_CURRENCY
   }));
 
   const future = (cashflow?.futureTransactions || []).map(f => ({
     ...f,
     entityType: "future",
     name: f.name || f.description || f.title || t(locale, "Future"),
-    currency: f.currency || "PLN"
+    currency: f.currency || DEFAULT_LEDGER_CURRENCY
   }));
 
   const confirmed = (cashflow?.confirmedTransactions || cashflow?.confirmed || []).map(c => ({
     ...c,
     entityType: "confirmed",
     name: c.name || c.description || c.title || t(locale, "Confirmed"),
-    currency: c.currency || "PLN"
+    currency: c.currency || DEFAULT_LEDGER_CURRENCY
   }));
 
   const confirmedByYear = groupBy(confirmed, tx => String(tx.date || "").slice(0, 4) || EMPTY_VALUE);
@@ -77,12 +78,22 @@ export function renderLedgerTab(locale, cashflow) {
       <div class="panel">
         <div class="cashflow-panel-heading">
           <h3>${escapeHtml(t(locale, "Pending"))}</h3>
-          ${canAdmin ? `<button type="button" class="btn-small" data-cashflow-recalculate-pending>
+          ${canMaintain ? `<button type="button" class="btn-small" data-cashflow-recalculate-pending>
             ${escapeHtml(t(locale, "Recalculate pending"))}
           </button>` : ""}
         </div>
         <div data-pending-list>
-          ${renderTransactionTable(pending, locale, { entityType: "pending", canConfirmPending: true })}
+          ${renderTransactionTable(pending, locale, {
+            entityType: "pending",
+            canConfirmPending: true,
+            canDelete: tx => {
+              const oneOffId = tx.source_one_off_id || tx.sourceOneOffId || "";
+              return Boolean(oneOffId && String(tx.occurrence_key || tx.occurrenceKey || "").startsWith(`one_off_remainder:${oneOffId}:`));
+            },
+            deleteEntityType: "pending",
+            deleteLabel: "Dismiss remainder",
+            deleteConfirm: "Dismiss this remainder? The one-off target will be reduced to the confirmed total."
+          })}
         </div>
       </div>
 

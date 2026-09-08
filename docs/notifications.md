@@ -1,8 +1,8 @@
 # Notifications
 
 Cashflow can publish planner notifications to an
-[ntfy](https://docs.ntfy.sh/) topic. Configure notifications per profile in
-Settings.
+[ntfy](https://docs.ntfy.sh/) topic. Notifications are configured per profile
+in Settings.
 
 ## ntfy URL
 
@@ -44,7 +44,7 @@ notifications use the configured repeat-day interval.
 
 ## Failures And Retries
 
-The default ntfy request timeout is five seconds. Configure it with
+The default ntfy request timeout is five seconds. The timeout is configured with
 `CASHFLOW_NOTIFICATION_FETCH_TIMEOUT_MS`.
 
 Cashflow sends queued notifications in order. A timeout or non-success ntfy

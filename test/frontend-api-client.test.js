@@ -36,6 +36,34 @@ test("API client scopes selected-user requests and serializes JSON bodies", asyn
   assert.equal(Object.prototype.hasOwnProperty.call(calls[1].options.headers, "x-cashflow-user-id"), false);
 });
 
+test("API client prefers budget IDs and attaches session CSRF tokens to mutations", async () => {
+  const calls = [];
+  const client = createCashflowApiClient({
+    getBudgetId: () => "selected-budget",
+    getCsrfToken: () => "csrf-token",
+    getUserId: () => "legacy-user",
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      });
+    }
+  });
+
+  await client.json("/api/settings", {
+    method: "PUT",
+    body: { locale: "pl" }
+  });
+  await client.json("/api");
+
+  assert.equal(calls[0].options.headers["x-cashflow-budget-id"], "selected-budget");
+  assert.equal(calls[0].options.headers["x-cashflow-csrf-token"], "csrf-token");
+  assert.equal(Object.hasOwn(calls[0].options.headers, "x-cashflow-user-id"), false);
+  assert.equal(Object.hasOwn(calls[1].options.headers, "x-cashflow-csrf-token"), false);
+  assert.equal(calls[0].options.credentials, "same-origin");
+});
+
 test("API client raw responses and typed errors preserve response details", async () => {
   const rawClient = createCashflowApiClient({
     fetchImpl: async () => new Response("csv-data", { status: 200 })

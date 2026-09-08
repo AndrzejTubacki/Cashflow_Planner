@@ -2,6 +2,7 @@ import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
+import { addMoneyAmounts, multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
 import { badRequest, notFound } from "./cashflow-user-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
 import { validatePlanMutationInput } from "./cashflow-plan-input-validation.js";
@@ -58,7 +59,7 @@ export function createCashflowPlanMutationService({
         String(tx.currency || "").toUpperCase() === String(currency || "").toUpperCase() &&
         String(tx.type || "") === String(type || "")
       )
-      .reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
+      .reduce((sum, tx) => addMoneyAmounts(sum, tx.amount), 0);
   }
 
   function uncoupleConfirmedOneOffRows(userId, oneOffId) {
@@ -446,6 +447,7 @@ export function createCashflowPlanMutationService({
 
       const nextDate = requireIsoDate(input.date || pending.date);
       const nextAmount = input.amount ?? pending.amount;
+      const nextName = String(input.name || pending.name);
 
       if (pending.source_recurring_income_id) {
         const income = db.prepare(`
@@ -468,7 +470,7 @@ export function createCashflowPlanMutationService({
       }
 
       const fx = Number(pending.buffered_fx_rate || pending.fx_rate || 1);
-      const ledgerAmount = nextAmount * fx;
+      const ledgerAmount = multiplyMoney(nextAmount, fx);
 
       // Keep the source occurrence stable when users edit real-world pending details such as date or amount.
       const nextOccurrenceKey = pending.occurrence_key || makeOccurrenceKey({
@@ -495,13 +497,37 @@ export function createCashflowPlanMutationService({
       }
 
       db.transaction(() => {
+        if (pending.source_one_off_id) {
+          const oneOff = db.prepare(`
+            SELECT *
+            FROM one_off_transactions
+            WHERE id = ?
+          `).get(pending.source_one_off_id);
+          if (oneOff) {
+            const confirmedAmount = confirmedOneOffOriginalAmount(
+              userId,
+              oneOff.id,
+              oneOff.currency,
+              oneOff.type
+            );
+            db.prepare(`
+              UPDATE one_off_transactions
+              SET name = ?,
+                  amount = ?,
+                  date = ?,
+                  updated_at = datetime('now')
+              WHERE id = ?
+            `).run(nextName, addMoneyAmounts(confirmedAmount, nextAmount), nextDate, oneOff.id);
+          }
+        }
+
         db.prepare(`
           UPDATE pending_transactions
           SET
             date = ?,
             amount = ?,
             funded_amount = ?,
-            requested_amount = COALESCE(requested_amount, ?),
+            requested_amount = ?,
             ledger_amount = ?,
             currency = ?,
             name = ?,
@@ -515,7 +541,7 @@ export function createCashflowPlanMutationService({
           nextAmount,
           ledgerAmount,
           nextCurrency,
-          String(input.name || pending.name),
+          nextName,
           nextOccurrenceKey,
           id
         );
@@ -523,7 +549,11 @@ export function createCashflowPlanMutationService({
         recalculatePlanningRunningBalances(db, userId);
       })();
 
-      return db.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id);
+      return withProjectionStatus(
+        userId,
+        db.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id),
+        { preservePending: true }
+      );
     } finally {
       db.close();
     }
@@ -938,6 +968,57 @@ export function createCashflowPlanMutationService({
     }
   }
 
+  function dismissPendingOneOffRemainder(userId, id) {
+    const db = openPlanningDb(userId);
+    let result;
+
+    try {
+      const pending = db.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id);
+      if (!pending) throw notFound("Pending transaction not found");
+
+      const oneOffId = pending.source_one_off_id;
+      const expectedPrefix = `one_off_remainder:${oneOffId}:`;
+      if (!oneOffId || !String(pending.occurrence_key || "").startsWith(expectedPrefix)) {
+        throw badRequest("Only a generated one-off remainder can be dismissed");
+      }
+
+      const oneOff = db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(oneOffId);
+      if (!oneOff) throw notFound("One-off transaction not found");
+
+      const confirmedAmount = confirmedOneOffOriginalAmount(
+        userId,
+        oneOff.id,
+        oneOff.currency,
+        oneOff.type
+      );
+      if (confirmedAmount <= 0) {
+        throw badRequest("One-off remainder cannot be dismissed without confirmed history");
+      }
+
+      result = db.transaction(() => {
+        db.prepare(`
+          UPDATE one_off_transactions
+          SET amount = ?,
+              updated_at = datetime('now')
+          WHERE id = ?
+        `).run(confirmedAmount, oneOff.id);
+        db.prepare("DELETE FROM pending_transactions WHERE source_one_off_id = ?").run(oneOff.id);
+        db.prepare("DELETE FROM future_transactions WHERE source_one_off_id = ?").run(oneOff.id);
+        recalculatePlanningRunningBalances(db, userId);
+
+        return {
+          ok: true,
+          dismissedPendingId: id,
+          oneOff: db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(oneOff.id)
+        };
+      })();
+    } finally {
+      db.close();
+    }
+
+    return withProjectionStatus(userId, result);
+  }
+
   async function deleteOneOffTransaction(userId, id) {
     const db = openPlanningDb(userId);
     let confirmedRows = [];
@@ -967,6 +1048,7 @@ export function createCashflowPlanMutationService({
     createOneOffTransaction,
     createRecurringExpense,
     createRecurringIncome,
+    dismissPendingOneOffRemainder,
     deleteFlexTransaction,
     deleteGoal,
     deleteOneOffTransaction,

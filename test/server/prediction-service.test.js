@@ -16,6 +16,8 @@ async function withPredictionService(fn) {
     db.exec(`
       CREATE TABLE confirmed_transactions (
         id TEXT PRIMARY KEY,
+        name TEXT,
+        currency TEXT,
         amount REAL NOT NULL,
         type TEXT NOT NULL,
         date TEXT NOT NULL,
@@ -40,10 +42,12 @@ async function withPredictionService(fn) {
 function insertConfirmed(db, row) {
   db.prepare(`
     INSERT INTO confirmed_transactions (
-      id, amount, type, date, source_recurring_expense_id, source_recurring_income_id, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      id, name, currency, amount, type, date, source_recurring_expense_id, source_recurring_income_id, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     row.id,
+    row.name || null,
+    row.currency || null,
     row.amount,
     row.type,
     row.date,
@@ -183,6 +187,146 @@ test("12-month maximum expense can substitute missing months from starting amoun
   );
 }));
 
+test("12-month recurring predictions include same-name unlinked confirmed rows", () => withPredictionService((service, db) => {
+  insertConfirmed(db, {
+    id: "mieszkanie-oneoff",
+    name: "Mieszkanie",
+    currency: "PLN",
+    amount: 1980.74,
+    type: "expense",
+    date: "2026-05-19"
+  });
+  insertConfirmed(db, {
+    id: "mieszkanie-linked",
+    name: "Mieszkanie",
+    currency: "PLN",
+    amount: 1365.28,
+    type: "expense",
+    date: "2026-06-15",
+    sourceRecurringExpenseId: "expense-mieszkanie"
+  });
+  insertConfirmed(db, {
+    id: "mieszkanie-other-source",
+    name: "Mieszkanie",
+    currency: "PLN",
+    amount: 2500,
+    type: "expense",
+    date: "2026-06-20",
+    sourceRecurringExpenseId: "other-expense"
+  });
+  insertConfirmed(db, {
+    id: "mieszkanie-other-currency",
+    name: "Mieszkanie",
+    currency: "EUR",
+    amount: 3000,
+    type: "expense",
+    date: "2026-06-21"
+  });
+
+  assert.equal(
+    service.predictedAmountForRecurringExpense("local", {
+      id: "expense-mieszkanie",
+      name: "Mieszkanie",
+      currency: "PLN",
+      amount: 2000,
+      prediction_strategy: "12month_max",
+      prediction_substitute_missing: "none"
+    }, "2026-06-26"),
+    1980.74
+  );
+
+  insertConfirmed(db, {
+    id: "salary-oneoff",
+    name: "Salary",
+    currency: "PLN",
+    amount: 7000,
+    type: "income",
+    date: "2026-05-01"
+  });
+  insertConfirmed(db, {
+    id: "salary-linked",
+    name: "Salary",
+    currency: "PLN",
+    amount: 7200,
+    type: "income",
+    date: "2026-06-01",
+    sourceRecurringIncomeId: "income-salary"
+  });
+
+  assert.equal(
+    service.predictedAmountForRecurringIncome("local", {
+      id: "income-salary",
+      name: "Salary",
+      currency: "PLN",
+      amount: 7500,
+      prediction_strategy: "12month_min",
+      prediction_substitute_missing: "none"
+    }, "2026-06-26"),
+    7000
+  );
+}));
+
+test("12-month predictions ignore confirmed rows dated after the predicted occurrence", () => withPredictionService((service, db) => {
+  insertConfirmed(db, {
+    id: "expense-before",
+    amount: 600,
+    type: "expense",
+    date: "2026-06-15",
+    sourceRecurringExpenseId: "expense-future-cutoff"
+  });
+  insertConfirmed(db, {
+    id: "expense-after",
+    amount: 900,
+    type: "expense",
+    date: "2026-07-29",
+    sourceRecurringExpenseId: "expense-future-cutoff"
+  });
+  insertConfirmed(db, {
+    id: "income-before",
+    amount: 1200,
+    type: "income",
+    date: "2026-06-15",
+    sourceRecurringIncomeId: "income-future-cutoff"
+  });
+  insertConfirmed(db, {
+    id: "income-after",
+    amount: 800,
+    type: "income",
+    date: "2026-07-29",
+    sourceRecurringIncomeId: "income-future-cutoff"
+  });
+
+  const expense = {
+    id: "expense-future-cutoff",
+    amount: 500,
+    prediction_strategy: "12month_max",
+    prediction_substitute_missing: "none"
+  };
+  const income = {
+    id: "income-future-cutoff",
+    amount: 1000,
+    prediction_strategy: "12month_min",
+    prediction_substitute_missing: "none"
+  };
+
+  assert.equal(
+    service.predictedAmountForRecurringExpense("local", expense, "2026-07-28", "2026-07-28"),
+    600
+  );
+  assert.equal(
+    service.predictedAmountForRecurringExpense("local", expense, "2026-07-28", "2026-08-29"),
+    900
+  );
+  assert.equal(
+    service.predictedAmountForRecurringIncome("local", income, "2026-07-28", "2026-07-28"),
+    1200
+  );
+  assert.equal(
+    service.predictedAmountForRecurringIncome("local", income, "2026-07-28", "2026-08-29"),
+    800
+  );
+}));
+
 test("12-month predictions can use median recorded amounts", () => withPredictionService((service, db) => {
   for (const row of [
     { id: "income-1", amount: 400, type: "income", date: "2026-01-01", sourceRecurringIncomeId: "income-median" },
@@ -272,6 +416,64 @@ test("12-month predictions can use the last confirmed amount", () => withPredict
     450
   );
 }));
+
+test("prediction helpers can reuse preloaded confirmed rows without opening ledgers", () => {
+  const service = createCashflowPredictionService({
+    listLedgerYears: () => {
+      throw new Error("ledger years should not be loaded");
+    },
+    openLedgerDb: () => {
+      throw new Error("ledger DB should not be opened");
+    }
+  });
+
+  const rows = [
+    {
+      id: "expense-preloaded-low",
+      amount: 25,
+      type: "expense",
+      date: "2026-04-01",
+      source_recurring_expense_id: "expense-preloaded",
+      created_at: "2026-04-01T00:00:00Z"
+    },
+    {
+      id: "expense-preloaded-high",
+      amount: 45,
+      type: "expense",
+      date: "2026-05-01",
+      source_recurring_expense_id: "expense-preloaded",
+      created_at: "2026-05-01T00:00:00Z"
+    },
+    {
+      id: "income-preloaded",
+      amount: 120,
+      type: "income",
+      date: "2026-05-01",
+      source_recurring_income_id: "income-preloaded",
+      created_at: "2026-05-01T00:00:00Z"
+    }
+  ];
+
+  assert.equal(
+    service.predictedAmountForRecurringExpense("local", {
+      id: "expense-preloaded",
+      amount: 30,
+      prediction_strategy: "12month_max",
+      prediction_substitute_missing: "none"
+    }, "2026-06-14", "2026-06-14", rows),
+    45
+  );
+
+  assert.equal(
+    service.predictedAmountForRecurringIncome("local", {
+      id: "income-preloaded",
+      amount: 100,
+      prediction_strategy: "12month_min",
+      prediction_substitute_missing: "none"
+    }, "2026-06-14", "2026-06-14", rows),
+    120
+  );
+});
 
 test("12-month predictions can use the previous year same month for an occurrence", () => withPredictionService((service, db) => {
   for (const row of [

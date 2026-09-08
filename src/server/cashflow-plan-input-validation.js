@@ -5,6 +5,8 @@ import {
   rejectCallerSuppliedId,
   requireBoolean,
   requireEnum,
+  requireMoneyAmount,
+  requireNullableMoneyAmount,
   requireNullableNumber,
   requireNumber
 } from "./cashflow-input-validation.js";
@@ -26,7 +28,7 @@ function normalizeIfPresent(next, field, normalize) {
 function validateCommon(next, kind) {
   normalizeIfPresent(next, "currency", requireSupportedCurrency);
   if (hasOwn(next, "amount")) {
-    next.amount = requireNumber(next.amount, "amount", { min: kind === "goal" ? 0.01 : 0 });
+    next.amount = requireMoneyAmount(next.amount, "amount", { min: kind === "goal" ? 0.01 : 0 });
   }
   if (hasOwn(next, "active")) next.active = requireBoolean(next.active, "active");
 }
@@ -81,8 +83,8 @@ export function validatePlanMutationInput(kind, input = {}, { create = false } =
   } else if (kind === "flex") {
     normalizeIfPresent(next, "priority", (value, field) => requireNumber(value, field, { min: 1, integer: true }));
     if (hasOwn(next, "allow_split")) next.allow_split = requireBoolean(next.allow_split, "allow_split");
-    normalizeIfPresent(next, "min_amount", (value, field) => requireNullableNumber(value, field, { min: 0 }));
-    normalizeIfPresent(next, "max_amount", (value, field) => requireNullableNumber(value, field, { min: 0 }));
+    normalizeIfPresent(next, "min_amount", (value, field) => requireNullableMoneyAmount(value, field, { min: 0 }));
+    normalizeIfPresent(next, "max_amount", (value, field) => requireNullableMoneyAmount(value, field, { min: 0 }));
   } else if (kind === "one-off") {
     normalizeIfPresent(next, "type", (value, field) => requireEnum(value, field, ["income", "expense"]));
     normalizeIfPresent(next, "date", requireIsoDate);

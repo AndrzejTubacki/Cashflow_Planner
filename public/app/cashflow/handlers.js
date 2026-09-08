@@ -5,15 +5,9 @@ import {
   validateCashflowAction
 } from "./actions.js";
 import { escapeHtml } from "../utils.js";
+import { DEFAULT_LEDGER_CURRENCY, FX_PROVIDER_NOTES } from "./constants.js";
 import { openCashflowModal } from "./modal.js";
 import { localeOf, t } from "./shared.js";
-
-const FX_PROVIDER_NOTES = {
-  disabled: "Only ledger-currency transactions can project without supplied rates.",
-  manual: "Use the rates entered below.",
-  nbp: "Polish central bank rates.",
-  frankfurter: "ECB-backed rates for major currencies."
-};
 
 function selectedOptionValues(select) {
   return [...(select?.options || [])]
@@ -40,7 +34,7 @@ function moveSelectedOptions(from, to) {
 
 function syncManualFxRateRows(form, locale) {
   const provider = form.querySelector("[data-fx-provider]")?.value || "nbp";
-  const ledgerCurrency = String(form.querySelector("[data-ledger-currency]")?.value || "PLN").toUpperCase();
+  const ledgerCurrency = String(form.querySelector("[data-ledger-currency]")?.value || DEFAULT_LEDGER_CURRENCY).toUpperCase();
   const note = form.querySelector("[data-fx-provider-note]");
   const selected = form.querySelector("[data-fx-currency-selected]");
   const container = form.querySelector("[data-manual-fx-rates]");
@@ -80,6 +74,70 @@ function syncManualFxRateRows(form, locale) {
       >
     </label>
   `).join("");
+}
+
+function currentBudgetId(root, cashflow) {
+  return root.querySelector("[data-cashflow-budget-manager]")?.getAttribute("data-current-budget-id")
+    || cashflow?.session?.budgetId
+    || cashflow?.session?.userId
+    || "";
+}
+
+function cssEscape(value) {
+  if (globalThis.CSS?.escape) return globalThis.CSS.escape(String(value || ""));
+  return String(value || "").replace(/["\\\]]/g, "\\$&");
+}
+
+function dispatchBudgetRefresh(detail = {}) {
+  window.dispatchEvent(new CustomEvent("cashflow-budget-manager-refresh", { detail }));
+}
+
+function dispatchBudgetSelectionCleared(detail = {}) {
+  window.dispatchEvent(new CustomEvent("cashflow-budget-selection-cleared", { detail }));
+}
+
+function adminAuthPayload(form) {
+  const value = name => String(form.querySelector(`[name="${name}"]`)?.value || "").trim();
+  return {
+    draftMode: value("draftMode") || "none",
+    sessionIdleMinutes: Number(value("sessionIdleMinutes") || 720),
+    sessionAbsoluteMinutes: Number(value("sessionAbsoluteMinutes") || 10080),
+    draftConfig: {
+      external: {
+        adminGroups: value("external.adminGroups"),
+        allowedDomains: value("external.allowedDomains"),
+        assertionSecretEnv: value("external.assertionSecretEnv") || "CASHFLOW_EXTERNAL_AUTH_SECRET",
+        assertionSecretHeader: value("external.assertionSecretHeader") || "x-cashflow-auth-secret",
+        displayNameHeader: value("external.displayNameHeader"),
+        emailHeader: value("external.emailHeader"),
+        groupsHeader: value("external.groupsHeader"),
+        provisioningMode: value("external.provisioningMode") || "deny_unknown",
+        subjectHeader: value("external.subjectHeader") || "x-auth-request-user",
+        trustedIssuer: value("external.trustedIssuer")
+      },
+      internal: {
+        allowPasswordLogin: form.querySelector('input[name="internal.allowPasswordLogin"]')?.checked ? 1 : 0
+      }
+    }
+  };
+}
+
+function adminProviderPayload(form) {
+  const value = name => String(form.querySelector(`[name="${name}"]`)?.value || "").trim();
+  const payload = {
+    kind: value("kind") || "oidc",
+    displayName: value("displayName"),
+    enabled: form.querySelector('input[name="enabled"]')?.checked ? 1 : 0,
+    issuer: value("issuer"),
+    clientId: value("clientId"),
+    redirectUri: value("redirectUri"),
+    scope: value("scope"),
+    authorizationEndpoint: value("authorizationEndpoint"),
+    tokenEndpoint: value("tokenEndpoint"),
+    userInfoEndpoint: value("userInfoEndpoint")
+  };
+  if (value("secretEnv")) payload.secretEnv = value("secretEnv");
+  return payload;
 }
 
 async function downloadCashflowFile(apiClient, url, fallbackName) {
@@ -203,9 +261,10 @@ export function attachCashflowHandlers(root, props = {}) {
     btn.addEventListener("click", () => {
       const txId = btn.getAttribute("data-cashflow-delete-tx");
       const entityType = btn.getAttribute("data-cashflow-delete-entity") || "one-off";
+      const confirmMessage = btn.getAttribute("data-cashflow-delete-confirm") || "";
       if (!txId) return;
 
-      deleteCashflowEntity(apiClient, btn, entityType, txId);
+      deleteCashflowEntity(apiClient, btn, entityType, txId, confirmMessage);
     });
   });
 
@@ -291,6 +350,173 @@ export function attachCashflowHandlers(root, props = {}) {
       );
     });
   });
+
+  const budgetManager = root.querySelector("[data-cashflow-budget-manager]");
+  if (budgetManager) {
+    budgetManager.querySelector("[data-cashflow-create-budget-form]")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      withBusyButton(form.querySelector("button[type='submit']"), "Working...", async () => {
+        const result = await postCashflowJson(apiClient, "/api/budgets", Object.fromEntries(new FormData(form)));
+        dispatchBudgetRefresh(result);
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-select]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-select");
+        if (!budgetId) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await postCashflowJson(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/select`);
+          window.dispatchEvent(new CustomEvent("cashflow-budget-selected", {
+            detail: { budgetId, session: result.session }
+          }));
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-rename]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-rename");
+        const input = budgetManager.querySelector(`[data-cashflow-budget-name="${CSS.escape(budgetId)}"]`);
+        if (!budgetId || !input) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}`, {
+            method: "PUT",
+            body: { displayName: input.value }
+          });
+          dispatchBudgetRefresh(result);
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-export]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-export");
+        if (!budgetId) return;
+        withBusyButton(button, "Working...", () => downloadCashflowFile(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/export`, `cashflow-${budgetId}-full-export.json`));
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-archive]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-archive");
+        if (!budgetId || !window.confirm(t(locale, "Archive this budget?"))) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await postCashflowJson(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/archive`);
+          if (budgetId === currentBudgetId(root, cashflow)) {
+            dispatchBudgetSelectionCleared(result);
+          } else {
+            dispatchBudgetRefresh(result);
+          }
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-restore]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-restore");
+        if (!budgetId) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await postCashflowJson(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/restore`);
+          dispatchBudgetRefresh(result);
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-purge]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-purge");
+        if (!budgetId || !window.confirm(t(locale, "Purge this archived budget? A safety export is created first."))) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}`, { method: "DELETE" });
+          if (budgetId === currentBudgetId(root, cashflow)) {
+            dispatchBudgetSelectionCleared(result);
+          } else {
+            dispatchBudgetRefresh(result);
+          }
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-budget-leave]").forEach(button => {
+      button.addEventListener("click", () => {
+        const budgetId = button.getAttribute("data-cashflow-budget-leave");
+        if (!budgetId || !window.confirm(t(locale, "Leave this budget?"))) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await postCashflowJson(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/leave`);
+          dispatchBudgetSelectionCleared(result);
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-member-update]").forEach(button => {
+      button.addEventListener("click", () => {
+        const accountId = button.getAttribute("data-cashflow-member-update");
+        const budgetId = currentBudgetId(root, cashflow);
+        const role = budgetManager.querySelector(`[data-cashflow-member-role="${cssEscape(accountId)}"]`)?.value || "";
+        if (!budgetId || !accountId || !role) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/members/${encodeURIComponent(accountId)}`, {
+            method: "PUT",
+            body: { role }
+          });
+          dispatchBudgetRefresh(result);
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-member-remove]").forEach(button => {
+      button.addEventListener("click", () => {
+        const accountId = button.getAttribute("data-cashflow-member-remove");
+        const budgetId = currentBudgetId(root, cashflow);
+        if (!budgetId || !accountId || !window.confirm(t(locale, "Remove this member?"))) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/members/${encodeURIComponent(accountId)}`, { method: "DELETE" });
+          dispatchBudgetRefresh(result);
+        });
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-member-transfer]").forEach(button => {
+      button.addEventListener("click", () => {
+        const accountId = button.getAttribute("data-cashflow-member-transfer");
+        const budgetId = currentBudgetId(root, cashflow);
+        if (!budgetId || !accountId || !window.confirm(t(locale, "Transfer ownership to this member?"))) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await postCashflowJson(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/transfer-ownership`, { accountId });
+          dispatchBudgetRefresh(result);
+        });
+      });
+    });
+
+    budgetManager.querySelector("[data-cashflow-budget-invite-form]")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const budgetId = currentBudgetId(root, cashflow);
+      if (!budgetId) return;
+      withBusyButton(form.querySelector("button[type='submit']"), "Working...", async () => {
+        const payload = Object.fromEntries(new FormData(form));
+        payload.expiresInHours = Number(payload.expiresInHours || 168);
+        if (!payload.accountId) delete payload.accountId;
+        if (!payload.email) delete payload.email;
+        const result = await postCashflowJson(apiClient, `/api/budgets/${encodeURIComponent(budgetId)}/invitations`, payload);
+        window.dispatchEvent(new CustomEvent("cashflow-budget-invitation-created", { detail: result }));
+      });
+    });
+
+    budgetManager.querySelectorAll("[data-cashflow-invitation-revoke]").forEach(button => {
+      button.addEventListener("click", () => {
+        const invitationId = button.getAttribute("data-cashflow-invitation-revoke");
+        const budgetId = currentBudgetId(root, cashflow);
+        if (!budgetId || !invitationId || !window.confirm(t(locale, "Revoke this invitation?"))) return;
+        withBusyButton(button, "Working...", async () => {
+          const result = await apiClient.json(`/api/budgets/${encodeURIComponent(budgetId)}/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
+          dispatchBudgetRefresh(result);
+        });
+      });
+    });
+  }
 
   const settingsForm = root.querySelector("[data-cashflow-settings-form]");
   if (settingsForm) {
@@ -402,7 +628,6 @@ export function attachCashflowHandlers(root, props = {}) {
       });
 
       updates.future_periods = Number(updates.future_periods || 11);
-      updates.minimum_reserve_amount = Number(updates.minimum_reserve_amount || 0);
       updates.fx_buffer_percent = Number(updates.fx_buffer_percent || 0);
       updates.necessary_underfunded_repeat_days = Number(updates.necessary_underfunded_repeat_days || 1);
       updates.fx_used_currencies = selectedOptionValues(selectedCurrencies);
@@ -429,4 +654,188 @@ export function attachCashflowHandlers(root, props = {}) {
       window.dispatchEvent(new CustomEvent("cashflow-admin-options-update", { detail: updates }));
     });
   }
+
+  const adminAuthForm = root.querySelector("[data-cashflow-admin-auth-form]");
+  if (adminAuthForm) {
+    adminAuthForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const button = adminAuthForm.querySelector("button[type='submit']");
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json("/api/admin/auth/draft", {
+          method: "PUT",
+          body: adminAuthPayload(adminAuthForm)
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+
+    adminAuthForm.querySelector("[data-cashflow-admin-auth-test]")?.addEventListener("click", (event) => {
+      withBusyButton(event.currentTarget, "Working...", async () => {
+        await apiClient.json("/api/admin/auth/test", {
+          method: "POST",
+          body: {}
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+
+    adminAuthForm.querySelector("[data-cashflow-admin-auth-activate]")?.addEventListener("click", (event) => {
+      if (!window.confirm(t(locale, "Activate this auth draft?"))) return;
+      withBusyButton(event.currentTarget, "Working...", async () => {
+        await apiClient.json("/api/admin/auth/activate", {
+          method: "POST",
+          body: {}
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  }
+
+  root.querySelectorAll("[data-cashflow-admin-provider-form]").forEach(form => {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const providerId = String(form.querySelector('[name="providerId"]')?.value || "").trim();
+      if (!providerId) return;
+      const button = form.querySelector("button[type='submit']");
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/auth/providers/${encodeURIComponent(providerId)}`, {
+          method: "PUT",
+          body: adminProviderPayload(form)
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-provider-delete]").forEach(button => {
+    button.addEventListener("click", () => {
+      const providerId = button.getAttribute("data-cashflow-admin-provider-delete") || "";
+      if (!providerId || !window.confirm(t(locale, "Delete this provider?"))) return;
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/auth/providers/${encodeURIComponent(providerId)}`, {
+          method: "DELETE",
+          body: {}
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-account-rename]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-account-rename");
+      const input = root.querySelector(`[data-cashflow-admin-account-name="${cssEscape(accountId)}"]`);
+      const emailInput = root.querySelector(`[data-cashflow-admin-account-email="${cssEscape(accountId)}"]`);
+      if (!accountId || !input) return;
+
+      withBusyButton(button, "Working...", async () => {
+        const body = { displayName: input.value };
+        if (emailInput?.value?.trim()) body.email = emailInput.value;
+        await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}`, {
+          method: "PUT",
+          body
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-password-token]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-password-token");
+      const purpose = button.getAttribute("data-purpose") || "password_reset";
+      if (!accountId) return;
+
+      withBusyButton(button, "Working...", async () => {
+        const result = await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}/password-reset-token`, {
+          method: "POST",
+          body: { purpose }
+        });
+        const output = root.querySelector(`[data-cashflow-admin-password-token-output="${cssEscape(accountId)}"]`);
+        if (output) {
+          output.innerHTML = `${t(locale, "Password token")}: <code>${escapeHtml(result.token || "")}</code>`;
+        }
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-external-link]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-external-link");
+      const subjectInput = root.querySelector(`[data-cashflow-admin-external-subject="${cssEscape(accountId)}"]`);
+      if (!accountId || !subjectInput) return;
+
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}/external-identity`, {
+          method: "PUT",
+          body: { subject: subjectInput.value }
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-account-status]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-account-status");
+      const status = button.getAttribute("data-next-status") || "";
+      if (!accountId || !status) return;
+      if (status === "disabled" && !window.confirm(t(locale, "Disable this account?"))) return;
+
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}`, {
+          method: "PUT",
+          body: { status }
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-account-admin]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-account-admin");
+      const enabled = button.getAttribute("data-enabled") === "1";
+      if (!accountId) return;
+      if (!enabled && !window.confirm(t(locale, "Revoke system admin from this account?"))) return;
+
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}/system-admin`, {
+          method: "PUT",
+          body: { enabled }
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-session-revoke]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-session-revoke");
+      const sessionId = button.getAttribute("data-session-id") || "";
+      if (!accountId || !sessionId || !window.confirm(t(locale, "Revoke this session?"))) return;
+
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}/sessions/${encodeURIComponent(sessionId)}/revoke`, {
+          method: "POST",
+          body: {}
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-admin-account-delete]").forEach(button => {
+    button.addEventListener("click", () => {
+      const accountId = button.getAttribute("data-cashflow-admin-account-delete");
+      if (!accountId || !window.confirm(t(locale, "Delete this account?"))) return;
+
+      withBusyButton(button, "Working...", async () => {
+        await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}`, {
+          method: "DELETE"
+        });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh"));
+      });
+    });
+  });
 }

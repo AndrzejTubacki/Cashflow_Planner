@@ -11,6 +11,7 @@ import {
 } from "./cashflow-fx-provider-utils.js";
 import {
   requireBoolean,
+  requireMoneyAmount,
   requireNumber,
   validationError
 } from "./cashflow-input-validation.js";
@@ -271,7 +272,7 @@ export function validateAndNormalizeSettings(values = {}, options = {}) {
     next.future_periods = requireNumber(next.future_periods, "future_periods", { min: 1, max: 60, integer: true });
   }
   if (has("minimum_reserve_amount")) {
-    next.minimum_reserve_amount = requireNumber(next.minimum_reserve_amount, "minimum_reserve_amount", { min: 0 });
+    next.minimum_reserve_amount = requireMoneyAmount(next.minimum_reserve_amount, "minimum_reserve_amount", { min: 0 });
   }
   if (has("fx_buffer_percent")) {
     next.fx_buffer_percent = requireNumber(next.fx_buffer_percent, "fx_buffer_percent", { min: 0, max: 100 });
