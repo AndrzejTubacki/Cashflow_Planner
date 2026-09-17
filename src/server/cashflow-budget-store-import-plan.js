@@ -238,6 +238,19 @@ export async function applyBudgetStoreImportPlan({
   }
 
   const applyWithWriter = async writer => {
+    // Import writes plenty of rows for the same budget an ordinary
+    // mutation route (create a one-off, confirm a pending transaction...)
+    // could be touching at the exact same moment from a different replica.
+    // Those ordinary routes don't check any runtime lock, so the only thing
+    // that actually serializes them against a concurrent import is this
+    // same transaction-scoped advisory lock confirmPendingTransaction and
+    // ledger compaction already take for the same reason.
+    if (typeof writer.lockBudgetLedger === "function") {
+      for (const budgetId of importPlan.budgetIds) {
+        await writer.lockBudgetLedger(budgetId);
+      }
+    }
+
     const appliedBatches = [];
     for (const batch of importPlan.writeBatches) {
       await onBatch({

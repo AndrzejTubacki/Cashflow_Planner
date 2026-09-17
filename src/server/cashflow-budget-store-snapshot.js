@@ -128,6 +128,17 @@ export async function restoreBudgetStoreSnapshot({
   const payload = normalized.payload;
 
   const restoreWithWriter = async writer => {
+    // Same reasoning as the full-import path in
+    // cashflow-budget-store-import-plan.js: ordinary mutation routes don't
+    // check any runtime lock, so this transaction-scoped advisory lock is
+    // what actually keeps a restore from racing a concurrent ordinary
+    // mutation on the same budget from a different replica.
+    if (typeof writer.lockBudgetLedger === "function") {
+      for (const budgetId of normalized.budgetIds) {
+        await writer.lockBudgetLedger(budgetId);
+      }
+    }
+
     const appliedBatches = [];
 
     for (const budgetId of normalized.budgetIds) {

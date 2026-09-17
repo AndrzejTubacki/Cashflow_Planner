@@ -41,6 +41,7 @@ function schemaVersion(dbPath) {
 }
 
 export function createCashflowDbService({
+  isPostgresBackend = () => false,
   ledgerDbPath,
   logError = () => {},
   logServerEvent = () => {},
@@ -48,6 +49,32 @@ export function createCashflowDbService({
   planningDbPath,
   userDataDir
 }) {
+  // Every mutating planner/ledger code path is expected to check
+  // budgetStore.backend and route through the Postgres-aware sibling before
+  // it would ever reach these openers. Two real bugs this session
+  // (createBudgetAsync, POST /api/setup) traced back to a sync-only path
+  // still calling one of these under a live Postgres backend anyway — each
+  // only surfaced when actually exercised. Rather than trying to statically
+  // audit every call site and hope nothing is missed, this throws the
+  // instant it happens, with enough detail (caller stack included) to find
+  // the offending call site immediately instead of days later.
+  function assertNotPostgresBackend(kind, details) {
+    if (!isPostgresBackend()) return;
+
+    const error = new Error(
+      `cashflow-db-service: attempted to open a SQLite ${kind} database while CASHFLOW_DB_BACKEND=postgres is active. ` +
+      "This means a code path bypassed the Postgres budget store instead of routing through its async sibling."
+    );
+    error.code = "CASHFLOW_SQLITE_OPENER_USED_UNDER_POSTGRES_BACKEND";
+    logError("cashflow_sqlite_opener_used_under_postgres_backend", {
+      ...details,
+      kind,
+      message: error.message,
+      stack: error.stack
+    });
+    throw error;
+  }
+
   const {
     ensureMigrationRecovery,
     markMigrationRecoveryComplete
@@ -72,6 +99,7 @@ export function createCashflowDbService({
   }
 
   function openPlanningDb(userId, options = {}) {
+    assertNotPostgresBackend("planning", { userId });
     const { create = true } = options;
     const dbPath = planningDbPath(userId, { create });
     const isNew = !fs.existsSync(dbPath);
@@ -108,6 +136,7 @@ export function createCashflowDbService({
   }
 
   function openLedgerDb(userId, year, options = {}) {
+    assertNotPostgresBackend("ledger", { userId, year });
     const { create = true } = options;
     const dbPath = ledgerDbPath(userId, year, { create });
     const isNew = !fs.existsSync(dbPath);

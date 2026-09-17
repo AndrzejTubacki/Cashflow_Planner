@@ -188,6 +188,9 @@ export function createCashflowPendingTransitionService({
       : "";
 
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const futureRows = await writer.listPlanningRows(userId, "future_transactions");
       let tx = futureRows.find(row => row.id === futureTransactionId) || null;
 

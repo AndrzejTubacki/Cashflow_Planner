@@ -459,6 +459,9 @@ export function createCashflowProjectionCoordinatorService({
   async function clearPendingTransactions(userId) {
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
       return await budgetStore.transaction(async writer => {
+        if (typeof writer.lockBudgetLedger === "function") {
+          await writer.lockBudgetLedger(userId);
+        }
         const ids = (await writer.listPlanningRows(userId, "pending_transactions"))
           .map(row => row.id);
         if (!ids.length) return 0;

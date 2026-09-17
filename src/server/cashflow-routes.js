@@ -152,6 +152,8 @@ export function registerCashflowRoutes(app, {
   importOneOffCsvAsync = null,
   importSampleData,
   importSampleDataAsync = null,
+  previewFullImport,
+  previewFullImportAsync = null,
   safeGetCurrentFxSnapshot,
   safeGetCurrentFxSnapshotAsync = null,
   setupRequired = null,
@@ -1428,10 +1430,15 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
         userId = await resolveRequestUser(req);
-        const projection = await regenerateProjectionsWithFxRefresh(userId, {
-          date: req.body?.date || null,
-          refreshFxFirst: true
-        });
+        const projection = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.fxRefresh,
+          () => regenerateProjectionsWithFxRefresh(userId, {
+            date: req.body?.date || null,
+            refreshFxFirst: true
+          }),
+          { message: "FX refresh is already running for this budget" }
+        );
 
         res.json({
           ok: true,
@@ -1908,6 +1915,25 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    app.post("/api/import/full/preview", async (req, res) => {
+      try {
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const userId = await resolveRequestUser(req);
+        const previewArgs = [
+          userId,
+          req.body?.export || req.body,
+          req.body?.mode || "replace",
+          { includeOperationalSettings: Boolean(req.body?.includeOperationalSettings) }
+        ];
+        const result = typeof previewFullImportAsync === "function"
+          ? await previewFullImportAsync(...previewArgs)
+          : previewFullImport(...previewArgs);
+        res.json(result);
+      } catch (error) {
+        await fail(req, res, error, "Failed to preview cashflow import", "cashflow_full_import_preview_failed");
+      }
+    });
+
     app.post("/api/import/full", async (req, res) => {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
@@ -1918,9 +1944,17 @@ export function registerCashflowRoutes(app, {
           req.body?.mode || "replace",
           { includeOperationalSettings: Boolean(req.body?.includeOperationalSettings) }
         ];
-        const result = typeof importFullDataAsync === "function"
-          ? await importFullDataAsync(...importArgs)
-          : importFullData(...importArgs);
+        const result = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
+          () => typeof importFullDataAsync === "function"
+            ? importFullDataAsync(...importArgs)
+            : importFullData(...importArgs),
+          {
+            message: "An import or restore is already running for this budget",
+            ttlMs: 300000
+          }
+        );
         res.json({
           ...(await snapshotForUser(userId)),
           import: result
@@ -1936,9 +1970,17 @@ export function registerCashflowRoutes(app, {
         const userId = await resolveRequestUser(req);
         const csv = req.body?.csv || "";
         const mode = req.body?.mode || "append";
-        const result = typeof importOneOffCsvAsync === "function"
-          ? await importOneOffCsvAsync(userId, csv, mode)
-          : importOneOffCsv(userId, csv, mode);
+        const result = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
+          () => typeof importOneOffCsvAsync === "function"
+            ? importOneOffCsvAsync(userId, csv, mode)
+            : importOneOffCsv(userId, csv, mode),
+          {
+            message: "An import or restore is already running for this budget",
+            ttlMs: 300000
+          }
+        );
         res.json({
           ...(await snapshotForUser(userId)),
           import: result
@@ -1980,9 +2022,17 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
         const userId = await resolveRequestUser(req);
-        const result = typeof importSampleDataAsync === "function"
-          ? await importSampleDataAsync(userId)
-          : importSampleData(userId);
+        const result = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
+          () => typeof importSampleDataAsync === "function"
+            ? importSampleDataAsync(userId)
+            : importSampleData(userId),
+          {
+            message: "An import or restore is already running for this budget",
+            ttlMs: 300000
+          }
+        );
         res.json({
           ...(await snapshotForUser(userId)),
           import: result
@@ -2006,9 +2056,17 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
         const userId = await resolveRequestUser(req);
-        const result = typeof restoreBackupAsync === "function"
-          ? await restoreBackupAsync(userId, req.params.backupId)
-          : restoreBackup(userId, req.params.backupId);
+        const result = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
+          () => typeof restoreBackupAsync === "function"
+            ? restoreBackupAsync(userId, req.params.backupId)
+            : restoreBackup(userId, req.params.backupId),
+          {
+            message: "An import or restore is already running for this budget",
+            ttlMs: 300000
+          }
+        );
         res.json({
           ...(await snapshotForUser(userId)),
           restore: result

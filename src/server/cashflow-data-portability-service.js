@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { requireIsoDate } from "./cashflow-date-utils.js";
 import {
   applyBudgetStoreImportPlan,
@@ -10,6 +11,8 @@ import {
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { validateFullImportRows } from "./cashflow-import-validation.js";
 import { roundMoneyAmount } from "./cashflow-money-utils.js";
+import { POSTGRES_BUDGET_COLUMNS } from "./cashflow-postgres-budget-schema.js";
+import { LEDGER_SCHEMA_VERSION, PLANNING_SCHEMA_VERSION } from "./cashflow-schema.js";
 import {
   OPERATIONAL_SETTINGS_COLUMNS,
   validateAndNormalizeSettings
@@ -332,6 +335,119 @@ function hasFunctionalRows(exportData) {
     || Object.values(exportData?.ledgers || {}).some(rows => Array.isArray(rows) && rows.length > 0);
 }
 
+function canonicalizeForChecksum(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeForChecksum);
+  if (value && typeof value === "object") {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = canonicalizeForChecksum(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+
+function computeExportChecksum({ planning, ledgers }) {
+  const canonical = canonicalizeForChecksum({ planning, ledgers });
+  return `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
+}
+
+function buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId }) {
+  return {
+    format: EXPORT_FORMAT,
+    version: EXPORT_VERSION,
+    schemaVersions: {
+      planning: PLANNING_SCHEMA_VERSION,
+      ledger: LEDGER_SCHEMA_VERSION
+    },
+    appVersion,
+    exportedAt: new Date().toISOString(),
+    userId,
+    operationalSettingsIncluded: includeOperationalSettings,
+    planning,
+    ledgers,
+    checksum: computeExportChecksum({ planning, ledgers })
+  };
+}
+
+// The only real column rename in the migration history (schema v12): the
+// ntfy settings column used to be called ntfy_topic. Everything since has
+// been additive (new nullable/defaulted columns), which the column
+// intersection in insertRows already reconciles safely on its own.
+function applyKnownSettingsCompatRenames(settings) {
+  if (!settings.ntfy_url && settings.ntfy_topic) {
+    settings.ntfy_url = settings.ntfy_topic;
+  }
+  delete settings.ntfy_topic;
+}
+
+function planningRowColumns(rows) {
+  const columns = new Set();
+  for (const row of rows || []) {
+    for (const key of Object.keys(row || {})) columns.add(key);
+  }
+  return columns;
+}
+
+// Only reports columns this schema expects that the export doesn't have
+// (which import tolerates, backfilling defaults). The reverse case, a field
+// in the export this schema no longer recognizes, can't reach this report:
+// validateFullImportRows rejects it with a hard "unknown_field" error before
+// a preview is built, for both preview and the real import.
+function computeDefaultedColumns(exportedColumns, liveColumns) {
+  return liveColumns.filter(column => !exportedColumns.has(column)).sort();
+}
+
+const SETTINGS_PREVIEW_IGNORED_FIELDS = new Set(["id", "budget_id", "updated_at"]);
+
+function buildFullImportPreview({
+  conflicts,
+  currentRowCounts,
+  currentSettings,
+  exportData,
+  ledgerYears,
+  liveColumnsByTable,
+  mode
+}) {
+  const tables = {};
+  for (const tableName of PLANNING_EXPORT_TABLES) {
+    const exportedRows = exportData.planning[tableName] || [];
+    tables[tableName] = {
+      exportRowCount: exportedRows.length,
+      currentRowCount: currentRowCounts[tableName] ?? 0,
+      defaultedColumns: computeDefaultedColumns(
+        planningRowColumns(exportedRows),
+        liveColumnsByTable[tableName] || []
+      )
+    };
+  }
+
+  const importedSettings = exportData.planning.settings[0] || {};
+  const settingsChanges = Object.entries(importedSettings)
+    .filter(([field]) => !SETTINGS_PREVIEW_IGNORED_FIELDS.has(field))
+    .map(([field, value]) => ({
+      field,
+      from: currentSettings?.[field] ?? null,
+      to: value ?? null
+    }))
+    .filter(change => String(change.from) !== String(change.to));
+
+  return {
+    ok: true,
+    mode,
+    schemaVersions: {
+      export: exportData.schemaVersions || null,
+      current: { planning: PLANNING_SCHEMA_VERSION, ledger: LEDGER_SCHEMA_VERSION }
+    },
+    tables,
+    ledgerYears: {
+      export: Object.keys(exportData.ledgers),
+      current: ledgerYears
+    },
+    settingsChanges,
+    conflicts: conflicts || []
+  };
+}
+
 function prepareExportDataForImport(exportData, options = {}) {
   const {
     currentSettings = {},
@@ -344,6 +460,8 @@ function prepareExportDataForImport(exportData, options = {}) {
   const settings = { ...(prepared.planning.settings[0] || {}) };
   const hasData = hasFunctionalRows(prepared);
   const setupTimestamp = prepared.exportedAt || new Date().toISOString();
+
+  applyKnownSettingsCompatRenames(settings);
 
   for (const [key, value] of Object.entries(SETTINGS_COMPAT_DEFAULTS)) {
     if (settings[key] === undefined || settings[key] === null || settings[key] === "") {
@@ -457,6 +575,30 @@ function normalizeExportPayload(payload) {
 
   if (!exportData.ledgers || typeof exportData.ledgers !== "object") {
     throw badRequest("Export is missing ledger data");
+  }
+
+  if (exportData.checksum) {
+    const expectedChecksum = computeExportChecksum({
+      planning: exportData.planning,
+      ledgers: exportData.ledgers
+    });
+    if (exportData.checksum !== expectedChecksum) {
+      throw badRequest("Export checksum does not match its contents; the file may be corrupted or was edited after export");
+    }
+  }
+
+  const exportPlanningVersion = Number(exportData.schemaVersions?.planning);
+  if (Number.isFinite(exportPlanningVersion) && exportPlanningVersion > PLANNING_SCHEMA_VERSION) {
+    throw badRequest(
+      `This export was created by a newer version of Cashflow (planning schema ${exportPlanningVersion}; this instance is on ${PLANNING_SCHEMA_VERSION}). Upgrade this instance before importing it.`
+    );
+  }
+
+  const exportLedgerVersion = Number(exportData.schemaVersions?.ledger);
+  if (Number.isFinite(exportLedgerVersion) && exportLedgerVersion > LEDGER_SCHEMA_VERSION) {
+    throw badRequest(
+      `This export was created by a newer version of Cashflow (ledger schema ${exportLedgerVersion}; this instance is on ${LEDGER_SCHEMA_VERSION}). Upgrade this instance before importing it.`
+    );
   }
 
   for (const tableName of PLANNING_EXPORT_TABLES) {
@@ -755,16 +897,7 @@ export function createCashflowDataPortabilityService({
       }
     }
 
-    return {
-      format: EXPORT_FORMAT,
-      version: EXPORT_VERSION,
-      appVersion,
-      exportedAt: new Date().toISOString(),
-      userId,
-      operationalSettingsIncluded: includeOperationalSettings,
-      planning,
-      ledgers
-    };
+    return buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId });
   }
 
   function stripBudgetStoreColumns(row, columns = ["budget_id"]) {
@@ -802,16 +935,7 @@ export function createCashflowDataPortabilityService({
       ledgers[yearKey] = rows.map(row => stripBudgetStoreColumns(row, ["budget_id", "ledger_year"]));
     }
 
-    return {
-      format: EXPORT_FORMAT,
-      version: EXPORT_VERSION,
-      appVersion,
-      exportedAt: new Date().toISOString(),
-      userId,
-      operationalSettingsIncluded: includeOperationalSettings,
-      planning,
-      ledgers
-    };
+    return buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId });
   }
 
   function replacePlanningData(userId, exportData) {
@@ -1123,6 +1247,52 @@ export function createCashflowDataPortabilityService({
     return conflicts;
   }
 
+  async function previewFullImportAsync(userId, payload, mode = "replace", options = {}) {
+    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
+      return previewFullImport(userId, payload, mode, options);
+    }
+
+    const normalizedMode = mode === "merge" ? "merge" : "replace";
+    const currentRowsByTable = {};
+    const currentRowCounts = {};
+    const liveColumnsByTable = {};
+
+    for (const tableName of PLANNING_EXPORT_TABLES) {
+      const rows = await budgetStore.listPlanningRows(userId, tableName);
+      currentRowsByTable[tableName] = rows;
+      currentRowCounts[tableName] = rows.length;
+      liveColumnsByTable[tableName] = (POSTGRES_BUDGET_COLUMNS[tableName] || [])
+        .filter(column => column !== "budget_id");
+    }
+    const currentSettings = stripBudgetStoreColumns(currentRowsByTable.settings[0] || {});
+
+    const exportData = prepareExportDataForImport(
+      normalizeExportPayload(payload),
+      {
+        currentSettings,
+        includeOperationalSettings: normalizedMode === "replace" && Boolean(options.includeOperationalSettings),
+        merge: normalizedMode === "merge",
+        normalizeLocale,
+        validateSettings: normalizedMode === "replace"
+      }
+    );
+
+    const conflicts = normalizedMode === "merge" ? await collectMergeConflictsAsync(userId, exportData) : [];
+    const ledgerYears = typeof budgetStore.listLedgerYears === "function"
+      ? await budgetStore.listLedgerYears(userId)
+      : listLedgerYears(userId);
+
+    return buildFullImportPreview({
+      conflicts,
+      currentRowCounts,
+      currentSettings,
+      exportData,
+      ledgerYears,
+      liveColumnsByTable,
+      mode: normalizedMode
+    });
+  }
+
   async function prepareFullImportPlanAsync(userId, payload, mode = "replace", options = {}) {
     const normalizedMode = mode === "merge" ? "merge" : "replace";
     const includeOperationalSettings = normalizedMode === "replace"
@@ -1365,6 +1535,47 @@ export function createCashflowDataPortabilityService({
         ledgerDb.close();
       }
     }
+  }
+
+  function previewFullImport(userId, payload, mode = "replace", options = {}) {
+    const normalizedMode = mode === "merge" ? "merge" : "replace";
+    const db = openPlanningDb(userId);
+    let currentSettings;
+    const currentRowCounts = {};
+    const liveColumnsByTable = {};
+
+    try {
+      currentSettings = db.prepare("SELECT * FROM settings WHERE id = 1").get() || {};
+      for (const tableName of PLANNING_EXPORT_TABLES) {
+        currentRowCounts[tableName] = db.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get().count;
+        liveColumnsByTable[tableName] = tableColumns(db, tableName);
+      }
+    } finally {
+      db.close();
+    }
+
+    const exportData = prepareExportDataForImport(
+      normalizeExportPayload(payload),
+      {
+        currentSettings,
+        includeOperationalSettings: normalizedMode === "replace" && Boolean(options.includeOperationalSettings),
+        merge: normalizedMode === "merge",
+        normalizeLocale,
+        validateSettings: normalizedMode === "replace"
+      }
+    );
+
+    const conflicts = normalizedMode === "merge" ? collectMergeConflicts(userId, exportData) : [];
+
+    return buildFullImportPreview({
+      conflicts,
+      currentRowCounts,
+      currentSettings,
+      exportData,
+      ledgerYears: listLedgerYears(userId),
+      liveColumnsByTable,
+      mode: normalizedMode
+    });
   }
 
   function importFullData(userId, payload, mode = "replace", options = {}) {
@@ -1772,6 +1983,8 @@ export function createCashflowDataPortabilityService({
     exportFullData,
     exportFullDataAsync,
     exportSampleData,
+    previewFullImport,
+    previewFullImportAsync,
     collectMergeConflictsAsync,
     prepareFullImportPlanAsync,
     applyPreparedFullImportPlanAsync,

@@ -288,6 +288,7 @@ test("default replace and sample imports preserve target operational settings", 
   exported.planning.settings[0].discord_webhook_url = "https://discord.example.com/api/webhooks/source";
   exported.planning.settings[0].auto_backup_enabled = 0;
   exported.planning.settings[0].backup_retention_count = 3;
+  delete exported.checksum;
 
   await harness.api("/api/settings", {
     method: "PUT",
@@ -332,6 +333,7 @@ test("full replace import validates opted-in operational settings before creatin
   const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
   exported.planning.settings[0].backup_location = "/outside/allowed/backup-root";
   exported.planning.settings[0].notification_delivery_time = "25:00";
+  delete exported.checksum;
   const beforeBackups = backupCount(harness);
 
   const rejected = await harness.request("/api/import/full", {
@@ -391,6 +393,7 @@ test("full replace import validates functional settings before creating a backup
   for (const [field, value] of invalidSettings) {
     const candidate = structuredClone(exported);
     candidate.planning.settings[0][field] = value;
+    delete candidate.checksum;
     const rejected = await harness.request("/api/import/full", {
       method: "POST",
       body: {
@@ -420,6 +423,8 @@ test("full import accepts older exports missing recent settings fields", async (
   ]) {
     delete exported.planning.settings[0][key];
   }
+  delete exported.checksum;
+  delete exported.schemaVersions;
 
   const imported = await harness.api("/api/import/full", {
     method: "POST",
@@ -561,6 +566,7 @@ test("full merge detects confirmed IDs that already exist in another ledger year
     date: "2027-06-01",
     confirmed_date: "2027-06-01"
   }];
+  delete exported.checksum;
   const newLedgerPath = ledgerDbPath(harness.dataDir, harness.userId, "2027");
 
   assert.equal(fs.existsSync(newLedgerPath), false);
@@ -619,6 +625,7 @@ test("full merge ignores target settings validation but rejects occurrence-key c
       row.id = `duplicate-${row.id}`;
       row.source_one_off_id = null;
     }
+    delete duplicateOccurrence.checksum;
     const conflict = await target.request("/api/import/full", {
       method: "POST",
       body: { mode: "merge", export: duplicateOccurrence }
@@ -735,6 +742,7 @@ test("full import rejects malformed rows before backup or writes", async () => w
   for (const [label, mutate, reason] of cases) {
     const candidate = structuredClone(exported);
     mutate(candidate);
+    delete candidate.checksum;
     const rejected = await harness.request("/api/import/full", {
       method: "POST",
       body: { mode: "replace", export: candidate }
@@ -923,6 +931,7 @@ test("full import validates ledger relationships and occurrence uniqueness befor
   for (const [label, mutate, reason] of cases) {
     const candidate = structuredClone(exported);
     mutate(candidate);
+    delete candidate.checksum;
     const rejected = await harness.request("/api/import/full", {
       method: "POST",
       body: { mode: "replace", export: candidate }
@@ -934,6 +943,7 @@ test("full import validates ledger relationships and occurrence uniqueness befor
 
   const historical = structuredClone(exported);
   historical.ledgers["2026"][0].source_one_off_id = "deleted-historical-source";
+  delete historical.checksum;
   const accepted = await harness.api("/api/import/full", {
     method: "POST",
     body: { mode: "replace", export: historical }
@@ -966,6 +976,7 @@ test("full import inserts each row using its own compatible columns", async () =
       updated_at: "2026-06-01T00:00:00.000Z"
     }
   ];
+  delete exported.checksum;
 
   await harness.api("/api/import/full", {
     method: "POST",
@@ -1150,4 +1161,140 @@ test("sample dataset can be downloaded and loaded", async () => withHarness(asyn
   assert.equal(loaded.oneOffs.some(row => row.name === "Sample laptop"), true);
   assert.equal(loaded.oneOffs.some(row => row.name === "Will be replaced"), false);
   assert.equal(validation.ok, true);
+}));
+
+test("full export carries a checksum and schema versions, and import rejects a tampered export", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full");
+  assert.equal(typeof exported.checksum, "string");
+  assert.match(exported.checksum, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(typeof exported.schemaVersions.planning, "number");
+  assert.equal(typeof exported.schemaVersions.ledger, "number");
+
+  exported.planning.settings[0].future_periods = 3;
+
+  const rejected = await harness.request("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+
+  assert.equal(rejected.response.status, 400);
+  assert.match(rejected.body.error, /checksum/i);
+}));
+
+test("full import rejects an export produced by a newer schema version than this instance runs", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full");
+  exported.schemaVersions.planning += 1000;
+  delete exported.checksum;
+
+  const rejected = await harness.request("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+
+  assert.equal(rejected.response.status, 400);
+  assert.match(rejected.body.error, /newer version/i);
+}));
+
+test("full import maps a legacy ntfy_topic settings field onto ntfy_url", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
+  exported.planning.settings[0].ntfy_topic = "https://ntfy.example.com/legacy-topic";
+  delete exported.planning.settings[0].ntfy_url;
+  delete exported.checksum;
+
+  const imported = await harness.api("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: exported, includeOperationalSettings: true }
+  });
+
+  assert.equal(imported.settings.ntfy_url, "https://ntfy.example.com/legacy-topic");
+}));
+
+test("full import preview reports row counts and settings changes without writing anything", async () => withHarness(async harness => {
+  await harness.api("/api/one-off", {
+    method: "POST",
+    body: { name: "Existing", currency: "PLN", amount: 10, type: "expense", date: "2026-06-01" }
+  });
+  const beforeSnapshot = await harness.api("/api");
+
+  const exported = await harness.api("/api/export/full");
+  exported.planning.settings[0].future_periods = 3;
+  delete exported.checksum;
+
+  const preview = await harness.api("/api/import/full/preview", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+
+  assert.equal(preview.ok, true);
+  assert.equal(preview.mode, "replace");
+  assert.equal(preview.tables.one_off_transactions.exportRowCount, 1);
+  assert.equal(preview.tables.one_off_transactions.currentRowCount, 1);
+  assert.ok(preview.settingsChanges.some(change => change.field === "future_periods" && change.to === 3));
+
+  const afterSnapshot = await harness.api("/api");
+  assert.deepEqual(afterSnapshot.oneOffs, beforeSnapshot.oneOffs);
+  assert.equal(afterSnapshot.settings.future_periods, beforeSnapshot.settings.future_periods);
+}));
+
+test("full import preview reports schema columns an older export doesn't have", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full");
+  exported.planning.fx_rates_cache = [{
+    base_currency: "EUR",
+    quote_currency: "PLN",
+    currency: "EUR",
+    rate_date: "2026-06-01",
+    rate: 4.2,
+    source: "manual",
+    updated_at: "2026-06-01T00:00:00.000Z"
+  }];
+  delete exported.checksum;
+
+  const preview = await harness.api("/api/import/full/preview", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+
+  assert.ok(preview.tables.fx_rates_cache.defaultedColumns.includes("effective_date"));
+}));
+
+test("full import preview fails like a real import when the export has a field this schema no longer recognizes", async () => withHarness(async harness => {
+  const exported = await harness.api("/api/export/full");
+  exported.planning.fx_rates_cache = [{
+    base_currency: "EUR",
+    quote_currency: "PLN",
+    currency: "EUR",
+    rate_date: "2026-06-01",
+    rate: 4.2,
+    source: "manual",
+    updated_at: "2026-06-01T00:00:00.000Z",
+    legacy_unused_column: "gone"
+  }];
+  delete exported.checksum;
+
+  const rejected = await harness.request("/api/import/full/preview", {
+    method: "POST",
+    body: { mode: "replace", export: exported }
+  });
+
+  assert.equal(rejected.response.status, 400);
+  assert.ok(rejected.body.details.some(detail => detail.field === "legacy_unused_column" && detail.reason === "unknown_field"));
+}));
+
+test("full import preview surfaces merge conflicts without creating a backup", async () => withHarness(async harness => {
+  const existing = await harness.api("/api/one-off", {
+    method: "POST",
+    body: { name: "Existing conflict", currency: "PLN", amount: 25, type: "expense", date: "2026-06-03" }
+  });
+  const sample = await harness.api("/api/export/sample");
+  sample.planning.one_off_transactions[0].id = existing.id;
+  const beforeBackups = backupCount(harness);
+
+  const preview = await harness.api("/api/import/full/preview", {
+    method: "POST",
+    body: { mode: "merge", export: sample }
+  });
+
+  assert.equal(preview.ok, true);
+  assert.ok(preview.conflicts.some(row => row.id === existing.id));
+  assert.equal(backupCount(harness), beforeBackups);
 }));

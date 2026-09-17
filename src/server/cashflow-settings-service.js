@@ -401,6 +401,9 @@ export function createCashflowSettingsService({
     const ledgerSwitch = await buildLedgerSwitch(userId, currentSettings, safeUpdates);
 
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       if (safeUpdates.budget_period_income_id) {
         const income = (await writer.listPlanningRows(userId, "recurring_incomes"))
           .find(row => row.id === safeUpdates.budget_period_income_id) || null;

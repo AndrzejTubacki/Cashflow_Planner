@@ -4,6 +4,7 @@ export const GLOBAL_BACKGROUND_TICK_LOCK = "background:tick";
 
 export const BUDGET_RUNTIME_LOCK_JOBS = Object.freeze({
   automaticBackup: "automatic-backup",
+  dataPortability: "data-portability",
   fxRefresh: "fx-refresh",
   ledgerCheck: "ledger-check",
   notifications: "notifications",

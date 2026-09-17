@@ -148,6 +148,11 @@ async function createCashflowModule({
     throw new Error("Budget purge recovery export is not initialized");
   };
 
+  // Set once the real backend is known below. Read lazily by
+  // createCashflowDbService's openers so their guard sees the final,
+  // normalized backend rather than the raw, unnormalized databaseConfig.
+  let activeDbBackend = null;
+
   // Open and migrate SQLite databases, and expose ledger-year discovery.
   const {
     initReadOnlyPragmas,
@@ -155,6 +160,7 @@ async function createCashflowModule({
     openLedgerDb,
     openPlanningDb
   } = createCashflowDbService({
+    isPostgresBackend: () => activeDbBackend === "postgres",
     ledgerDbPath,
     logError,
     logServerEvent,
@@ -182,6 +188,7 @@ async function createCashflowModule({
   });
   const { budgetStore, globalStore } = storageBackend;
   const resolvedDatabaseConfig = storageBackend.config;
+  activeDbBackend = resolvedDatabaseConfig.backend;
 
   // Wrap host logging with Cashflow-specific error metadata.
   const logCashflowError = createCashflowErrorLogger(logError);
@@ -668,6 +675,8 @@ async function createCashflowModule({
     exportFullData,
     exportFullDataAsync,
     exportSampleData,
+    previewFullImport,
+    previewFullImportAsync,
     importFullData,
     importFullDataAsync,
     importOneOffCsv,
@@ -908,6 +917,8 @@ async function createCashflowModule({
       upsertAdminAuthProviderAsync,
       updateMemberRole,
       updateMemberRoleAsync,
+      previewFullImport,
+      previewFullImportAsync,
       importFullData,
       importFullDataAsync,
       importOneOffCsv,

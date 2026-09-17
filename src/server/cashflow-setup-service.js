@@ -226,6 +226,9 @@ export function createCashflowSetupService({
     let result = null;
 
     await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || null;
       if (Number(settings?.setup_completed || 0) === 1) {
         throw badRequest("First-run setup is already completed");

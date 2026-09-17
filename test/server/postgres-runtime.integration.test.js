@@ -40,7 +40,12 @@ import {
 import { createCashflowStoragePaths } from "../../src/server/cashflow-storage-utils.js";
 import { createCashflowLedgerService } from "../../src/server/cashflow-ledger-service.js";
 import { createCashflowProjectionCoordinatorService } from "../../src/server/cashflow-projection-coordinator-service.js";
-import { BUDGET_RUNTIME_LOCK_JOBS, budgetRuntimeLockName } from "../../src/server/cashflow-runtime-locks.js";
+import { createCashflowBackgroundJobs } from "../../src/server/cashflow-background-jobs.js";
+import {
+  BUDGET_RUNTIME_LOCK_JOBS,
+  budgetRuntimeLockName,
+  GLOBAL_BACKGROUND_TICK_LOCK
+} from "../../src/server/cashflow-runtime-locks.js";
 import {
   createCashflowNotificationService,
   notificationEnabled,
@@ -182,6 +187,21 @@ function dateKey(value) {
   }
 
   return String(value || "").slice(0, 10);
+}
+
+// Mirrors withBudgetRouteLock in cashflow-routes.js exactly: run `work`
+// under the named per-budget lock, and turn a lost race into the same
+// clean, typed rejection a real route would return instead of leaving the
+// two calls to race each other freely.
+async function withSimulatedRouteLock(lockService, budgetId, jobName, work, { ttlMs = 300000 } = {}) {
+  const lockResult = await lockService.withLock(budgetRuntimeLockName(budgetId, jobName), work, { ttlMs });
+  if (!lockResult?.acquired) {
+    const error = new Error(`Operation is already running (${jobName})`);
+    error.status = 409;
+    error.code = "CASHFLOW_LOCK_CONFLICT";
+    throw error;
+  }
+  return lockResult.result;
 }
 
 test("Postgres schema readiness and runtime locks work against a disposable database", {
@@ -2062,6 +2082,7 @@ test("importFullDataAsync, createBackupAsync/restoreBackupAsync, and purgeBudget
         const exportedOneOff = exportedPayload.planning.one_off_transactions.find(row => row.id === "oneoff_desk");
         assert.ok(exportedOneOff, "expected the seeded one-off transaction in the export");
         exportedOneOff.amount = 321;
+        delete exportedPayload.checksum;
 
         const importResult = await dataPortability.importFullDataAsync("household", exportedPayload, "replace");
         assert.equal(importResult.ok, true);
@@ -2803,6 +2824,890 @@ test("migrate-postgres-to-sqlite.mjs moves real data from a disposable Postgres 
         assert.equal(Number(confirmed?.running_balance_pln), 500);
       } finally {
         restoredLedger.close();
+      }
+    });
+  });
+});
+
+test("two replicas racing importFullDataAsync for the same budget are serialized by the data-portability lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        const ledgerService = createCashflowLedgerService({
+          budgetStore,
+          generateId: prefix => `${prefix}_pg_import_race_test`,
+          listLedgerYears: () => {
+            throw new Error("Postgres import-race path must not list SQLite ledger years");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres import-race path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres import-race path must not open SQLite planning storage");
+          }
+        });
+
+        const dataPortability = createCashflowDataPortabilityService({
+          budgetStore,
+          createBackup: () => {
+            throw new Error("Postgres import-race path must not use the sync SQLite backup helper");
+          },
+          generateId: prefix => `${prefix}_pg_import_race_test`,
+          listLedgerYears: () => {
+            throw new Error("must not list SQLite ledger years");
+          },
+          loadAllConfirmedTransactions: () => {
+            throw new Error("must not read SQLite ledgers");
+          },
+          openLedgerDb: () => {
+            throw new Error("must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          recalculateLedgerRunningBalance: () => {
+            throw new Error("recalculates through the budget store");
+          },
+          recalculateLedgerRunningBalanceAsync: ledgerService.recalculateLedgerRunningBalanceAsync,
+          regenerateProjectionsAfterMutation: () => {
+            throw new Error("must regenerate through the async engine");
+          },
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true }),
+          restoreBackupFromPath: () => {
+            throw new Error("Postgres import-race path must not use the sync SQLite restore helper");
+          }
+        });
+
+        // Two distinct payloads (differing only in the seeded one-off's
+        // amount) so the final state proves exactly one import applied
+        // cleanly, rather than a corrupted mix of both.
+        const basePayload = await dataPortability.exportFullDataAsync("household", "1.0.0-test");
+        const payloadA = structuredClone(basePayload);
+        payloadA.planning.one_off_transactions.find(row => row.id === "oneoff_desk").amount = 111;
+        delete payloadA.checksum;
+        const payloadB = structuredClone(basePayload);
+        payloadB.planning.one_off_transactions.find(row => row.id === "oneoff_desk").amount = 222;
+        delete payloadB.checksum;
+
+        const replicaALock = globalStore.createLockService({ ownerId: "import_replica_a" });
+        const replicaBLock = globalStore.createLockService({ ownerId: "import_replica_b" });
+
+        const outcomes = await Promise.allSettled([
+          withSimulatedRouteLock(replicaALock, "household", BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
+            () => dataPortability.importFullDataAsync("household", payloadA, "replace")),
+          withSimulatedRouteLock(replicaBLock, "household", BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
+            () => dataPortability.importFullDataAsync("household", payloadB, "replace"))
+        ]);
+
+        const fulfilled = outcomes.filter(outcome => outcome.status === "fulfilled");
+        const rejected = outcomes.filter(outcome => outcome.status === "rejected");
+        assert.equal(fulfilled.length, 1, "expected exactly one concurrent import to win the lock");
+        assert.equal(rejected.length, 1, "expected exactly one concurrent import to be rejected by the lock");
+        assert.equal(rejected[0].reason.status, 409);
+        assert.equal(rejected[0].reason.code, "CASHFLOW_LOCK_CONFLICT");
+
+        const finalAmount = Number(
+          (await budgetStore.listPlanningRows("household", "one_off_transactions"))
+            .find(row => row.id === "oneoff_desk")?.amount
+        );
+        assert.ok([111, 222].includes(finalAmount), `expected a clean single import result, got ${finalAmount}`);
+
+        const replicaC = globalStore.createLockService({ ownerId: "import_replica_c" });
+        const postRaceAcquire = await replicaC.tryAcquire(
+          budgetRuntimeLockName("household", BUDGET_RUNTIME_LOCK_JOBS.dataPortability),
+          { ttlMs: 10_000 }
+        );
+        assert.equal(postRaceAcquire.acquired, true, "expected the data-portability lock to be released after the race settles");
+        await replicaC.release(budgetRuntimeLockName("household", BUDGET_RUNTIME_LOCK_JOBS.dataPortability));
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
+      }
+    });
+  });
+});
+
+test("two replicas racing compactHistoricalLedgerAsync for the same budget are serialized by the retention lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        const ledgerService = createCashflowLedgerService({
+          budgetStore,
+          generateId: prefix => `${prefix}_pg_compaction_race_${Math.random().toString(36).slice(2)}`,
+          listLedgerYears: () => {
+            throw new Error("Postgres compaction-race path must not list SQLite ledger years");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres compaction-race path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres compaction-race path must not open SQLite planning storage");
+          }
+        });
+
+        // "confirmed_income" is seeded with confirmed_date 2026-01-05; a
+        // 1-month retention window against 2026-06-01 puts it well past the
+        // cutoff, so this always needs compaction regardless of real time.
+        const compactionOptions = { months: 1, today: "2026-06-01" };
+        const planBefore = await ledgerService.historicalLedgerCompactionPlanAsync("household", compactionOptions);
+        assert.equal(planBefore.needsCompaction, true, "expected the seeded confirmed row to need compaction");
+
+        const replicaALock = globalStore.createLockService({ ownerId: "compaction_replica_a" });
+        const replicaBLock = globalStore.createLockService({ ownerId: "compaction_replica_b" });
+
+        const outcomes = await Promise.allSettled([
+          withSimulatedRouteLock(replicaALock, "household", BUDGET_RUNTIME_LOCK_JOBS.retention,
+            () => ledgerService.compactHistoricalLedgerAsync("household", compactionOptions)),
+          withSimulatedRouteLock(replicaBLock, "household", BUDGET_RUNTIME_LOCK_JOBS.retention,
+            () => ledgerService.compactHistoricalLedgerAsync("household", compactionOptions))
+        ]);
+
+        const fulfilled = outcomes.filter(outcome => outcome.status === "fulfilled");
+        const rejected = outcomes.filter(outcome => outcome.status === "rejected");
+        assert.equal(fulfilled.length, 1, "expected exactly one concurrent compaction to win the lock");
+        assert.equal(rejected.length, 1, "expected exactly one concurrent compaction to be rejected by the lock");
+        assert.equal(rejected[0].reason.status, 409);
+        assert.equal(fulfilled[0].value.compactedRows, 1);
+        assert.equal(fulfilled[0].value.createdRows, 1);
+
+        const confirmedRows = await budgetStore.listConfirmedTransactions("household");
+        assert.equal(
+          confirmedRows.some(row => row.id === "confirmed_income"),
+          false,
+          "expected the old confirmed row to have been compacted away"
+        );
+        const compactionRows = confirmedRows.filter(row =>
+          String(row.occurrence_key || "").startsWith("ledger_history_compaction:")
+        );
+        assert.equal(compactionRows.length, 1, "expected exactly one compaction summary row, not zero or two");
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
+      }
+    });
+  });
+});
+
+test("two replicas racing createBackupAsync for the same budget are serialized by the automatic-backup lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir, root }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+    const backupRoot = path.join(root, "backups");
+    fs.mkdirSync(backupRoot, { recursive: true });
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        const ledgerService = createCashflowLedgerService({
+          budgetStore,
+          generateId: prefix => `${prefix}_pg_backup_race`,
+          listLedgerYears: () => {
+            throw new Error("Postgres backup-race path must not list SQLite ledger years");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres backup-race path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres backup-race path must not open SQLite planning storage");
+          }
+        });
+
+        let generatedBackupCount = 0;
+        const backupService = createCashflowBackupService({
+          backupDir: () => {
+            throw new Error("Postgres backup-race path must not use the SQLite backup directory helper");
+          },
+          backupRootDir: () => backupRoot,
+          budgetStore,
+          directorySizeBytes: () => {
+            throw new Error("Postgres backup-race path must not measure a SQLite backup directory");
+          },
+          generateId: prefix => `${prefix}_pg_backup_race_${++generatedBackupCount}`,
+          getSettings: () => {
+            throw new Error("Postgres backup-race path must not read SQLite settings");
+          },
+          getSettingsAsync: async userId =>
+            (await budgetStore.listPlanningRows(userId, "settings"))?.[0] || null,
+          initReadOnlyPragmas: () => {
+            throw new Error("Postgres backup-race path must not open SQLite in read-only mode");
+          },
+          listLedgerYears: () => {
+            throw new Error("must not list SQLite ledger years");
+          },
+          logError: () => {},
+          logServerEvent: () => {},
+          openLedgerDb: () => {
+            throw new Error("must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          recalculateLedgerRunningBalance: () => {
+            throw new Error("recalculates through the budget store");
+          },
+          recalculateLedgerRunningBalanceAsync: ledgerService.recalculateLedgerRunningBalanceAsync,
+          regenerateProjectionsAfterMutation: () => {
+            throw new Error("must regenerate through the async engine");
+          },
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true })
+        });
+
+        const replicaALock = globalStore.createLockService({ ownerId: "backup_replica_a" });
+        const replicaBLock = globalStore.createLockService({ ownerId: "backup_replica_b" });
+
+        const outcomes = await Promise.allSettled([
+          withSimulatedRouteLock(replicaALock, "household", BUDGET_RUNTIME_LOCK_JOBS.automaticBackup,
+            () => backupService.createBackupAsync("household"), { ttlMs: 300000 }),
+          withSimulatedRouteLock(replicaBLock, "household", BUDGET_RUNTIME_LOCK_JOBS.automaticBackup,
+            () => backupService.createBackupAsync("household"), { ttlMs: 300000 })
+        ]);
+
+        const fulfilled = outcomes.filter(outcome => outcome.status === "fulfilled");
+        const rejected = outcomes.filter(outcome => outcome.status === "rejected");
+        assert.equal(fulfilled.length, 1, "expected exactly one concurrent backup to win the lock");
+        assert.equal(rejected.length, 1, "expected exactly one concurrent backup to be rejected by the lock");
+        assert.equal(rejected[0].reason.status, 409);
+        assert.equal(fs.existsSync(fulfilled[0].value), true);
+
+        const backupMetadataRows = await budgetStore.listPlanningRows("household", "backup_metadata");
+        assert.equal(backupMetadataRows.length, 1, "expected exactly one backup_metadata row, not two");
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
+      }
+    });
+  });
+});
+
+test("two replicas racing refreshNbpFxCacheForUser for the same budget are serialized by the fx-refresh lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        await budgetStore.updatePlanningRowsById("household", "settings", [{
+          fx_provider: "manual",
+          fx_used_currencies: JSON.stringify(["EUR"]),
+          id: 1,
+          manual_fx_rates: JSON.stringify({ "EUR/PLN": 4.5 })
+        }]);
+
+        const fxCache = createCashflowFxCacheService({
+          budgetStore,
+          fetchImpl: async () => {
+            throw new Error("Manual Postgres FX refresh must not call the network");
+          },
+          getCurrentFxSnapshot: () => null,
+          listCashflowUserIds: () => ["household"],
+          logCashflowError: () => {},
+          logError: () => {},
+          logServerEvent: () => {},
+          normalizeCurrency: currency => String(currency || "PLN").toUpperCase(),
+          openPlanningDb: () => {
+            throw new Error("Postgres fx-refresh-race path must not open SQLite planning files");
+          },
+          regenerateProjectionsAfterMutation: () => ({ projection_ok: true }),
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true })
+        });
+
+        const replicaALock = globalStore.createLockService({ ownerId: "fx_replica_a" });
+        const replicaBLock = globalStore.createLockService({ ownerId: "fx_replica_b" });
+
+        const outcomes = await Promise.allSettled([
+          withSimulatedRouteLock(replicaALock, "household", BUDGET_RUNTIME_LOCK_JOBS.fxRefresh,
+            () => fxCache.refreshNbpFxCacheForUser("household", "2026-01-08")),
+          withSimulatedRouteLock(replicaBLock, "household", BUDGET_RUNTIME_LOCK_JOBS.fxRefresh,
+            () => fxCache.refreshNbpFxCacheForUser("household", "2026-01-08"))
+        ]);
+
+        const fulfilled = outcomes.filter(outcome => outcome.status === "fulfilled");
+        const rejected = outcomes.filter(outcome => outcome.status === "rejected");
+        assert.equal(fulfilled.length, 1, "expected exactly one concurrent FX refresh to win the lock");
+        assert.equal(rejected.length, 1, "expected exactly one concurrent FX refresh to be rejected by the lock");
+        assert.equal(rejected[0].reason.status, 409);
+        assert.equal(fulfilled[0].value.updated_count, 1);
+
+        const fxRows = (await budgetStore.listPlanningRows("household", "fx_rates_cache"))
+          .filter(row => row.base_currency === "EUR" && row.quote_currency === "PLN");
+        assert.equal(fxRows.length, 1, "expected exactly one EUR/PLN rate row, not a duplicate");
+        assert.equal(Number(fxRows[0].rate), 4.5);
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
+      }
+    });
+  });
+});
+
+test("two replicas racing tickPerUserJobs are serialized by the global background-tick lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withDisposablePostgresDb(async ({ databaseUrl }) => {
+    const globalDb = await createPostgresGlobalDbService({ databaseUrl });
+    const globalStore = await createPostgresGlobalStore({ databaseUrl });
+    try {
+      await globalDb.initializeGlobalSchema();
+
+      function buildReplica(ownerId) {
+        return createCashflowBackgroundJobs({
+          budgetStore: null,
+          getSettings: () => {
+            throw new Error("must not read SQLite settings");
+          },
+          listCashflowUserIds: () => {
+            throw new Error("must not list SQLite user ids");
+          },
+          listCashflowUserIdsAsync: async () => [],
+          lockService: globalStore.createLockService({ ownerId }),
+          logError: () => {},
+          logServerEvent: () => {},
+          maybeRunAutomaticBackup: () => {
+            throw new Error("must not run the sync SQLite backup path");
+          },
+          moveDueFutureTransactionsToPending: () => {
+            throw new Error("must not move SQLite future transactions");
+          },
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          queueDailyPendingSummary: () => {
+            throw new Error("must not queue through SQLite");
+          },
+          queueMissingIncomeNotifications: () => {
+            throw new Error("must not queue through SQLite");
+          },
+          refreshNbpFxCacheForAllUsers: () => {
+            throw new Error("must not refresh through SQLite");
+          },
+          refreshNbpFxCacheForUser: () => {
+            throw new Error("must not refresh through SQLite");
+          },
+          sendQueuedNotifications: () => {
+            throw new Error("must not send through SQLite");
+          }
+        });
+      }
+
+      const replicaA = buildReplica("tick_replica_a");
+      const replicaB = buildReplica("tick_replica_b");
+
+      const [resultA, resultB] = await Promise.all([
+        replicaA.tickPerUserJobs(),
+        replicaB.tickPerUserJobs()
+      ]);
+
+      const skipped = [resultA, resultB].filter(result => result?.skipped === true);
+      const ran = [resultA, resultB].filter(result => result?.skipped !== true);
+      assert.equal(ran.length, 1, "expected exactly one replica's tick to actually run");
+      assert.equal(skipped.length, 1, "expected exactly one replica's tick to be skipped by the real Postgres lock");
+
+      const replicaC = globalStore.createLockService({ ownerId: "tick_replica_c" });
+      const postRaceAcquire = await replicaC.tryAcquire(GLOBAL_BACKGROUND_TICK_LOCK, { ttlMs: 10_000 });
+      assert.equal(postRaceAcquire.acquired, true, "expected the background-tick lock to be released after the race settles");
+      await replicaC.release(GLOBAL_BACKGROUND_TICK_LOCK);
+    } finally {
+      await globalStore.close();
+      await globalDb.close();
+    }
+  });
+});
+
+test("two different job types (backup and fx refresh) for the same budget run concurrently without deadlocking or corrupting shared state against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir, root }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+    const backupRoot = path.join(root, "backups");
+    fs.mkdirSync(backupRoot, { recursive: true });
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        await budgetStore.updatePlanningRowsById("household", "settings", [{
+          fx_provider: "manual",
+          fx_used_currencies: JSON.stringify(["EUR"]),
+          id: 1,
+          manual_fx_rates: JSON.stringify({ "EUR/PLN": 4.5 })
+        }]);
+
+        const ledgerService = createCashflowLedgerService({
+          budgetStore,
+          generateId: prefix => `${prefix}_pg_mixed_job_race`,
+          listLedgerYears: () => {
+            throw new Error("Postgres mixed-job-race path must not list SQLite ledger years");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres mixed-job-race path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres mixed-job-race path must not open SQLite planning storage");
+          }
+        });
+
+        let generatedBackupCount = 0;
+        const backupService = createCashflowBackupService({
+          backupDir: () => {
+            throw new Error("must not use the SQLite backup directory helper");
+          },
+          backupRootDir: () => backupRoot,
+          budgetStore,
+          directorySizeBytes: () => {
+            throw new Error("must not measure a SQLite backup directory");
+          },
+          generateId: prefix => `${prefix}_pg_mixed_job_race_${++generatedBackupCount}`,
+          getSettings: () => {
+            throw new Error("must not read SQLite settings");
+          },
+          getSettingsAsync: async userId =>
+            (await budgetStore.listPlanningRows(userId, "settings"))?.[0] || null,
+          initReadOnlyPragmas: () => {
+            throw new Error("must not open SQLite in read-only mode");
+          },
+          listLedgerYears: () => {
+            throw new Error("must not list SQLite ledger years");
+          },
+          logError: () => {},
+          logServerEvent: () => {},
+          openLedgerDb: () => {
+            throw new Error("must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          recalculateLedgerRunningBalance: () => {
+            throw new Error("recalculates through the budget store");
+          },
+          recalculateLedgerRunningBalanceAsync: ledgerService.recalculateLedgerRunningBalanceAsync,
+          regenerateProjectionsAfterMutation: () => {
+            throw new Error("must regenerate through the async engine");
+          },
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true })
+        });
+
+        const fxCache = createCashflowFxCacheService({
+          budgetStore,
+          fetchImpl: async () => {
+            throw new Error("manual FX refresh must not call the network");
+          },
+          getCurrentFxSnapshot: () => null,
+          listCashflowUserIds: () => ["household"],
+          logCashflowError: () => {},
+          logError: () => {},
+          logServerEvent: () => {},
+          normalizeCurrency: currency => String(currency || "PLN").toUpperCase(),
+          openPlanningDb: () => {
+            throw new Error("Postgres mixed-job-race path must not open SQLite planning files");
+          },
+          regenerateProjectionsAfterMutation: () => ({ projection_ok: true }),
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true })
+        });
+
+        const backupLock = globalStore.createLockService({ ownerId: "mixed_backup_replica" });
+        const fxLock = globalStore.createLockService({ ownerId: "mixed_fx_replica" });
+
+        const [backupOutcome, fxOutcome] = await Promise.all([
+          withSimulatedRouteLock(backupLock, "household", BUDGET_RUNTIME_LOCK_JOBS.automaticBackup,
+            () => backupService.createBackupAsync("household"), { ttlMs: 300000 }),
+          withSimulatedRouteLock(fxLock, "household", BUDGET_RUNTIME_LOCK_JOBS.fxRefresh,
+            () => fxCache.refreshNbpFxCacheForUser("household", "2026-01-08"))
+        ]);
+
+        assert.equal(
+          fs.existsSync(backupOutcome),
+          true,
+          "expected the concurrent backup to succeed, not be blocked by the unrelated FX-refresh lock"
+        );
+        assert.equal(
+          fxOutcome.updated_count,
+          1,
+          "expected the concurrent FX refresh to succeed, not be blocked by the unrelated backup lock"
+        );
+
+        const backupMetadataRows = await budgetStore.listPlanningRows("household", "backup_metadata");
+        assert.equal(backupMetadataRows.length, 1);
+        const fxRows = (await budgetStore.listPlanningRows("household", "fx_rates_cache"))
+          .filter(row => row.base_currency === "EUR" && row.quote_currency === "PLN");
+        assert.equal(fxRows.length, 1);
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
+      }
+    });
+  });
+});
+
+test("a manual createBackupAsync call racing the real background scheduler's automatic backup for the same budget are serialized by the shared automatic-backup lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir, root }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+    const backupRoot = path.join(root, "backups");
+    fs.mkdirSync(backupRoot, { recursive: true });
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        // Fixed, well before every other job's scheduled time (08:00 for
+        // fx/notify, 03:30 for maintenance) so this test is not sensitive
+        // to the real wall-clock time it happens to run at: only the
+        // unconditional backup step should ever call its work function.
+        await budgetStore.updatePlanningRowsById("household", "settings", [{
+          auto_backup_enabled: 1,
+          backup_interval_minutes: 1,
+          id: 1,
+          notification_delivery_time: "08:00",
+          timezone: "UTC"
+        }]);
+
+        const ledgerService = createCashflowLedgerService({
+          budgetStore,
+          generateId: prefix => `${prefix}_pg_manual_vs_scheduled_backup`,
+          listLedgerYears: () => {
+            throw new Error("Postgres manual-vs-scheduled-backup path must not list SQLite ledger years");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres manual-vs-scheduled-backup path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres manual-vs-scheduled-backup path must not open SQLite planning storage");
+          }
+        });
+
+        let generatedBackupCount = 0;
+        const backupService = createCashflowBackupService({
+          backupDir: () => {
+            throw new Error("must not use the SQLite backup directory helper");
+          },
+          backupRootDir: () => backupRoot,
+          budgetStore,
+          directorySizeBytes: () => {
+            throw new Error("must not measure a SQLite backup directory");
+          },
+          generateId: prefix => `${prefix}_pg_manual_vs_scheduled_backup_${++generatedBackupCount}`,
+          getSettings: () => {
+            throw new Error("must not read SQLite settings");
+          },
+          getSettingsAsync: async userId =>
+            (await budgetStore.listPlanningRows(userId, "settings"))?.[0] || null,
+          initReadOnlyPragmas: () => {
+            throw new Error("must not open SQLite in read-only mode");
+          },
+          listLedgerYears: () => {
+            throw new Error("must not list SQLite ledger years");
+          },
+          logError: () => {},
+          logServerEvent: () => {},
+          openLedgerDb: () => {
+            throw new Error("must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          recalculateLedgerRunningBalance: () => {
+            throw new Error("recalculates through the budget store");
+          },
+          recalculateLedgerRunningBalanceAsync: ledgerService.recalculateLedgerRunningBalanceAsync,
+          regenerateProjectionsAfterMutation: () => {
+            throw new Error("must regenerate through the async engine");
+          },
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true })
+        });
+
+        // The real scheduler, exercised through its actual tickPerUserJobs
+        // entry point rather than a hand-rolled simulation of "what the
+        // background job does" — this proves the exact lock name and ttl it
+        // really uses matches the manual route, not just that they look the
+        // same on paper.
+        const scheduler = createCashflowBackgroundJobs({
+          budgetStore,
+          getSettingsAsync: async userId =>
+            (await budgetStore.listPlanningRows(userId, "settings"))?.[0] || null,
+          listCashflowUserIds: () => {
+            throw new Error("must not list SQLite user ids");
+          },
+          listCashflowUserIdsAsync: async () => ["household"],
+          lockService: globalStore.createLockService({ ownerId: "scheduler_replica" }),
+          logError: () => {},
+          logServerEvent: () => {},
+          maybeRunAutomaticBackup: () => {
+            throw new Error("must not run the sync SQLite backup path");
+          },
+          maybeRunAutomaticBackupAsync: backupService.maybeRunAutomaticBackupAsync,
+          moveDueFutureTransactionsToPending: () => {
+            throw new Error("scheduler must not reach the midnight job in this test");
+          },
+          now: () => new Date("2026-06-01T00:05:00.000Z"),
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          queueDailyPendingSummary: () => {
+            throw new Error("scheduler must not reach the midnight job in this test");
+          },
+          queueMissingIncomeNotifications: () => {
+            throw new Error("scheduler must not reach the midnight job in this test");
+          },
+          refreshNbpFxCacheForAllUsers: () => {
+            throw new Error("must not refresh through SQLite");
+          },
+          refreshNbpFxCacheForUser: () => {
+            throw new Error("scheduler must not reach the fx job in this test");
+          },
+          sendQueuedNotifications: () => {
+            throw new Error("scheduler must not reach the notify job in this test");
+          }
+        });
+
+        const manualLock = globalStore.createLockService({ ownerId: "manual_backup_replica" });
+
+        // Either side can legitimately win the shared automatic-backup
+        // lock, so this does not assume an order: the scheduler's own tick
+        // never throws either way (only its inner per-job backup lock is
+        // contended, not the outer tick lock it holds uncontested), while
+        // the manual call throws the usual 409 if it's the one that loses.
+        const [manualOutcome, tickOutcome] = await Promise.allSettled([
+          withSimulatedRouteLock(manualLock, "household", BUDGET_RUNTIME_LOCK_JOBS.automaticBackup,
+            () => backupService.createBackupAsync("household"), { ttlMs: 300000 }),
+          scheduler.tickPerUserJobs()
+        ]);
+
+        assert.equal(tickOutcome.status, "fulfilled", "expected the scheduler tick itself not to throw");
+        assert.equal(tickOutcome.value.skipped, false, "expected the tick to run (it holds its own separate global tick lock)");
+
+        if (manualOutcome.status === "rejected") {
+          assert.equal(manualOutcome.reason.status, 409, "expected the manual call to lose the lock cleanly, not fail some other way");
+        } else {
+          assert.equal(fs.existsSync(manualOutcome.value), true, "expected the manual call's backup path to exist if it won the race");
+        }
+
+        // Exactly one of "the manual call" and "the scheduler's own
+        // automatic-backup attempt inside this tick" should have actually
+        // created a backup; the other must have lost the shared
+        // automatic-backup lock race and produced none.
+        const backupMetadataRows = await budgetStore.listPlanningRows("household", "backup_metadata");
+        assert.equal(
+          backupMetadataRows.length,
+          1,
+          "expected exactly one backup from the manual call and the scheduler's automatic backup racing the same lock, not zero or two"
+        );
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
+      }
+    });
+  });
+});
+
+test("an ordinary planner mutation racing a concurrent full import for the same budget are serialized by the shared budget-ledger advisory lock against a disposable Postgres database", {
+  skip: postgresRuntimeTestsEnabled() ? false : POSTGRES_TEST_SKIP_REASON
+}, async () => {
+  await withTempDirs(async ({ dataDir, outputDir }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+
+    await withDisposablePostgresDb(async ({ databaseUrl }) => {
+      const migration = await migrateSqliteToPostgres({
+        databaseUrl,
+        dataDir,
+        dryRun: false,
+        outputDir,
+        sourceIsSnapshot: true
+      });
+      assert.equal(migration.ok, true);
+
+      const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+      const globalStore = await createPostgresGlobalStore({ databaseUrl });
+      try {
+        const ledgerService = createCashflowLedgerService({
+          budgetStore,
+          generateId: prefix => `${prefix}_pg_crud_vs_import_race`,
+          listLedgerYears: () => {
+            throw new Error("Postgres crud-vs-import-race path must not list SQLite ledger years");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres crud-vs-import-race path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres crud-vs-import-race path must not open SQLite planning storage");
+          }
+        });
+
+        const dataPortability = createCashflowDataPortabilityService({
+          budgetStore,
+          createBackup: () => {
+            throw new Error("must not use the sync SQLite backup helper");
+          },
+          generateId: prefix => `${prefix}_pg_crud_vs_import_race`,
+          listLedgerYears: () => {
+            throw new Error("must not list SQLite ledger years");
+          },
+          loadAllConfirmedTransactions: () => {
+            throw new Error("must not read SQLite ledgers");
+          },
+          openLedgerDb: () => {
+            throw new Error("must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("must not open SQLite planning storage");
+          },
+          recalculateLedgerRunningBalance: () => {
+            throw new Error("recalculates through the budget store");
+          },
+          recalculateLedgerRunningBalanceAsync: ledgerService.recalculateLedgerRunningBalanceAsync,
+          regenerateProjectionsAfterMutation: () => {
+            throw new Error("must regenerate through the async engine");
+          },
+          regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true }),
+          restoreBackupFromPath: () => {
+            throw new Error("must not use the sync SQLite restore helper");
+          }
+        });
+
+        const planMutations = createCashflowPlanMutationService({
+          budgetStore,
+          listLedgerYears: () => {
+            throw new Error("Postgres crud-vs-import-race path must not list SQLite ledger years");
+          },
+          loadAllConfirmedTransactions: () => {
+            throw new Error("Postgres crud-vs-import-race path must not read SQLite confirmed rows");
+          },
+          newestConfirmedTransactionDate: () => {
+            throw new Error("Postgres crud-vs-import-race path must not read SQLite ledger dates");
+          },
+          openLedgerDb: () => {
+            throw new Error("Postgres crud-vs-import-race path must not open SQLite ledgers");
+          },
+          openPlanningDb: () => {
+            throw new Error("Postgres crud-vs-import-race path must not open SQLite planning storage");
+          },
+          recalculatePlanningRunningBalances: () => {
+            throw new Error("Postgres crud-vs-import-race path recalculates through the budget store");
+          },
+          runRecoverableUserMutation: async () => {
+            throw new Error("Postgres crud-vs-import-race path should use one store transaction");
+          },
+          withProjectionStatus: (_budgetId, result) => ({
+            ...result,
+            _projection: { projection_ok: true }
+          })
+        });
+
+        const importPayload = await dataPortability.exportFullDataAsync("household", "1.0.0-test");
+
+        // Either operation can legitimately run first under the shared
+        // advisory lock: if the create wins, the import's replace then
+        // overwrites it (a replace import is supposed to wipe existing
+        // rows); if the import wins, the create lands cleanly afterward on
+        // top of the freshly-imported rows. What must never happen is a
+        // half-applied or corrupted result from the two interleaving.
+        const [createOutcome, importOutcome] = await Promise.allSettled([
+          planMutations.createOneOffTransaction("household", {
+            name: "Racing the import",
+            currency: "PLN",
+            amount: 42,
+            type: "expense",
+            date: "2026-07-01"
+          }),
+          dataPortability.importFullDataAsync("household", importPayload, "replace")
+        ]);
+
+        assert.equal(createOutcome.status, "fulfilled", "expected the ordinary mutation not to be rejected by the advisory lock (it blocks, it doesn't fail fast)");
+        assert.equal(importOutcome.status, "fulfilled", "expected the import not to be rejected by the advisory lock (it blocks, it doesn't fail fast)");
+
+        const finalOneOffs = await budgetStore.listPlanningRows("household", "one_off_transactions");
+        const importedIds = new Set(importPayload.planning.one_off_transactions.map(row => row.id));
+        const finalIds = new Set(finalOneOffs.map(row => row.id));
+        const hasAllImportedRows = [...importedIds].every(id => finalIds.has(id));
+        const createSurvived = finalIds.has(createOutcome.value.id);
+
+        assert.equal(hasAllImportedRows, true, "expected every imported one-off row to be present, not lost to a corrupted interleave");
+        assert.equal(
+          finalOneOffs.length,
+          createSurvived ? importedIds.size + 1 : importedIds.size,
+          `expected a clean row count for whichever ordering won (import survived means it ran last; create surviving means it ran after import), got ${finalOneOffs.length} rows`
+        );
+      } finally {
+        await budgetStore.close();
+        await globalStore.close();
       }
     });
   });

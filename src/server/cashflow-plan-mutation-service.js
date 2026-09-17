@@ -341,6 +341,9 @@ export function createCashflowPlanMutationService({
 
   async function createRecurringExpenseWithBudgetStore(userId, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
       const id = generateId("rec-exp");
       const plannedTxId = await insertPlannedTransactionWithBudgetStore(
@@ -462,6 +465,9 @@ export function createCashflowPlanMutationService({
 
   async function updateRecurringExpenseWithBudgetStore(userId, id, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "recurring_expenses"))
         .find(row => row.id === id) || null;
 
@@ -621,6 +627,9 @@ export function createCashflowPlanMutationService({
 
   async function createRecurringIncomeWithBudgetStore(userId, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
       const id = generateId("rec-inc");
       const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
@@ -753,6 +762,9 @@ export function createCashflowPlanMutationService({
 
   async function updateRecurringIncomeWithBudgetStore(userId, id, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "recurring_incomes"))
         .find(row => row.id === id) || null;
 
@@ -962,6 +974,9 @@ export function createCashflowPlanMutationService({
 
   async function updatePendingTransactionWithBudgetStore(userId, id, input = {}) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const pendingRows = await writer.listPlanningRows(userId, "pending_transactions");
       const pending = pendingRows.find(row => row.id === id) || null;
       if (!pending) throw notFound("Pending transaction not found");
@@ -1104,6 +1119,9 @@ export function createCashflowPlanMutationService({
 
   async function createGoalWithBudgetStore(userId, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
       const id = generateId("goal");
       const plannedTxId = await insertPlannedTransactionWithBudgetStore(writer, userId, "goal", input.priority);
@@ -1197,6 +1215,9 @@ export function createCashflowPlanMutationService({
 
   async function updateGoalWithBudgetStore(userId, id, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "goals"))
         .find(row => row.id === id) || null;
 
@@ -1329,6 +1350,9 @@ export function createCashflowPlanMutationService({
 
   async function deleteGoalWithBudgetStore(userId, id) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const goal = (await writer.listPlanningRows(userId, "goals"))
         .find(row => row.id === id) || null;
       if (!goal) throw notFound("Goal not found");
@@ -1435,6 +1459,9 @@ export function createCashflowPlanMutationService({
 
   async function createFlexTransactionWithBudgetStore(userId, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const id = generateId("flex");
       const plannedTxId = await insertPlannedTransactionWithBudgetStore(writer, userId, "flex", input.priority);
       const allowSplit = input.allow_split ?? 0;
@@ -1557,6 +1584,9 @@ export function createCashflowPlanMutationService({
 
   async function updateFlexTransactionWithBudgetStore(userId, id, input = {}) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "flex_transactions"))
         .find(row => row.id === id) || null;
 
@@ -1651,6 +1681,9 @@ export function createCashflowPlanMutationService({
 
   async function deleteRecurringIncomeWithBudgetStore(userId, id) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "recurring_incomes"))
         .find(row => row.id === id) || null;
       if (!existing) throw notFound("Recurring income not found");
@@ -1680,6 +1713,9 @@ export function createCashflowPlanMutationService({
 
   async function deleteRecurringExpenseWithBudgetStore(userId, id) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const expense = (await writer.listPlanningRows(userId, "recurring_expenses"))
         .find(row => row.id === id) || null;
 
@@ -1710,6 +1746,9 @@ export function createCashflowPlanMutationService({
 
   async function deleteFlexTransactionWithBudgetStore(userId, id) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const isConfirmed = (await writer.listConfirmedTransactions(userId))
         .some(tx => tx.source_flex_id === id);
 
@@ -1783,6 +1822,9 @@ export function createCashflowPlanMutationService({
 
   async function createOneOffTransactionWithBudgetStore(userId, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
       const id = generateId("oneoff");
       const timestamp = new Date().toISOString();
@@ -1981,6 +2023,9 @@ export function createCashflowPlanMutationService({
 
   async function dismissPendingOneOffRemainderWithBudgetStore(userId, id) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const pending = (await writer.listPlanningRows(userId, "pending_transactions"))
         .find(row => row.id === id) || null;
       if (!pending) throw notFound("Pending transaction not found");
@@ -2044,6 +2089,9 @@ export function createCashflowPlanMutationService({
 
   async function updateOneOffTransactionWithBudgetStore(userId, id, input) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "one_off_transactions"))
         .find(row => row.id === id) || null;
       if (!existing) throw notFound("One-off transaction not found");
@@ -2121,6 +2169,9 @@ export function createCashflowPlanMutationService({
 
   async function deleteOneOffTransactionWithBudgetStore(userId, id) {
     const result = await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const existing = (await writer.listPlanningRows(userId, "one_off_transactions"))
         .find(row => row.id === id) || null;
       if (!existing) throw notFound("One-off transaction not found");
