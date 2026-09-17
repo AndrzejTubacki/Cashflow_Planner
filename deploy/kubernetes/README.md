@@ -39,20 +39,30 @@ SQLite is single-writer storage, so Cashflow remains a single-replica
 deployment. NFS/RWX storage adds locking and durability risk unless the operator
 has explicitly designed for SQLite on that backend.
 
+Postgres is available as an optional backend (`CASHFLOW_DB_BACKEND=postgres`,
+`CASHFLOW_DATABASE_URL=...`) and is the backend to use if you want to run more
+than one Cashflow replica in Kubernetes — SQLite forces single-replica
+(`strategy: Recreate`) because it is single-writer storage. Set
+`CASHFLOW_RUNTIME_LOCK_BACKEND=postgres` alongside it so background jobs and
+projection regeneration coordinate correctly across replicas; without it,
+multiple replicas can still write safely but will duplicate some scheduled
+work. SQLite remains the default and the simpler choice for a single-replica
+deployment with no external database to manage.
+
 ## Build And Push An Image
 
 Build and push an image to a registry your cluster can pull from:
 
 ```sh
-docker build -t registry.example.com/cashflow:0.3.0 .
-docker push registry.example.com/cashflow:0.3.0
+docker build -t registry.example.com/cashflow:1.0.0 .
+docker push registry.example.com/cashflow:1.0.0
 ```
 
 A retained, immutable image tag is recommended for every deployment. The image
 in `deployment.yaml` is the value to change:
 
 ```yaml
-image: registry.example.com/cashflow:0.3.0
+image: registry.example.com/cashflow:1.0.0
 ```
 
 The `latest` tag is a poor fit for upgrades that may need rollback.
@@ -67,6 +77,8 @@ copy or deployment overlay.
 
 - `DATA_DIR=/app/data`
 - `LOGS_DIR=/app/logs`
+- `CASHFLOW_DB_BACKEND=sqlite`
+- `CASHFLOW_RUNTIME_LOCK_BACKEND=none`
 - `CASHFLOW_MIRROR_LOGS_TO_STDOUT=1`
 - `CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET=0`
 - bounded recovery retention defaults
@@ -107,6 +119,9 @@ The private file can contain keys such as:
 ```text
 CASHFLOW_PASSWORD_PEPPER=
 CASHFLOW_EXTERNAL_AUTH_SECRET=
+CASHFLOW_DATABASE_URL=
+CASHFLOW_RUNTIME_LOCK_DATABASE_URL=
+CASHFLOW_RUNTIME_LOCK_OWNER_ID=
 CASHFLOW_GOOGLE_CLIENT_SECRET=
 CASHFLOW_GITHUB_CLIENT_SECRET=
 CASHFLOW_FACEBOOK_CLIENT_SECRET=

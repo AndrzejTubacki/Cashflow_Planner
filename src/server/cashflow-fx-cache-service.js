@@ -17,20 +17,36 @@ import {
 import { badRequest } from "./cashflow-user-utils.js";
 
 export function createCashflowFxCacheService({
+  budgetStore = null,
   getCurrentFxSnapshot,
   listCashflowUserIds,
+  listCashflowUserIdsAsync = null,
   logCashflowError,
   logError,
   logServerEvent,
   normalizeCurrency,
   openPlanningDb,
   regenerateProjectionsAfterMutation,
+  regenerateProjectionsAfterMutationAsync = null,
   fetchImpl = fetch
 }) {
   let currentFxSnapshotDisabled = false;
 
   function fxCacheDateKey(date = null, timezone = DEFAULT_TIMEZONE) {
     return String(date || todayInTimezone(timezone)).slice(0, 10);
+  }
+
+  function fxSettingsFromRow(settings = {}) {
+    const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
+
+    return {
+      ledgerCurrency,
+      timezone: settings.timezone || DEFAULT_TIMEZONE,
+      provider: normalizeFxProvider(settings.fx_provider),
+      usedCurrencies: normalizeFxCurrencyList(settings.fx_used_currencies, ledgerCurrency),
+      manualRates: normalizeManualFxRates(settings.manual_fx_rates),
+      manualPairs: normalizeManualFxPairs(settings.manual_fx_rates, ledgerCurrency)
+    };
   }
 
   function getFxSettings(userId) {
@@ -42,29 +58,75 @@ export function createCashflowFxCacheService({
         FROM settings
         WHERE id = 1
       `).get() || {};
-      const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
-
-      return {
-        ledgerCurrency,
-        timezone: settings.timezone || DEFAULT_TIMEZONE,
-        provider: normalizeFxProvider(settings.fx_provider),
-        usedCurrencies: normalizeFxCurrencyList(settings.fx_used_currencies, ledgerCurrency),
-        manualRates: normalizeManualFxRates(settings.manual_fx_rates),
-        manualPairs: normalizeManualFxPairs(settings.manual_fx_rates, ledgerCurrency)
-      };
+      return fxSettingsFromRow(settings);
     } finally {
       db.close();
     }
+  }
+
+  async function getFxSettingsAsync(userId) {
+    if (budgetStore && typeof budgetStore.listPlanningRows === "function") {
+      const rows = await budgetStore.listPlanningRows(userId, "settings");
+      return fxSettingsFromRow(rows.find(row => Number(row.id) === 1) || rows[0] || {});
+    }
+
+    return getFxSettings(userId);
+  }
+
+  function manualRateForPair({
+    manualPairs = {},
+    manualRates = {}
+  } = {}, base, quote) {
+    const pairRate = Number(manualPairs[`${base}/${quote}`]);
+    if (Number.isFinite(pairRate) && pairRate > 0) return pairRate;
+
+    const inversePairRate = Number(manualPairs[`${quote}/${base}`]);
+    if (Number.isFinite(inversePairRate) && inversePairRate > 0) return 1 / inversePairRate;
+
+    const baseToPln = base === "PLN"
+      ? 1
+      : Number(manualPairs[`${base}/PLN`] || manualRates[base]);
+    const quoteToPln = quote === "PLN"
+      ? 1
+      : Number(manualPairs[`${quote}/PLN`] || manualRates[quote]);
+
+    if (
+      Number.isFinite(baseToPln) &&
+      baseToPln > 0 &&
+      Number.isFinite(quoteToPln) &&
+      quoteToPln > 0
+    ) {
+      return baseToPln / quoteToPln;
+    }
+
+    if (quote !== "PLN") return null;
+    return Number(manualRates[base]) || null;
+  }
+
+  function fxCacheRowFromRateInfo(rateInfo, requestedDate = null, timezone = DEFAULT_TIMEZONE) {
+    const currency = normalizeCurrency(rateInfo.currency || rateInfo.baseCurrency);
+    const quoteCurrency = normalizeCurrency(rateInfo.quoteCurrency || "PLN");
+    const rateDate = fxCacheDateKey(requestedDate || rateInfo.effectiveDate, timezone);
+
+    return {
+      base_currency: currency,
+      quote_currency: quoteCurrency,
+      currency,
+      rate_date: rateDate,
+      rate: Number(rateInfo.rate),
+      effective_date: rateInfo.effectiveDate || rateDate,
+      source: rateInfo.source || "nbp",
+      raw_json: JSON.stringify(rateInfo),
+      updated_at: new Date().toISOString()
+    };
   }
 
   function upsertFxCacheRate(userId, rateInfo, requestedDate = null) {
     const db = openPlanningDb(userId);
 
     try {
-      const currency = normalizeCurrency(rateInfo.currency || rateInfo.baseCurrency);
-      const quoteCurrency = normalizeCurrency(rateInfo.quoteCurrency || "PLN");
       const { timezone } = getFxSettings(userId);
-      const rateDate = fxCacheDateKey(requestedDate || rateInfo.effectiveDate, timezone);
+      const row = fxCacheRowFromRateInfo(rateInfo, requestedDate, timezone);
 
       db.prepare(`
         INSERT INTO fx_rates_cache (
@@ -78,23 +140,68 @@ export function createCashflowFxCacheService({
           raw_json = excluded.raw_json,
           updated_at = datetime('now')
       `).run(
-        currency,
-        quoteCurrency,
-        currency,
-        rateDate,
-        Number(rateInfo.rate),
-        rateInfo.effectiveDate || rateDate,
-        rateInfo.source || "nbp",
-        JSON.stringify(rateInfo)
+        row.base_currency,
+        row.quote_currency,
+        row.currency,
+        row.rate_date,
+        row.rate,
+        row.effective_date,
+        row.source,
+        row.raw_json
       );
     } finally {
       db.close();
     }
   }
 
+  async function upsertFxCacheRateAsync(userId, rateInfo, requestedDate = null, settingsOverride = null) {
+    if (budgetStore?.backend === "postgres" && typeof budgetStore.upsertFxRates === "function") {
+      const { timezone } = settingsOverride || await getFxSettingsAsync(userId);
+      await budgetStore.upsertFxRates(userId, [
+        fxCacheRowFromRateInfo(rateInfo, requestedDate, timezone)
+      ]);
+      return;
+    }
+
+    upsertFxCacheRate(userId, rateInfo, requestedDate);
+  }
+
   function safeGetCurrentFxSnapshot(userId = null) {
     if (userId) {
       const { provider } = getFxSettings(userId);
+
+      if (provider === FX_PROVIDER_DISABLED || provider === FX_PROVIDER_MANUAL) {
+        return null;
+      }
+    }
+
+    if (currentFxSnapshotDisabled || typeof getCurrentFxSnapshot !== "function") {
+      return null;
+    }
+
+    try {
+      const snapshot = getCurrentFxSnapshot();
+
+      if (snapshot && typeof snapshot === "object") {
+        return snapshot;
+      }
+
+      return null;
+    } catch (error) {
+      currentFxSnapshotDisabled = true;
+
+      logCashflowError("cashflow_current_fx_snapshot_disabled", error, {
+        userId,
+        reason: "Host getCurrentFxSnapshot threw. Cashflow will use local FX cache until restart."
+      });
+
+      return null;
+    }
+  }
+
+  async function safeGetCurrentFxSnapshotAsync(userId = null) {
+    if (userId) {
+      const { provider } = await getFxSettingsAsync(userId);
 
       if (provider === FX_PROVIDER_DISABLED || provider === FX_PROVIDER_MANUAL) {
         return null;
@@ -137,26 +244,7 @@ export function createCashflowFxCacheService({
     }
 
     if (provider === FX_PROVIDER_MANUAL) {
-      const pairRate = Number(manualPairs[`${normalized}/${quote}`]);
-      if (Number.isFinite(pairRate) && pairRate > 0) return pairRate;
-      const inversePairRate = Number(manualPairs[`${quote}/${normalized}`]);
-      if (Number.isFinite(inversePairRate) && inversePairRate > 0) return 1 / inversePairRate;
-      const baseToPln = normalized === "PLN"
-        ? 1
-        : Number(manualPairs[`${normalized}/PLN`] || manualRates[normalized]);
-      const quoteToPln = quote === "PLN"
-        ? 1
-        : Number(manualPairs[`${quote}/PLN`] || manualRates[quote]);
-      if (
-        Number.isFinite(baseToPln) &&
-        baseToPln > 0 &&
-        Number.isFinite(quoteToPln) &&
-        quoteToPln > 0
-      ) {
-        return baseToPln / quoteToPln;
-      }
-      if (quote !== "PLN") return null;
-      return Number(manualRates[normalized]) || null;
+      return manualRateForPair({ manualPairs, manualRates }, normalized, quote);
     }
 
     const db = openPlanningDb(userId);
@@ -295,8 +383,177 @@ export function createCashflowFxCacheService({
     }
   }
 
+  function cachedFxRateFromRows(settings, rows, currency, date = null, quoteCurrency = null) {
+    const normalized = normalizeCurrency(currency);
+    const quote = normalizeCurrency(quoteCurrency || settings.ledgerCurrency || "PLN");
+    if (normalized === quote) return 1;
+
+    if (settings.provider === FX_PROVIDER_DISABLED) {
+      return null;
+    }
+
+    if (settings.provider === FX_PROVIDER_MANUAL) {
+      return manualRateForPair(settings, normalized, quote);
+    }
+
+    const rateDate = fxCacheDateKey(date, settings.timezone);
+    const pairRows = rows
+      .filter(row => String(row.base_currency || row.currency || "").toUpperCase() === normalized)
+      .filter(row => String(row.quote_currency || "PLN").toUpperCase() === quote)
+      .filter(row => String(row.rate_date || "").slice(0, 10) <= rateDate)
+      .sort((a, b) => String(b.rate_date || "").localeCompare(String(a.rate_date || "")));
+
+    const direct = Number(pairRows[0]?.rate);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+
+    if (quote !== "PLN") {
+      const baseToPln = normalized === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, normalized, date, "PLN");
+      const quoteToPln = quote === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, quote, date, "PLN");
+
+      if (
+        Number.isFinite(baseToPln) &&
+        baseToPln > 0 &&
+        Number.isFinite(quoteToPln) &&
+        quoteToPln > 0
+      ) {
+        return baseToPln / quoteToPln;
+      }
+    }
+
+    return null;
+  }
+
+  async function getCachedFxRateAsync(userId, currency, date = null, quoteCurrency = null) {
+    if (!(budgetStore?.backend === "postgres") || typeof budgetStore.listPlanningRows !== "function") {
+      return getCachedFxRate(userId, currency, date, quoteCurrency);
+    }
+
+    const settings = await getFxSettingsAsync(userId);
+    const rows = settings.provider === FX_PROVIDER_DISABLED || settings.provider === FX_PROVIDER_MANUAL
+      ? []
+      : await budgetStore.listPlanningRows(userId, "fx_rates_cache");
+    return cachedFxRateFromRows(settings, rows, currency, date, quoteCurrency);
+  }
+
+  function buildCachedFxSnapshotFromRows({
+    date = null,
+    ledgerCurrency,
+    manualPairs,
+    manualRates,
+    provider,
+    rows = [],
+    timezone
+  }) {
+    const rateDate = fxCacheDateKey(date, timezone);
+    const snapshot = {
+      pln: {
+        currency: "PLN",
+        rate: 1,
+        effectiveDate: rateDate,
+        source: provider === FX_PROVIDER_DISABLED ? "disabled" : "static"
+      },
+      [`${ledgerCurrency.toLowerCase()}/${ledgerCurrency.toLowerCase()}`]: {
+        currency: ledgerCurrency,
+        baseCurrency: ledgerCurrency,
+        quoteCurrency: ledgerCurrency,
+        rate: 1,
+        effectiveDate: rateDate,
+        source: "same-currency"
+      }
+    };
+
+    if (provider === FX_PROVIDER_DISABLED) {
+      return snapshot;
+    }
+
+    if (provider === FX_PROVIDER_MANUAL) {
+      for (const [currency, rate] of Object.entries(manualRates || {})) {
+        snapshot[currency.toLowerCase()] = {
+          currency,
+          rate,
+          effectiveDate: rateDate,
+          source: "manual"
+        };
+      }
+
+      for (const [pair, rate] of Object.entries(manualPairs || {})) {
+        const [base, quote] = pair.split("/");
+        snapshot[`${base.toLowerCase()}/${quote.toLowerCase()}`] = {
+          currency: base,
+          baseCurrency: base,
+          quoteCurrency: quote,
+          rate,
+          effectiveDate: date || todayInTimezone(timezone),
+          source: "manual"
+        };
+      }
+
+      return snapshot;
+    }
+
+    const sortedRows = [...(rows || [])]
+      .filter(row => String(row.rate_date || "") <= rateDate)
+      .sort((a, b) => {
+        const baseCompare = String(a.base_currency || a.currency || "").localeCompare(String(b.base_currency || b.currency || ""));
+        if (baseCompare !== 0) return baseCompare;
+        const quoteCompare = String(a.quote_currency || "PLN").localeCompare(String(b.quote_currency || "PLN"));
+        if (quoteCompare !== 0) return quoteCompare;
+        return String(b.rate_date || "").localeCompare(String(a.rate_date || ""));
+      });
+
+    const seen = new Set();
+
+    for (const row of sortedRows) {
+      const currency = normalizeCurrency(row.base_currency || row.currency);
+      const quote = normalizeCurrency(row.quote_currency || "PLN");
+      const pair = `${currency}/${quote}`;
+      if (seen.has(pair)) continue;
+
+      seen.add(pair);
+      const entry = {
+        currency,
+        baseCurrency: currency,
+        quoteCurrency: quote,
+        rate: Number(row.rate),
+        effectiveDate: row.effective_date || rateDate,
+        source: row.source || "cache"
+      };
+      snapshot[`${currency.toLowerCase()}/${quote.toLowerCase()}`] = entry;
+      if (quote === "PLN") {
+        snapshot[currency.toLowerCase()] = entry;
+      }
+    }
+
+    return snapshot;
+  }
+
+  async function getCachedFxSnapshotAsync(userId, date = null) {
+    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
+      return getCachedFxSnapshot(userId, date);
+    }
+
+    const settings = await getFxSettingsAsync(userId);
+    const rows = settings.provider === FX_PROVIDER_DISABLED || settings.provider === FX_PROVIDER_MANUAL
+      ? []
+      : await budgetStore.listPlanningRows(userId, "fx_rates_cache");
+
+    return buildCachedFxSnapshotFromRows({
+      date,
+      ledgerCurrency: settings.ledgerCurrency,
+      manualPairs: settings.manualPairs,
+      manualRates: settings.manualRates,
+      provider: settings.provider,
+      rows,
+      timezone: settings.timezone
+    });
+  }
+
   async function refreshNbpFxCacheForUser(userId, date = null) {
-    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
+    const useBudgetStoreFxWrites = budgetStore?.backend === "postgres"
+      && typeof budgetStore.upsertFxRates === "function";
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = useBudgetStoreFxWrites
+      ? await getFxSettingsAsync(userId)
+      : getFxSettings(userId);
 
     if (provider === FX_PROVIDER_DISABLED) {
       return {
@@ -310,7 +567,8 @@ export function createCashflowFxCacheService({
       const manualEntries = Object.keys(manualPairs).length
         ? Object.entries(manualPairs)
         : Object.entries(manualRates).map(([currency, rate]) => [`${currency}/PLN`, rate]);
-      const updated = manualEntries.map(([pair, rate]) => {
+      const updated = [];
+      for (const [pair, rate] of manualEntries) {
         const [currency, quoteCurrency] = pair.split("/");
         const rateInfo = {
           currency,
@@ -322,9 +580,9 @@ export function createCashflowFxCacheService({
           source: FX_PROVIDER_MANUAL
         };
 
-        upsertFxCacheRate(userId, rateInfo, date);
-        return rateInfo;
-      });
+        await upsertFxCacheRateAsync(userId, rateInfo, date, { timezone });
+        updated.push(rateInfo);
+      }
 
       return {
         provider,
@@ -333,7 +591,9 @@ export function createCashflowFxCacheService({
       };
     }
 
-    const currencies = collectCurrenciesForFxSnapshot(userId)
+    const currencies = (useBudgetStoreFxWrites
+      ? await collectCurrenciesForFxSnapshotAsync(userId)
+      : collectCurrenciesForFxSnapshot(userId))
       .map(normalizeCurrency)
       .filter(currency => currency && currency !== ledgerCurrency);
 
@@ -343,7 +603,7 @@ export function createCashflowFxCacheService({
 
     for (const currency of uniqueCurrencies) {
       const rateInfo = await fetchProviderRate(provider, currency, date, ledgerCurrency, timezone);
-      upsertFxCacheRate(userId, rateInfo, date);
+      await upsertFxCacheRateAsync(userId, rateInfo, date, { timezone });
       updated.push(rateInfo);
     }
 
@@ -355,13 +615,17 @@ export function createCashflowFxCacheService({
   }
 
   async function refreshNbpFxCacheForAllUsers(date = null) {
-    const userIds = listCashflowUserIds();
+    const userIds = typeof listCashflowUserIdsAsync === "function"
+      ? await listCashflowUserIdsAsync()
+      : listCashflowUserIds();
     const results = [];
 
     for (const userId of userIds) {
       try {
         const result = await refreshNbpFxCacheForUser(userId, date);
-        const projection = regenerateProjectionsAfterMutation(userId);
+        const projection = typeof regenerateProjectionsAfterMutationAsync === "function"
+          ? await regenerateProjectionsAfterMutationAsync(userId)
+          : regenerateProjectionsAfterMutation(userId);
 
         logServerEvent("cashflow_fx_cache_refreshed", {
           userId,
@@ -572,7 +836,8 @@ export function createCashflowFxCacheService({
     const base = requireSupportedCurrency(baseCurrency, "base");
     const quote = requireSupportedCurrency(quoteCurrency, "quote");
     const requestedDate = date ? requireIsoDate(date, "date") : null;
-    const { provider, timezone } = getFxSettings(userId);
+    const fxSettings = await getFxSettingsAsync(userId);
+    const { provider, timezone } = fxSettings;
     const effectiveDate = requestedDate || todayInTimezone(timezone);
 
     if (base === quote) {
@@ -592,7 +857,7 @@ export function createCashflowFxCacheService({
     }
 
     if (provider === FX_PROVIDER_MANUAL) {
-      const rate = Number(getCachedFxRate(userId, base, requestedDate, quote));
+      const rate = Number(manualRateForPair(fxSettings, base, quote));
       if (!Number.isFinite(rate) || rate <= 0) {
         throw badRequest(`Missing manual FX rate for ${base}/${quote}`);
       }
@@ -634,6 +899,16 @@ export function createCashflowFxCacheService({
     return snapshot;
   }
 
+  function currenciesForSnapshotFromRows(settings = {}, rows = []) {
+    const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
+    const usedCurrencies = normalizeFxCurrencyList(settings.fx_used_currencies, ledgerCurrency);
+    const observedCurrencies = rows
+      .map(row => String(row.currency || "").toUpperCase())
+      .filter(Boolean);
+
+    return [...new Set([...usedCurrencies, ...observedCurrencies])];
+  }
+
   function collectCurrenciesForFxSnapshot(userId) {
     const db = openPlanningDb(userId);
 
@@ -653,21 +928,55 @@ export function createCashflowFxCacheService({
         ...db.prepare("SELECT currency FROM pending_transactions").all()
       ];
 
-      const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
-      const usedCurrencies = normalizeFxCurrencyList(settings.fx_used_currencies, ledgerCurrency);
-      const observedCurrencies = rows
-        .map(row => String(row.currency || "").toUpperCase())
-        .filter(Boolean);
-
-      return [...new Set([...usedCurrencies, ...observedCurrencies])];
+      return currenciesForSnapshotFromRows(settings, rows);
     } finally {
       db.close();
     }
   }
 
+  async function collectCurrenciesForFxSnapshotAsync(userId) {
+    if (budgetStore && typeof budgetStore.listPlanningRows === "function") {
+      const [
+        settingsRows,
+        recurringExpenses,
+        recurringIncomes,
+        flexTransactions,
+        goals,
+        oneOffTransactions,
+        pendingTransactions
+      ] = await Promise.all([
+        budgetStore.listPlanningRows(userId, "settings"),
+        budgetStore.listPlanningRows(userId, "recurring_expenses"),
+        budgetStore.listPlanningRows(userId, "recurring_incomes"),
+        budgetStore.listPlanningRows(userId, "flex_transactions"),
+        budgetStore.listPlanningRows(userId, "goals"),
+        budgetStore.listPlanningRows(userId, "one_off_transactions"),
+        budgetStore.listPlanningRows(userId, "pending_transactions")
+      ]);
+
+      return currenciesForSnapshotFromRows(
+        settingsRows.find(row => Number(row.id) === 1) || settingsRows[0] || {},
+        [
+          ...recurringExpenses,
+          ...recurringIncomes,
+          ...flexTransactions,
+          ...goals,
+          ...oneOffTransactions,
+          ...pendingTransactions
+        ]
+      );
+    }
+
+    return collectCurrenciesForFxSnapshot(userId);
+  }
+
   async function ensureFxCacheForMutation(userId, input = {}) {
     const currency = requireSupportedCurrency(input?.currency || "PLN");
-    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
+    const useBudgetStoreFxWrites = budgetStore?.backend === "postgres"
+      && typeof budgetStore.upsertFxRates === "function";
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = useBudgetStoreFxWrites
+      ? await getFxSettingsAsync(userId)
+      : getFxSettings(userId);
 
     if (!currency || currency === ledgerCurrency) {
       return {
@@ -696,7 +1005,15 @@ export function createCashflowFxCacheService({
       };
     }
 
-    const cached = getCachedFxRate(userId, currency, null, ledgerCurrency);
+    const cached = useBudgetStoreFxWrites
+      ? cachedFxRateFromRows(
+          { provider, manualRates, manualPairs, ledgerCurrency, timezone },
+          await budgetStore.listPlanningRows(userId, "fx_rates_cache"),
+          currency,
+          null,
+          ledgerCurrency
+        )
+      : getCachedFxRate(userId, currency, null, ledgerCurrency);
 
     if (cached) {
       return {
@@ -707,7 +1024,7 @@ export function createCashflowFxCacheService({
     }
 
     const rateInfo = await fetchProviderRate(provider, currency, null, ledgerCurrency, timezone);
-    upsertFxCacheRate(userId, rateInfo);
+    await upsertFxCacheRateAsync(userId, rateInfo, null, { timezone });
 
     return {
       refreshed: true,
@@ -719,19 +1036,25 @@ export function createCashflowFxCacheService({
   }
   return {
     collectCurrenciesForFxSnapshot,
+    collectCurrenciesForFxSnapshotAsync,
     ensureFxCacheForMutation,
     fetchProviderRate,
     fetchNbpFxSnapshot,
     fetchNbpPairRate,
     fetchNbpRate,
     getCachedFxRate,
+    getCachedFxRateAsync,
     getCachedFxSnapshot,
+    getCachedFxSnapshotAsync,
     getFxProviderSettings: getFxSettings,
+    getFxProviderSettingsAsync: getFxSettingsAsync,
     getProviderPairRate,
     refreshNbpFxCacheForAllUsers,
     refreshNbpFxCacheForUser,
     safeGetCurrentFxSnapshot,
-    upsertFxCacheRate
+    safeGetCurrentFxSnapshotAsync,
+    upsertFxCacheRate,
+    upsertFxCacheRateAsync
   };
 }
 

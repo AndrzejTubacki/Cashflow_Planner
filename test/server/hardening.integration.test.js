@@ -15,8 +15,8 @@ import { createCashflowNotificationService } from "../../src/server/cashflow-not
 import { generateId } from "../../src/server/cashflow-id-utils.js";
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 
-async function withHarness(fn) {
-  const harness = await createCashflowTestHarness();
+async function withHarness(fn, options = {}) {
+  const harness = await createCashflowTestHarness(options);
   try {
     return await fn(harness);
   } finally {
@@ -71,6 +71,7 @@ test("budget and system operations require capabilities while editor actions rem
     ["/api/fx/refresh", {}],
     ["/api/run-jobs", {}],
     ["/api/pending/recalculate", {}],
+    ["/api/ledger/compact-history", {}],
     ["/api/regenerate-projections", {}],
     ["/api/backup", {}],
     ["/api/restore/missing", {}],
@@ -272,6 +273,8 @@ test("settings updates strictly reject malformed supported fields", async () => 
     [{ future_periods: " " }, "future_periods"],
     [{ minimum_reserve_enabled: "yes" }, "minimum_reserve_enabled"],
     [{ minimum_reserve_amount: -1 }, "minimum_reserve_amount"],
+    [{ ledger_history_compaction_months: 601 }, "ledger_history_compaction_months"],
+    [{ ledger_history_compaction_months: 1.5 }, "ledger_history_compaction_months"],
     [{ fx_buffer_percent: 101 }, "fx_buffer_percent"],
     [{ fx_provider: "unknown" }, "fx_provider"],
     [{ fx_used_currencies: null }, "fx_used_currencies"],
@@ -285,7 +288,10 @@ test("settings updates strictly reject malformed supported fields", async () => 
     [{ locale: "xx" }, "locale"],
     [{ timezone: "Not/A_Timezone" }, "timezone"],
     [{ holiday_country: "XX" }, "holiday_country"],
+    [{ notification_channel: "sms" }, "notification_channel"],
     [{ ntfy_url: "ftp://example.com/topic" }, "ntfy_url"],
+    [{ ntfy_auth_token: "x".repeat(501) }, "ntfy_auth_token"],
+    [{ discord_webhook_url: "ftp://example.com/webhook" }, "discord_webhook_url"],
     [{ notification_delivery_time: "25:00" }, "notification_delivery_time"],
     [{ ntfy_priority_income_missing: "extreme" }, "ntfy_priority_income_missing"],
     [{ backup_interval_minutes: 0 }, "backup_interval_minutes"],
@@ -304,6 +310,206 @@ test("settings updates strictly reject malformed supported fields", async () => 
     assert.ok(result.body.details.some(detail => detail.field === field), JSON.stringify(result.body));
   }
 }));
+
+test("discord notification channel sends queued notifications through webhook JSON", async () => withHarness(async harness => {
+  const calls = [];
+  const notifications = createCashflowNotificationService({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, status: 204, statusText: "No Content" };
+    },
+    generateId,
+    listLedgerYears: harness.listLedgerYears,
+    openLedgerDb: harness.openLedgerDb,
+    openPlanningDb: harness.openPlanningDb
+  });
+
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare(`
+      UPDATE settings
+      SET notification_channel = 'discord',
+          discord_webhook_url = 'https://discord.example.test/api/webhooks/test'
+      WHERE id = 1
+    `).run();
+    db.prepare(`
+      INSERT INTO notification_queue (
+        id, notification_type, title, message, priority, queued_at, dedupe_key
+      ) VALUES (
+        'discord-notification', 'pending_summary', 'Pending', 'Pending rows', 'default',
+        datetime('now'), 'discord-notification'
+      )
+    `).run();
+  } finally {
+    db.close();
+  }
+
+  const sent = await notifications.sendQueuedNotifications(harness.userId);
+  assert.equal(sent, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://discord.example.test/api/webhooks/test");
+  assert.equal(calls[0].options.method, "POST");
+  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    content: "Pending\nPending rows"
+  });
+
+  const check = harness.openPlanningDb();
+  try {
+    assert.ok(check.prepare("SELECT sent_at FROM notification_queue WHERE id = 'discord-notification'").get().sent_at);
+  } finally {
+    check.close();
+  }
+}));
+
+test("ntfy notification channel sends using a token embedded in the stored URL", async () => withHarness(async harness => {
+  const calls = [];
+  const notifications = createCashflowNotificationService({
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, status: 200, statusText: "OK" };
+    },
+    generateId,
+    listLedgerYears: harness.listLedgerYears,
+    openLedgerDb: harness.openLedgerDb,
+    openPlanningDb: harness.openPlanningDb
+  });
+
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare(`
+      UPDATE settings
+      SET notification_channel = 'ntfy',
+          ntfy_url = 'https://:tk_hardening_test@ntfy.example.test/topic'
+      WHERE id = 1
+    `).run();
+    db.prepare(`
+      INSERT INTO notification_queue (
+        id, notification_type, title, message, priority, queued_at, dedupe_key
+      ) VALUES (
+        'ntfy-notification', 'pending_summary', 'Pending', 'Pending rows', 'default',
+        datetime('now'), 'ntfy-notification'
+      )
+    `).run();
+  } finally {
+    db.close();
+  }
+
+  const sent = await notifications.sendQueuedNotifications(harness.userId);
+  assert.equal(sent, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://ntfy.example.test/topic");
+  assert.equal(calls[0].options.headers.Authorization, "Bearer tk_hardening_test");
+
+  const check = harness.openPlanningDb();
+  try {
+    assert.ok(check.prepare("SELECT sent_at FROM notification_queue WHERE id = 'ntfy-notification'").get().sent_at);
+  } finally {
+    check.close();
+  }
+}));
+
+test("Postgres notification delivery claims one queued row per transaction", async () => {
+  const calls = [];
+  const marks = [];
+  const claimedBatches = [
+    [{
+      id: "postgres-notification-a",
+      message: "First rows",
+      priority: "default",
+      title: "First"
+    }],
+    [{
+      id: "postgres-notification-b",
+      message: "Second rows",
+      priority: "default",
+      title: "Second"
+    }],
+    []
+  ];
+  const notifications = createCashflowNotificationService({
+    budgetStore: {
+      backend: "postgres",
+      async listPlanningRows(_budgetId, tableName) {
+        assert.equal(tableName, "settings");
+        return [{
+          discord_webhook_url: "https://discord.example.test/api/webhooks/test",
+          notification_channel: "discord"
+        }];
+      },
+      async transaction(fn) {
+        return await fn({
+          async claimUnsentNotifications(_budgetId, options) {
+            assert.deepEqual(options, { limit: 1 });
+            return claimedBatches.shift();
+          },
+          async markNotificationsSent(_budgetId, ids) {
+            marks.push(ids);
+            return { updated: ids.length };
+          }
+        });
+      }
+    },
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, status: 204, statusText: "No Content" };
+    },
+    generateId,
+    listLedgerYears: () => [],
+    openLedgerDb: () => {
+      throw new Error("not used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not used");
+    }
+  });
+
+  const sent = await notifications.sendQueuedNotifications("household");
+  assert.equal(sent, 2);
+  assert.deepEqual(marks, [["postgres-notification-a"], ["postgres-notification-b"]]);
+  assert.deepEqual(calls.map(call => call.url), [
+    "https://discord.example.test/api/webhooks/test",
+    "https://discord.example.test/api/webhooks/test"
+  ]);
+});
+
+test("notification queue helper uses Postgres budget-store upsert path", async () => {
+  const queued = [];
+  const notifications = createCashflowNotificationService({
+    budgetStore: {
+      backend: "postgres",
+      async upsertNotifications(budgetId, rows) {
+        assert.equal(budgetId, "household");
+        queued.push(...rows);
+        return { upserted: rows.length };
+      }
+    },
+    generateId: () => "notif-postgres",
+    listLedgerYears: () => [],
+    openLedgerDb: () => {
+      throw new Error("Postgres notification queue helper must not open SQLite ledger files");
+    },
+    openPlanningDb: () => {
+      throw new Error("Postgres notification queue helper must not open SQLite planning files");
+    }
+  });
+
+  await notifications.queueNotificationAsync(
+    "household",
+    "funding_shortfall",
+    "Funding shortfall",
+    "A transaction is short.",
+    "high",
+    "row-1",
+    "funding_shortfall:row-1",
+    { timezone: "UTC" }
+  );
+
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0].id, "notif-postgres");
+  assert.equal(queued[0].notification_type, "funding_shortfall");
+  assert.match(queued[0].dedupe_key, /^funding_shortfall:row-1:\d{4}-\d{2}-\d{2}$/);
+});
 
 test("backup_location is constrained by CASHFLOW_BACKUP_ALLOWED_ROOTS", async () => withHarness(async harness => {
   const previous = process.env.CASHFLOW_BACKUP_ALLOWED_ROOTS;
@@ -405,6 +611,26 @@ test("NBP and Frankfurter provider timeouts carry 504 status", async () => {
       process.env.CASHFLOW_FX_FETCH_TIMEOUT_MS = previous;
     }
   }
+});
+
+test("all-user FX refresh can enumerate budgets through async neutral lister", async () => {
+  const fx = createCashflowFxCacheService({
+    getCurrentFxSnapshot: () => null,
+    listCashflowUserIds: () => {
+      throw new Error("sync lister should not be used");
+    },
+    listCashflowUserIdsAsync: async () => [],
+    logCashflowError: () => {},
+    logError: () => {},
+    logServerEvent: () => {},
+    normalizeCurrency: value => String(value || "").toUpperCase(),
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    },
+    regenerateProjectionsAfterMutation: () => ({})
+  });
+
+  assert.deepEqual(await fx.refreshNbpFxCacheForAllUsers(), []);
 });
 
 test("ntfy timeout leaves queued notifications unsent", async () => withHarness(async harness => {
@@ -513,6 +739,238 @@ test("background tick skips overlap", async () => {
   await first;
 });
 
+test("background tick uses optional distributed lock service", async () => {
+  const lockCalls = [];
+  const sentUsers = [];
+  const jobs = createCashflowBackgroundJobs({
+    getSettings: () => ({ timezone: "UTC", notification_delivery_time: "08:00" }),
+    listCashflowUserIds: () => ["local"],
+    lockService: {
+      withLock: async (name, work, options) => {
+        lockCalls.push({ name, options });
+        return { acquired: true, result: await work() };
+      }
+    },
+    logError: () => {},
+    logServerEvent: () => {},
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: () => 0,
+    now: () => new Date("2026-06-03T08:00:00.000Z"),
+    queueDailyPendingSummary: () => 0,
+    queueMissingIncomeNotifications: () => 0,
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async () => ({ updated_count: 0 }),
+    sendQueuedNotifications: async userId => {
+      sentUsers.push(userId);
+      return 0;
+    }
+  });
+
+  const result = await jobs.tickPerUserJobs();
+
+  assert.deepEqual(result, { skipped: false, users: 1 });
+  assert.deepEqual(lockCalls, [
+    {
+      name: "background:tick",
+      options: { ttlMs: 55_000 }
+    },
+    {
+      name: "budget:local:ledger-check",
+      options: { ttlMs: 55_000 }
+    },
+    {
+      name: "budget:local:fx-refresh",
+      options: { ttlMs: 55_000 }
+    },
+    {
+      name: "budget:local:notifications",
+      options: { ttlMs: 55_000 }
+    },
+    {
+      name: "budget:local:automatic-backup",
+      options: { ttlMs: 55_000 }
+    },
+    {
+      name: "budget:local:retention",
+      options: { ttlMs: 55_000 }
+    }
+  ]);
+  assert.deepEqual(sentUsers, ["local"]);
+});
+
+test("background tick skips work when optional distributed lock is unavailable", async () => {
+  const events = [];
+  const jobs = createCashflowBackgroundJobs({
+    getSettings: () => {
+      throw new Error("work should not run");
+    },
+    listCashflowUserIds: () => ["local"],
+    lockService: {
+      withLock: async () => ({ acquired: false })
+    },
+    logError: () => {},
+    logServerEvent: (kind, details) => events.push({ kind, details }),
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: () => 0,
+    now: () => new Date("2026-06-03T08:00:00.000Z"),
+    queueDailyPendingSummary: () => 0,
+    queueMissingIncomeNotifications: () => 0,
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async () => ({ updated_count: 0 }),
+    sendQueuedNotifications: async () => 0
+  });
+
+  const result = await jobs.tickPerUserJobs();
+
+  assert.deepEqual(result, {
+    skipped: true,
+    reason: "distributed_lock_unavailable"
+  });
+  assert.ok(events.some(event =>
+    event.kind === "cashflow_background_tick_skipped"
+      && event.details.reason === "distributed_lock_unavailable"
+  ));
+});
+
+test("background tick skips budget jobs when a job-specific distributed lock is unavailable", async () => {
+  const events = [];
+  let movedDue = 0;
+  const jobs = createCashflowBackgroundJobs({
+    getSettings: () => ({ timezone: "UTC", notification_delivery_time: "08:00" }),
+    listCashflowUserIds: () => ["local"],
+    lockService: {
+      withLock: async (name, work, options) => {
+        if (name === "background:tick") {
+          return { acquired: true, result: await work(options) };
+        }
+        if (name === "budget:local:ledger-check") {
+          return { acquired: false };
+        }
+        return { acquired: true, result: await work(options) };
+      }
+    },
+    logError: () => {},
+    logServerEvent: (kind, details) => events.push({ kind, details }),
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: () => {
+      movedDue += 1;
+      return 1;
+    },
+    now: () => new Date("2026-06-03T08:00:00.000Z"),
+    queueDailyPendingSummary: () => 0,
+    queueMissingIncomeNotifications: () => 0,
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async () => ({ updated_count: 0 }),
+    sendQueuedNotifications: async () => 0
+  });
+
+  assert.deepEqual(await jobs.tickPerUserJobs(), { skipped: false, users: 1 });
+  assert.equal(movedDue, 0);
+  assert.ok(events.some(event =>
+    event.kind === "cashflow_background_job_lock_skipped"
+      && event.details.jobName === "midnight"
+      && event.details.lockName === "budget:local:ledger-check"
+  ));
+});
+
+test("route-triggered projection regeneration uses optional budget projection lock", async () => {
+  const lockCalls = [];
+  await withHarness(async harness => {
+    const result = await harness.api("/api/regenerate-projections", {
+      method: "POST",
+      body: {}
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result._projection.projection_ok, true);
+    assert.ok(lockCalls.some(call =>
+      call.name === "budget:local:projection"
+        && call.options.ttlMs === 120_000
+    ));
+  }, {
+    lockService: {
+      withLock: async (name, work, options) => {
+        lockCalls.push({ name, options });
+        return { acquired: true, result: await work() };
+      }
+    }
+  });
+});
+
+test("route-triggered pending recalculation locks the whole recalculation once", async () => {
+  const lockCalls = [];
+  await withHarness(async harness => {
+    const result = await harness.api("/api/pending/recalculate", {
+      method: "POST",
+      body: {}
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(lockCalls.map(call => ({
+      name: call.name,
+      ttlMs: call.options.ttlMs
+    })), [
+      { name: "budget:local:projection", ttlMs: 120_000 }
+    ]);
+  }, {
+    lockService: {
+      withLock: async (name, work, options) => {
+        lockCalls.push({ name, options });
+        return { acquired: true, result: await work() };
+      }
+    }
+  });
+});
+
+test("route-triggered budget maintenance uses optional budget locks", async () => {
+  const lockCalls = [];
+  await withHarness(async harness => {
+    const backup = await harness.api("/api/backup", {
+      method: "POST",
+      body: {}
+    });
+    assert.equal(backup.ok, true);
+
+    const compaction = await harness.api("/api/ledger/compact-history", {
+      method: "POST",
+      body: { months: 0 }
+    });
+    assert.equal(compaction.compaction.enabled, false);
+
+    assert.deepEqual(lockCalls.map(call => ({
+      name: call.name,
+      ttlMs: call.options.ttlMs
+    })), [
+      { name: "budget:local:automatic-backup", ttlMs: 300_000 },
+      { name: "budget:local:retention", ttlMs: 120_000 }
+    ]);
+  }, {
+    lockService: {
+      withLock: async (name, work, options) => {
+        lockCalls.push({ name, options });
+        return { acquired: true, result: await work() };
+      }
+    }
+  });
+});
+
+test("route-triggered budget maintenance returns conflict when optional budget lock is unavailable", async () => {
+  await withHarness(async harness => {
+    const result = await harness.request("/api/backup", {
+      method: "POST",
+      body: {}
+    });
+
+    assert.equal(result.response.status, 409);
+    assert.equal(result.body.error, "Backup is already running");
+    assert.equal(result.body.details[0].lock, "budget:local:automatic-backup");
+  }, {
+    lockService: {
+      withLock: async () => ({ acquired: false })
+    }
+  });
+});
+
 test("background tick isolates one user's timeout and continues with later users", async () => {
   const errors = [];
   const sentUsers = [];
@@ -556,7 +1014,7 @@ test("background tick catches up overdue daily jobs and persists success across 
     getSettings: () => ({
       timezone: "UTC",
       auto_backup_enabled: 0,
-      notification_delivery_time: "12:00"
+      notification_delivery_time: "08:00"
     }),
     listCashflowUserIds: () => [harness.userId],
     logError: () => {},
@@ -593,6 +1051,7 @@ test("background tick catches up overdue daily jobs and persists success across 
     ["pending-summary", harness.userId],
     ["missing-income", harness.userId],
     ["fx", harness.userId],
+    ["notify", harness.userId],
     ["cleanup", harness.userId, "daily_maintenance"]
   ]);
   assert.ok(events.some(event => event.kind === "cashflow_midnight_job_completed"));
@@ -604,6 +1063,7 @@ test("background tick catches up overdue daily jobs and persists success across 
     ["pending-summary", harness.userId],
     ["missing-income", harness.userId],
     ["fx", harness.userId],
+    ["notify", harness.userId],
     ["cleanup", harness.userId, "daily_maintenance"]
   ]);
 
@@ -618,12 +1078,100 @@ test("background tick catches up overdue daily jobs and persists success across 
     assert.deepEqual(persisted, [
       { entity_type: "background_job:fx", entity_id: "2026-06-03" },
       { entity_type: "background_job:maintenance", entity_id: "2026-06-03" },
-      { entity_type: "background_job:midnight", entity_id: "2026-06-03" }
+      { entity_type: "background_job:midnight", entity_id: "2026-06-03:08:00" },
+      { entity_type: "background_job:notify", entity_id: "2026-06-03:catchup:08:00" }
     ]);
   } finally {
     db.close();
   }
 }));
+
+test("background tick can persist daily run markers through the async budget store", async () => {
+  const calls = [];
+  const eventRows = [];
+  const makeJobs = () => createCashflowBackgroundJobs({
+    budgetStore: {
+      async listPlanningRows(budgetId, tableName) {
+        assert.equal(budgetId, "budget-1");
+        assert.equal(tableName, "event_log");
+        return eventRows;
+      },
+      async insertPlanningRows(budgetId, tableName, rows) {
+        assert.equal(budgetId, "budget-1");
+        assert.equal(tableName, "event_log");
+        eventRows.push(...rows.map(row => ({ ...row })));
+        return { inserted: rows.length };
+      }
+    },
+    cleanupOperationalData: (userId, reason) => calls.push(["cleanup", userId, reason]),
+    getSettings: () => {
+      throw new Error("sync settings should not be read when getSettingsAsync is available");
+    },
+    getSettingsAsync: async userId => {
+      assert.equal(userId, "budget-1");
+      return {
+        timezone: "UTC",
+        auto_backup_enabled: 0,
+        notification_delivery_time: "08:00"
+      };
+    },
+    listCashflowUserIds: () => {
+      throw new Error("sync budget listing should not be used when async listing is available");
+    },
+    listCashflowUserIdsAsync: async () => ["budget-1"],
+    logError: () => {},
+    logServerEvent: () => {},
+    maybeRunAutomaticBackup: () => null,
+    moveDueFutureTransactionsToPending: userId => {
+      calls.push(["midnight", userId]);
+      return 0;
+    },
+    now: () => new Date("2026-06-03T08:05:00.000Z"),
+    openPlanningDb: () => {
+      throw new Error("SQLite planning DB should not be opened for async background run markers");
+    },
+    queueDailyPendingSummary: userId => {
+      calls.push(["pending-summary", userId]);
+      return 0;
+    },
+    queueMissingIncomeNotifications: userId => {
+      calls.push(["missing-income", userId]);
+      return 0;
+    },
+    refreshNbpFxCacheForAllUsers: async () => [],
+    refreshNbpFxCacheForUser: async userId => {
+      calls.push(["fx", userId]);
+      return { updated_count: 0 };
+    },
+    sendQueuedNotifications: async userId => {
+      calls.push(["notify", userId]);
+      return 0;
+    }
+  });
+
+  await makeJobs().tickPerUserJobs();
+  await makeJobs().tickPerUserJobs();
+
+  assert.deepEqual(calls, [
+    ["midnight", "budget-1"],
+    ["pending-summary", "budget-1"],
+    ["missing-income", "budget-1"],
+    ["fx", "budget-1"],
+    ["notify", "budget-1"],
+    ["cleanup", "budget-1", "daily_maintenance"]
+  ]);
+  assert.deepEqual(
+    eventRows.map(row => ({ entity_type: row.entity_type, entity_id: row.entity_id })).sort((a, b) =>
+      `${a.entity_type}:${a.entity_id}`.localeCompare(`${b.entity_type}:${b.entity_id}`)
+    ),
+    [
+      { entity_type: "background_job:fx", entity_id: "2026-06-03" },
+      { entity_type: "background_job:maintenance", entity_id: "2026-06-03" },
+      { entity_type: "background_job:midnight", entity_id: "2026-06-03:08:00" },
+      { entity_type: "background_job:notify", entity_id: "2026-06-03:catchup:08:00" }
+    ]
+  );
+});
 
 test("automatic backup scheduling checks the configured interval on ordinary ticks", async () => {
   const backups = [];
@@ -657,8 +1205,14 @@ test("automatic backup scheduling checks the configured interval on ordinary tic
 
 test("daily maintenance runs retention even when automatic backup is disabled", async () => {
   const cleaned = [];
+  const compacted = [];
+  const events = [];
   const jobs = createCashflowBackgroundJobs({
     cleanupOperationalData: (userId, reason) => cleaned.push({ userId, reason }),
+    compactLedgerHistory: async userId => {
+      compacted.push(userId);
+      return { compactedRows: 2, createdRows: 1, cutoffDate: "2025-06-03" };
+    },
     getSettings: () => ({
       timezone: "UTC",
       auto_backup_enabled: 0,
@@ -666,7 +1220,7 @@ test("daily maintenance runs retention even when automatic backup is disabled", 
     }),
     listCashflowUserIds: () => ["local"],
     logError: () => {},
-    logServerEvent: () => {},
+    logServerEvent: (kind, details) => events.push({ kind, details }),
     maybeRunAutomaticBackup: () => null,
     moveDueFutureTransactionsToPending: () => 0,
     now: () => new Date("2026-06-03T03:30:00.000Z"),
@@ -679,6 +1233,12 @@ test("daily maintenance runs retention even when automatic backup is disabled", 
 
   await jobs.tickPerUserJobs();
   assert.deepEqual(cleaned, [{ userId: "local", reason: "daily_maintenance" }]);
+  assert.deepEqual(compacted, ["local"]);
+  assert.ok(events.some(event =>
+    event.kind === "cashflow_ledger_history_compacted" &&
+    event.details.userId === "local" &&
+    event.details.compactedRows === 2
+  ));
 });
 
 test("failed user creation removes global metadata so retry is not blocked", async () => {

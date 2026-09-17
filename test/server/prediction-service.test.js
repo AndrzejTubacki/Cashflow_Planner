@@ -475,6 +475,87 @@ test("prediction helpers can reuse preloaded confirmed rows without opening ledg
   );
 });
 
+test("async prediction helpers read confirmed rows through the budget-store facade", async () => {
+  const calls = [];
+  const service = createCashflowPredictionService({
+    budgetStore: {
+      async listConfirmedTransactions(budgetId) {
+        calls.push(budgetId);
+        return [
+          {
+            id: "expense-too-old",
+            amount: 999,
+            type: "expense",
+            date: "2025-05-01",
+            source_recurring_expense_id: "expense-async",
+            created_at: "2025-05-01T00:00:00Z"
+          },
+          {
+            id: "expense-low",
+            amount: 40,
+            type: "expense",
+            date: "2026-02-01",
+            source_recurring_expense_id: "expense-async",
+            created_at: "2026-02-01T00:00:00Z"
+          },
+          {
+            id: "expense-high",
+            amount: 75,
+            type: "expense",
+            date: "2026-04-01",
+            source_recurring_expense_id: "expense-async",
+            created_at: "2026-04-01T00:00:00Z"
+          },
+          {
+            id: "income-low",
+            amount: 180,
+            type: "income",
+            date: "2026-03-01",
+            source_recurring_income_id: "income-async",
+            created_at: "2026-03-01T00:00:00Z"
+          },
+          {
+            id: "income-high",
+            amount: 220,
+            type: "income",
+            date: "2026-04-01",
+            source_recurring_income_id: "income-async",
+            created_at: "2026-04-01T00:00:00Z"
+          }
+        ];
+      }
+    },
+    listLedgerYears: () => {
+      throw new Error("ledger years should not be loaded for async prediction");
+    },
+    openLedgerDb: () => {
+      throw new Error("ledger DB should not be opened for async prediction");
+    }
+  });
+
+  assert.equal(
+    await service.predictedAmountForRecurringExpenseAsync("household", {
+      id: "expense-async",
+      amount: 50,
+      prediction_strategy: "12month_max",
+      prediction_substitute_missing: "none"
+    }, "2026-06-01", "2026-06-01"),
+    75
+  );
+
+  assert.equal(
+    await service.predictedAmountForRecurringIncomeAsync("household", {
+      id: "income-async",
+      amount: 200,
+      prediction_strategy: "12month_min",
+      prediction_substitute_missing: "none"
+    }, "2026-06-01", "2026-06-01"),
+    180
+  );
+
+  assert.deepEqual(calls, ["household", "household"]);
+});
+
 test("12-month predictions can use the previous year same month for an occurrence", () => withPredictionService((service, db) => {
   for (const row of [
     { id: "income-may", amount: 500, type: "income", date: "2025-05-30", sourceRecurringIncomeId: "income-prev-year" },

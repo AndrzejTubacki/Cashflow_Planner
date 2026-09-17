@@ -41,7 +41,11 @@ export function renderLedgerTab(locale, cashflow) {
         return renderDetailsPanel(
           year,
           [...byMonth.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([month, monthTxs]) =>
-            renderDetailsPanel(month, renderTransactionTable(monthTxs, locale, { entityType: "confirmed", canEdit: false }))
+            renderDetailsPanel(month, renderTransactionTable(monthTxs, locale, {
+              entityType: "confirmed",
+              canEdit: false,
+              compactLedgerColumns: true
+            }))
           ).join("")
         );
       }).join("")
@@ -63,7 +67,8 @@ export function renderLedgerTab(locale, cashflow) {
           renderTransactionTable(txs, locale, {
             entityType: "future",
             canEdit: false,
-            canMoveToPending: true
+            canMoveToPending: true,
+            compactLedgerColumns: true
           }),
           { extra }
         );
@@ -85,6 +90,7 @@ export function renderLedgerTab(locale, cashflow) {
         <div data-pending-list>
           ${renderTransactionTable(pending, locale, {
             entityType: "pending",
+            compactLedgerColumns: true,
             canConfirmPending: true,
             canDelete: tx => {
               const oneOffId = tx.source_one_off_id || tx.sourceOneOffId || "";

@@ -62,86 +62,87 @@ function renderAdminAccounts(locale, accounts = []) {
   return `
     <section class="panel" data-cashflow-admin-accounts>
       <h3>${escapeHtml(t(locale, "Admin accounts"))}</h3>
+      <p class="detail-note">${escapeHtml(t(locale, "Admin accounts manage who can sign in, who can administer Cashflow, and which active sessions can be revoked. Budget access is still controlled by budget membership."))}</p>
       ${(accounts || []).length ? `
-        <div class="cashflow-table-wrap">
-          <table class="cashflow-table cashflow-table--compact">
-            <thead>
-              <tr>
-                <th>${escapeHtml(t(locale, "Account"))}</th>
-                <th>${escapeHtml(t(locale, "Email"))}</th>
-                <th>${escapeHtml(t(locale, "External identity"))}</th>
-                <th>${escapeHtml(t(locale, "Status"))}</th>
-                <th>${escapeHtml(t(locale, "Internal password"))}</th>
-                <th>${escapeHtml(t(locale, "System admin"))}</th>
-                <th>${escapeHtml(t(locale, "Budgets"))}</th>
-                <th>${escapeHtml(t(locale, "Active sessions"))}</th>
-                <th>${escapeHtml(t(locale, "Actions"))}</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${accounts.map(account => {
-                const accountId = account.id || "";
-                const status = account.status || "active";
-                const admin = isSystemAdmin(account);
-                const deleted = status === "deleted";
-                const externalIdentity = (account.identities || []).find(identity => String(identity.provider_id || "").startsWith("external_")) || null;
-                return `
-                  <tr data-cashflow-admin-account-row="${escapeHtml(accountId)}">
-                    <td>
-                      <input
-                        value="${escapeHtml(account.display_name || accountId)}"
-                        data-cashflow-admin-account-name="${escapeHtml(accountId)}"
-                        aria-label="${escapeHtml(`${t(locale, "Display name")}: ${account.display_name || accountId}`)}"
-                        ${deleted ? "disabled" : ""}
-                      >
-                      <small>${escapeHtml(accountId)}</small>
-                    </td>
-                    <td>
-                      <input
-                        value="${escapeHtml(account.email || "")}"
-                        data-cashflow-admin-account-email="${escapeHtml(accountId)}"
-                        aria-label="${escapeHtml(`${t(locale, "Email")}: ${account.email || accountId}`)}"
-                        ${deleted ? "disabled" : ""}
-                      >
-                    </td>
-                    <td>
-                      <input
-                        value="${escapeHtml(externalIdentity?.subject || "")}"
-                        data-cashflow-admin-external-subject="${escapeHtml(accountId)}"
-                        aria-label="${escapeHtml(`${t(locale, "External subject")}: ${externalIdentity?.subject || accountId}`)}"
-                        ${deleted ? "disabled" : ""}
-                      >
-                      <small>${escapeHtml(externalIdentity?.provider_id || t(locale, "No external identity"))}</small>
-                    </td>
-                    <td>${escapeHtml(renderStatus(locale, status))}</td>
-                    <td>
-                      <small>${account.hasPasswordCredential ? escapeHtml(t(locale, "Configured")) : escapeHtml(t(locale, "Not configured"))}</small>
-                      <small data-cashflow-admin-password-token-output="${escapeHtml(accountId)}"></small>
-                    </td>
-                    <td>${admin ? escapeHtml(t(locale, "Yes")) : escapeHtml(t(locale, "No"))}</td>
-                    <td>
-                      <small>${escapeHtml(t(locale, "Owned budgets"))}: ${escapeHtml(String(account.ownedBudgetCount ?? 0))}</small>
-                      <small>${escapeHtml(t(locale, "Memberships"))}: ${escapeHtml(String(account.membershipCount ?? 0))}</small>
-                    </td>
-                    <td>${renderAccountSessions(locale, account)}</td>
-                    <td>
-                      <div class="cashflow-row-actions">
-                        ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-account-rename="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Save account"))}</button>` : ""}
-                        ${!deleted && !account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_setup">${escapeHtml(t(locale, "Create password setup token"))}</button>` : ""}
-                        ${!deleted && account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_reset">${escapeHtml(t(locale, "Create password reset token"))}</button>` : ""}
-                        ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-external-link="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Link external identity"))}</button>` : ""}
-                        ${!deleted && status === "active" ? `<button type="button" class="btn-small" data-cashflow-admin-account-status="${escapeHtml(accountId)}" data-next-status="disabled">${escapeHtml(t(locale, "Disable account"))}</button>` : ""}
-                        ${!deleted && status === "disabled" ? `<button type="button" class="btn-small" data-cashflow-admin-account-status="${escapeHtml(accountId)}" data-next-status="active">${escapeHtml(t(locale, "Enable account"))}</button>` : ""}
-                        ${!deleted && admin ? `<button type="button" class="btn-small" data-cashflow-admin-account-admin="${escapeHtml(accountId)}" data-enabled="0">${escapeHtml(t(locale, "Revoke admin"))}</button>` : ""}
-                        ${!deleted && !admin ? `<button type="button" class="btn-small" data-cashflow-admin-account-admin="${escapeHtml(accountId)}" data-enabled="1">${escapeHtml(t(locale, "Grant admin"))}</button>` : ""}
-                        ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-account-delete="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Delete account"))}</button>` : ""}
-                      </div>
-                    </td>
-                  </tr>
-                `;
-              }).join("")}
-            </tbody>
-          </table>
+        <div class="cashflow-admin-account-list">
+          ${accounts.map(account => {
+            const accountId = account.id || "";
+            const status = account.status || "active";
+            const admin = isSystemAdmin(account);
+            const deleted = status === "deleted";
+            const externalIdentity = (account.identities || []).find(identity => String(identity.provider_id || "").startsWith("external_")) || null;
+            return `
+              <article class="cashflow-admin-account-card" data-cashflow-admin-account-row="${escapeHtml(accountId)}">
+                <header class="cashflow-admin-account-card__header">
+                  <div>
+                    <strong>${escapeHtml(account.display_name || accountId)}</strong>
+                    <span>${escapeHtml(accountId)}</span>
+                  </div>
+                  <div class="cashflow-admin-account-card__badges">
+                    <span>${escapeHtml(renderStatus(locale, status))}</span>
+                    <span>${admin ? escapeHtml(t(locale, "System admin")) : escapeHtml(t(locale, "Budget member"))}</span>
+                  </div>
+                </header>
+
+                <div class="cashflow-admin-account-grid">
+                  <label>
+                    <span>${escapeHtml(t(locale, "Display name"))}</span>
+                    <input
+                      value="${escapeHtml(account.display_name || accountId)}"
+                      data-cashflow-admin-account-name="${escapeHtml(accountId)}"
+                      aria-label="${escapeHtml(`${t(locale, "Display name")}: ${account.display_name || accountId}`)}"
+                      ${deleted ? "disabled" : ""}
+                    >
+                  </label>
+                  <label>
+                    <span>${escapeHtml(t(locale, "Email"))}</span>
+                    <input
+                      value="${escapeHtml(account.email || "")}"
+                      data-cashflow-admin-account-email="${escapeHtml(accountId)}"
+                      aria-label="${escapeHtml(`${t(locale, "Email")}: ${account.email || accountId}`)}"
+                      ${deleted ? "disabled" : ""}
+                    >
+                  </label>
+                  <label>
+                    <span>${escapeHtml(t(locale, "External subject"))}</span>
+                    <input
+                      value="${escapeHtml(externalIdentity?.subject || "")}"
+                      data-cashflow-admin-external-subject="${escapeHtml(accountId)}"
+                      aria-label="${escapeHtml(`${t(locale, "External subject")}: ${externalIdentity?.subject || accountId}`)}"
+                      ${deleted ? "disabled" : ""}
+                    >
+                    <small>${escapeHtml(externalIdentity?.provider_id || t(locale, "No external identity"))}</small>
+                  </label>
+                  <div class="cashflow-admin-account-stat">
+                    <span>${escapeHtml(t(locale, "Internal password"))}</span>
+                    <strong>${account.hasPasswordCredential ? escapeHtml(t(locale, "Configured")) : escapeHtml(t(locale, "Not configured"))}</strong>
+                    <small data-cashflow-admin-password-token-output="${escapeHtml(accountId)}"></small>
+                  </div>
+                  <div class="cashflow-admin-account-stat">
+                    <span>${escapeHtml(t(locale, "Budgets"))}</span>
+                    <strong>${escapeHtml(String(account.ownedBudgetCount ?? 0))} / ${escapeHtml(String(account.membershipCount ?? 0))}</strong>
+                    <small>${escapeHtml(t(locale, "Owned / memberships"))}</small>
+                  </div>
+                  <div class="cashflow-admin-account-stat cashflow-admin-account-stat--sessions">
+                    <span>${escapeHtml(t(locale, "Active sessions"))}</span>
+                    ${renderAccountSessions(locale, account)}
+                  </div>
+                </div>
+
+                <div class="cashflow-row-actions cashflow-row-actions--wrap">
+                  ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-account-rename="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Save account"))}</button>` : ""}
+                  ${!deleted && !account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_setup">${escapeHtml(t(locale, "Create password setup token"))}</button>` : ""}
+                  ${!deleted && account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_reset">${escapeHtml(t(locale, "Create password reset token"))}</button>` : ""}
+                  ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-external-link="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Link external identity"))}</button>` : ""}
+                  ${!deleted && status === "active" ? `<button type="button" class="btn-small" data-cashflow-admin-account-status="${escapeHtml(accountId)}" data-next-status="disabled">${escapeHtml(t(locale, "Disable account"))}</button>` : ""}
+                  ${!deleted && status === "disabled" ? `<button type="button" class="btn-small" data-cashflow-admin-account-status="${escapeHtml(accountId)}" data-next-status="active">${escapeHtml(t(locale, "Enable account"))}</button>` : ""}
+                  ${!deleted && admin ? `<button type="button" class="btn-small" data-cashflow-admin-account-admin="${escapeHtml(accountId)}" data-enabled="0">${escapeHtml(t(locale, "Revoke admin"))}</button>` : ""}
+                  ${!deleted && !admin ? `<button type="button" class="btn-small" data-cashflow-admin-account-admin="${escapeHtml(accountId)}" data-enabled="1">${escapeHtml(t(locale, "Grant admin"))}</button>` : ""}
+                  ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-account-delete="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Delete account"))}</button>` : ""}
+                </div>
+              </article>
+            `;
+          }).join("")}
         </div>
       ` : `<p>${escapeHtml(t(locale, "No accounts yet"))}</p>`}
     </section>
@@ -271,10 +272,11 @@ function renderAdminAuthConfig(locale, authConfig = null) {
       <form class="cashflow-settings-grid" data-cashflow-admin-auth-form>
         <fieldset>
           <legend>${escapeHtml(t(locale, "Authentication modes"))}</legend>
-          <label>
+          <div class="cashflow-readonly-field">
             <span>${escapeHtml(t(locale, "Active authentication mode"))}</span>
-            <input value="${escapeHtml(t(locale, `auth_mode_${activeMode}`))}" readonly>
-          </label>
+            <strong>${escapeHtml(t(locale, `auth_mode_${activeMode}`))}</strong>
+            <small>${escapeHtml(t(locale, "The active mode is changed only by activating a tested draft."))}</small>
+          </div>
           <label>
             <span>${escapeHtml(t(locale, "Draft authentication mode"))}</span>
             <select name="draftMode">

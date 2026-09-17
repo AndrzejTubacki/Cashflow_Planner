@@ -53,7 +53,7 @@ async function createCashflowTestHarness(options = {}) {
   const events = [];
   const errors = [];
 
-  const cashflow = createCashflowModule({
+  const cashflow = await createCashflowModule({
     appVersion: "0.0.0-test",
     authProviderHook: options.authProviderHook || null,
     backupServiceHook: options.backupServiceHook || null,
@@ -61,6 +61,7 @@ async function createCashflowTestHarness(options = {}) {
     localeDir,
     getCurrentFxSnapshot: () => fxSnapshot,
     getFxSnapshotForDate: () => fxSnapshot,
+    lockService: options.lockService || null,
     fetchImpl: options.fetchImpl || fetch,
     portabilityMutationHook: options.portabilityMutationHook || null,
     recoverableMutationHook: options.recoverableMutationHook || null,

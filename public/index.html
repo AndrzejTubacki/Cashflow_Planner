@@ -12,9 +12,14 @@
   <div class="page-shell">
     <div class="page">
       <main class="page-content" id="cashflowRoot">
-        <div class="empty-state">
-          <h2>Cashflow</h2>
-          <p>Loading...</p>
+        <div class="empty-state app-loading" aria-live="polite">
+          <div class="app-loading__mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div class="app-loading__copy">
+            <h2>Cashflow</h2>
+            <p>Starting planner...</p>
+          </div>
         </div>
       </main>
     </div>

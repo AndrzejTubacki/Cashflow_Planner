@@ -1,3 +1,5 @@
+import { extractNtfyCredentialsFromUrl } from "./cashflow-notification-service.js";
+
 export function applyLedgerMigrations(db, {
   occurrenceKeyFromRow,
   beforeStep = () => {}
@@ -705,6 +707,80 @@ export function applyPlanningMigrations(db, {
       ]);
 
       db.pragma("user_version = 16");
+    }
+
+    if (currentVersion < 17) {
+      beforeStep(17, db);
+      if (tableExists("settings")) {
+        addColumnIfMissing(
+          "settings",
+          "notification_channel",
+          "notification_channel TEXT NOT NULL DEFAULT 'ntfy' CHECK (notification_channel IN ('ntfy', 'discord'))"
+        );
+        addColumnIfMissing("settings", "discord_webhook_url", "discord_webhook_url TEXT");
+        db.prepare(`
+          UPDATE settings
+          SET notification_channel = CASE
+                WHEN notification_channel IN ('ntfy', 'discord') THEN notification_channel
+                ELSE 'ntfy'
+              END
+          WHERE id = 1
+        `).run();
+      }
+      db.pragma("user_version = 17");
+    }
+
+    if (currentVersion < 18) {
+      beforeStep(18, db);
+      if (tableExists("settings")) {
+        addColumnIfMissing(
+          "settings",
+          "ledger_history_compaction_months",
+          "ledger_history_compaction_months INTEGER NOT NULL DEFAULT 0 CHECK (ledger_history_compaction_months BETWEEN 0 AND 600)"
+        );
+        db.prepare(`
+          UPDATE settings
+          SET ledger_history_compaction_months = CASE
+                WHEN ledger_history_compaction_months IS NULL THEN 0
+                WHEN ledger_history_compaction_months < 0 THEN 0
+                WHEN ledger_history_compaction_months > 600 THEN 600
+                ELSE CAST(ledger_history_compaction_months AS INTEGER)
+              END
+          WHERE id = 1
+        `).run();
+      }
+      db.pragma("user_version = 18");
+    }
+
+    if (currentVersion < 19) {
+      beforeStep(19, db);
+      if (tableExists("settings")) {
+        addColumnIfMissing("settings", "ntfy_auth_token", "ntfy_auth_token TEXT");
+
+        // Older configurations put an ntfy access token directly in the URL
+        // (e.g. https://:tk_xxx@ntfy.example.com/topic, ntfy's own documented
+        // shape for an access token). Node's fetch refuses to send requests
+        // whose URL has embedded credentials, so move that token into the
+        // new dedicated column and strip it from the URL, one time, for
+        // existing installs. `sendNtfyNotification` also re-parses ntfy_url
+        // on every send regardless, so a rarer Basic-auth-style URL
+        // (non-empty username) keeps working even though this migration
+        // leaves it untouched here.
+        const row = columns("settings").includes("ntfy_url")
+          ? db.prepare("SELECT ntfy_url, ntfy_auth_token FROM settings WHERE id = 1").get()
+          : null;
+        if (row?.ntfy_url) {
+          const extracted = extractNtfyCredentialsFromUrl(row.ntfy_url);
+          if (extracted.token) {
+            db.prepare(`
+              UPDATE settings
+              SET ntfy_url = ?, ntfy_auth_token = COALESCE(ntfy_auth_token, ?)
+              WHERE id = 1
+            `).run(extracted.cleanUrl, row.ntfy_auth_token || extracted.token);
+          }
+        }
+      }
+      db.pragma("user_version = 19");
     }
   })();
 

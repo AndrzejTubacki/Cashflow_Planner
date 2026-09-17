@@ -372,6 +372,22 @@ test("offline operator command grants an audited system administrator role", asy
     });
     assert.equal(result.status, 0, result.stderr);
 
+    const postgresModeResult = spawnSync(process.execPath, [
+      path.resolve(import.meta.dirname, "../../scripts/operator-admin.mjs"),
+      "--data-dir",
+      harness.dataDir,
+      "--account-id",
+      "recovery_target"
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CASHFLOW_DB_BACKEND: "postgres"
+      }
+    });
+    assert.notEqual(postgresModeResult.status, 0);
+    assert.match(postgresModeResult.stderr, /supports only the SQLite runtime backend/);
+
     const db = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
     try {
       assert.ok(db.prepare(`
@@ -541,6 +557,1300 @@ test("admin account routes preserve the last active system administrator", async
   } finally {
     await harness.cleanup();
   }
+});
+
+test("admin account async mutations can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const transactions = [];
+  const accounts = new Map([
+    ["admin_account", {
+      id: "admin_account",
+      email: "admin@example.com",
+      display_name: "Admin Account",
+      status: "active"
+    }],
+    ["target_account", {
+      id: "target_account",
+      email: "target@example.com",
+      display_name: "Target Account",
+      status: "active"
+    }]
+  ]);
+  const roles = new Map([
+    ["admin_account", new Set(["system_admin"])],
+    ["target_account", new Set()]
+  ]);
+  const sessions = new Map([
+    ["session_target", {
+      id: "session_target",
+      account_id: "target_account",
+      revoked: false
+    }]
+  ]);
+  const deleted = [];
+  const repo = {
+    accounts: {
+      require(id) {
+        const account = accounts.get(id);
+        if (!account) {
+          const error = new Error("Account not found");
+          error.status = 404;
+          throw error;
+        }
+        return { ...account };
+      },
+      markDeleted(id) {
+        accounts.get(id).status = "deleted";
+      },
+      updateDisplayName(id, displayName) {
+        accounts.get(id).display_name = displayName;
+      },
+      updateEmail(id, email) {
+        accounts.get(id).email = email;
+      },
+      updateStatus(id, status) {
+        accounts.get(id).status = status;
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    identities: {
+      countForAccount: () => 0,
+      deleteForAccount: accountId => deleted.push(["identities", accountId]),
+      listForAccount: () => []
+    },
+    invitations: {
+      revokePendingForTargetAccount: accountId => deleted.push(["invitations", accountId])
+    },
+    memberships: {
+      countForAccount: () => 0,
+      countOwnedForAccount: () => 0
+    },
+    passwordCredentials: {
+      deleteForAccount: accountId => deleted.push(["passwordCredentials", accountId]),
+      existsForAccount: () => false
+    },
+    passwordResetTokens: {
+      deleteForAccount: accountId => deleted.push(["passwordResetTokens", accountId])
+    },
+    roles: {
+      deleteSystemAdmin(accountId) {
+        roles.get(accountId)?.delete("system_admin");
+      },
+      insertSystemAdmin({ accountId }) {
+        if (!roles.has(accountId)) roles.set(accountId, new Set());
+        roles.get(accountId).add("system_admin");
+      },
+      listForAccount(accountId) {
+        return [...(roles.get(accountId) || new Set())].sort();
+      }
+    },
+    sessions: {
+      listActiveForAccount(accountId) {
+        return [...sessions.values()]
+          .filter(row => row.account_id === accountId && !row.revoked)
+          .map(row => ({ id: row.id }));
+      },
+      revoke(sessionId, accountId) {
+        const session = sessions.get(sessionId);
+        if (!session || session.account_id !== accountId || session.revoked) return 0;
+        session.revoked = true;
+        return 1;
+      },
+      revokeForAccount(accountId) {
+        for (const session of sessions.values()) {
+          if (session.account_id === accountId) session.revoked = true;
+        }
+      }
+    },
+    users: {
+      setDisplayName(id, displayName) {
+        accounts.get(id).legacy_display_name = displayName;
+      },
+      setPermissions(id, permissions) {
+        accounts.get(id).legacy_permissions = permissions;
+      }
+    }
+  };
+  const service = createCashflowGlobalService({
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const renamed = await service.updateAdminAccountAsync("admin_account", "target_account", {
+    displayName: "Target Renamed",
+    email: "target2@example.com"
+  });
+  assert.equal(renamed.display_name, "Target Renamed");
+  assert.equal(renamed.email, "target2@example.com");
+
+  const granted = await service.setAccountSystemAdminAsync("admin_account", "target_account", true);
+  assert.ok(granted.globalRoles.includes("system_admin"));
+
+  const afterSessionRevoke = await service.revokeAdminAccountSessionAsync(
+    "admin_account",
+    "target_account",
+    "session_target"
+  );
+  assert.equal(afterSessionRevoke.activeSessionCount, 0);
+
+  const revoked = await service.setAccountSystemAdminAsync("admin_account", "target_account", false);
+  assert.equal(revoked.globalRoles.includes("system_admin"), false);
+
+  const removed = await service.deleteAdminAccountAsync("admin_account", "target_account");
+  assert.equal(removed.status, "deleted");
+  assert.deepEqual(transactions, [
+    "transaction",
+    "transaction",
+    "transaction",
+    "transaction",
+    "transaction"
+  ]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "admin_account_update",
+    "admin_account_grant_system_admin",
+    "admin_account_session_revoke",
+    "admin_account_revoke_system_admin",
+    "admin_account_delete"
+  ]);
+  assert.deepEqual(deleted.map(row => row[0]).sort(), [
+    "identities",
+    "invitations",
+    "passwordCredentials",
+    "passwordResetTokens"
+  ]);
+});
+
+test("admin auth provider async mutations can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const providers = new Map();
+  const repo = {
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    authProviders: {
+      delete(id) {
+        providers.delete(id);
+      },
+      get(id) {
+        return providers.get(id) || null;
+      },
+      upsert({
+        clientId,
+        configJson,
+        displayName,
+        enabled,
+        id,
+        issuer,
+        kind,
+        secretRef
+      }) {
+        providers.set(id, {
+          id,
+          kind,
+          display_name: displayName,
+          enabled: enabled ? 1 : 0,
+          issuer,
+          client_id: clientId,
+          secret_ref: secretRef,
+          config_json: configJson,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z"
+        });
+      }
+    }
+  };
+  const transactions = [];
+  const service = createCashflowGlobalService({
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const provider = await service.upsertAdminAuthProviderAsync("admin_account", "github", {
+    authorizationEndpoint: "https://github.example.test/login/oauth/authorize",
+    clientId: "client-id",
+    displayName: "GitHub",
+    enabled: true,
+    kind: "github",
+    redirectUri: "https://cashflow.example.test/auth/github/callback",
+    secretRef: "env:GITHUB_CLIENT_SECRET",
+    tokenEndpoint: "https://github.example.test/login/oauth/access_token",
+    userInfoEndpoint: "https://github.example.test/user"
+  });
+  assert.equal(provider.id, "github");
+  assert.equal(provider.enabled, true);
+  assert.equal(provider.secretConfigured, false);
+
+  const deleted = await service.deleteAdminAuthProviderAsync("admin_account", "github");
+  assert.deepEqual(deleted, { deleted: true, providerId: "github" });
+  assert.equal(providers.has("github"), false);
+  assert.deepEqual(transactions, ["transaction", "transaction"]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "admin_auth_provider_upsert",
+    "admin_auth_provider_delete"
+  ]);
+});
+
+test("admin identity async mutations can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const transactions = [];
+  const accounts = new Map([
+    ["admin_account", {
+      id: "admin_account",
+      email: "admin@example.com",
+      display_name: "Admin Account",
+      status: "active"
+    }],
+    ["target_account", {
+      id: "target_account",
+      email: "target@example.com",
+      display_name: "Target Account",
+      status: "active"
+    }]
+  ]);
+  const providers = new Map([
+    ["github", {
+      id: "github",
+      kind: "github",
+      display_name: "GitHub",
+      enabled: 1,
+      issuer: "https://github.example.test",
+      client_id: "client-id",
+      secret_ref: "env:GITHUB_CLIENT_SECRET",
+      config_json: "{}",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-02T00:00:00Z"
+    }]
+  ]);
+  const identities = new Map();
+  const repo = {
+    accounts: {
+      require(id) {
+        const account = accounts.get(id);
+        if (!account) {
+          const error = new Error("Account not found");
+          error.status = 404;
+          throw error;
+        }
+        return { ...account };
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    authConfig: {
+      get() {
+        return {
+          active_mode: "none",
+          draft_mode: "external",
+          session_idle_minutes: 720,
+          session_absolute_minutes: 10080,
+          draft_config_json: JSON.stringify({
+            external: {
+              trustedIssuer: "https://auth.example.test"
+            }
+          }),
+          external_config_json: "{}",
+          bootstrap_completed_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z"
+        };
+      }
+    },
+    authProviders: {
+      get(id) {
+        return providers.get(id) || null;
+      }
+    },
+    identities: {
+      countForAccount(accountId) {
+        return [...identities.values()].filter(identity => identity.account_id === accountId).length;
+      },
+      findAccountByProviderSubject(providerId, subject) {
+        const identity = identities.get(`${providerId}:${subject}`);
+        return identity ? { account_id: identity.account_id } : null;
+      },
+      listForAccount(accountId) {
+        return [...identities.values()]
+          .filter(identity => identity.account_id === accountId)
+          .map(identity => ({
+            id: identity.id,
+            provider_id: identity.provider_id,
+            subject: identity.subject,
+            email: identity.email,
+            email_verified: identity.email_verified,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+            last_used_at: null
+          }));
+      },
+      upsert({
+        accountId,
+        email = null,
+        emailVerified = false,
+        id = `identity_${identities.size + 1}`,
+        profileJson = "{}",
+        providerId,
+        subject
+      }) {
+        identities.set(`${providerId}:${subject}`, {
+          id,
+          account_id: accountId,
+          provider_id: providerId,
+          subject,
+          email,
+          email_verified: emailVerified ? 1 : 0,
+          profile_json: profileJson
+        });
+      }
+    },
+    memberships: {
+      countForAccount: () => 0,
+      countOwnedForAccount: () => 0
+    },
+    passwordCredentials: {
+      existsForAccount: () => false
+    },
+    roles: {
+      listForAccount(accountId) {
+        return accountId === "admin_account" ? ["system_admin"] : [];
+      }
+    },
+    sessions: {
+      listActiveForAccount: () => []
+    }
+  };
+  const service = createCashflowGlobalService({
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const providerLinked = await service.setAdminProviderIdentityAsync("admin_account", "target_account", "github", {
+    email: "target@example.com",
+    subject: "github-subject"
+  });
+  assert.equal(providerLinked.identityCount, 1);
+  assert.equal(providerLinked.identities[0].provider_id, "github");
+
+  const externalLinked = await service.setAdminExternalIdentityAsync("admin_account", "target_account", {
+    email: "target@example.com",
+    subject: "external-subject"
+  });
+  assert.equal(externalLinked.identityCount, 2);
+  assert.ok(externalLinked.identities.some(identity => identity.provider_id.startsWith("external_")));
+  assert.deepEqual(transactions, ["transaction", "transaction"]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "admin_provider_identity_link",
+    "admin_external_identity_link"
+  ]);
+});
+
+test("internal password setup async mutations can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const transactions = [];
+  const tokens = new Map();
+  const credentials = new Map();
+  const failedAttempts = new Map();
+  const sessions = new Map([
+    ["target_session", {
+      id: "target_session",
+      account_id: "target_account",
+      revoked: false
+    }]
+  ]);
+  const accounts = new Map([
+    ["admin_account", {
+      id: "admin_account",
+      email: "admin@example.com",
+      display_name: "Admin Account",
+      status: "active"
+    }],
+    ["target_account", {
+      id: "target_account",
+      email: "target@example.com",
+      display_name: "Target Account",
+      status: "active"
+    }]
+  ]);
+  const repo = {
+    accounts: {
+      getStatus(id) {
+        const account = accounts.get(id);
+        return account ? { status: account.status } : null;
+      },
+      emailExists(email, { excludeId = null } = {}) {
+        return [...accounts.values()].some(account => account.email === email && account.id !== excludeId);
+      },
+      require(id) {
+        const account = accounts.get(id);
+        if (!account) {
+          const error = new Error("Account not found");
+          error.status = 404;
+          throw error;
+        }
+        return { ...account };
+      },
+      updateEmail(id, email) {
+        accounts.get(id).email = email;
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    authConfig: {
+      getActiveModeAndDraftConfig() {
+        return {
+          active_mode: "internal",
+          draft_config_json: JSON.stringify({
+            internal: {
+              allowPasswordLogin: true
+            }
+          })
+        };
+      }
+    },
+    identities: {
+      countForAccount: () => 0,
+      listForAccount: () => []
+    },
+    memberships: {
+      countForAccount: () => 0,
+      countOwnedForAccount: () => 0
+    },
+    passwordCredentials: {
+      existsForAccount(accountId) {
+        return credentials.has(accountId);
+      },
+      getLoginByEmail(email) {
+        const account = [...accounts.values()].find(row => row.email === email);
+        if (!account || !credentials.has(account.id)) return null;
+        return {
+          account_id: account.id,
+          status: account.status,
+          password_hash: credentials.get(account.id),
+          failed_attempts: failedAttempts.get(account.id) || 0,
+          locked_until: null
+        };
+      },
+      recordFailedLogin({ accountId, attempts }) {
+        failedAttempts.set(accountId, attempts);
+      },
+      recordSuccessfulLogin(accountId) {
+        failedAttempts.set(accountId, 0);
+      },
+      upsert({ accountId, passwordHash }) {
+        credentials.set(accountId, passwordHash);
+        failedAttempts.set(accountId, 0);
+      }
+    },
+    passwordResetTokens: {
+      getPendingWithAccountByHash(tokenHash) {
+        const token = tokens.get(tokenHash);
+        if (!token || token.status !== "pending") return null;
+        const account = accounts.get(token.account_id);
+        return {
+          ...token,
+          email: account?.email || null,
+          display_name: account?.display_name || null,
+          account_status: account?.status || "deleted"
+        };
+      },
+      insert({
+        accountId,
+        createdByAccountId = null,
+        expiresAt,
+        id = `password_token_${tokens.size + 1}`,
+        purpose,
+        tokenHash
+      }) {
+        tokens.set(tokenHash, {
+          id,
+          account_id: accountId,
+          token_hash: tokenHash,
+          purpose,
+          status: "pending",
+          expires_at: expiresAt,
+          created_by_account_id: createdByAccountId
+        });
+      },
+      markConsumed(id) {
+        for (const token of tokens.values()) {
+          if (token.id === id) token.status = "consumed";
+        }
+      },
+      markExpired(id) {
+        for (const token of tokens.values()) {
+          if (token.id === id) token.status = "expired";
+        }
+      },
+      revokePendingForAccount(accountId) {
+        for (const token of tokens.values()) {
+          if (token.account_id === accountId && token.status === "pending") {
+            token.status = "revoked";
+          }
+        }
+      }
+    },
+    roles: {
+      listForAccount(accountId) {
+        return accountId === "admin_account" ? ["system_admin"] : [];
+      }
+    },
+    sessions: {
+      listActiveForAccount(accountId) {
+        return [...sessions.values()]
+          .filter(session => session.account_id === accountId && !session.revoked)
+          .map(session => ({ id: session.id }));
+      },
+      revokeForAccount(accountId) {
+        for (const session of sessions.values()) {
+          if (session.account_id === accountId) session.revoked = true;
+        }
+      }
+    }
+  };
+  const service = createCashflowGlobalService({
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const issued = await service.createAdminPasswordResetToken("admin_account", "target_account", {
+    purpose: "password_setup"
+  });
+  assert.equal(issued.account.email, "target@example.com");
+  assert.equal(issued.purpose, "password_setup");
+  assert.ok(issued.token);
+  assert.equal(tokens.size, 1);
+
+  const completed = await service.completeInternalPasswordSetup({
+    password: "Correct horse battery staple 123!",
+    token: issued.token
+  });
+  assert.equal(completed.ok, true);
+  assert.equal(completed.account.hasPasswordCredential, true);
+  assert.equal(completed.account.activeSessionCount, 0);
+  assert.equal([...tokens.values()][0].status, "consumed");
+  assert.ok(credentials.get("target_account")?.startsWith("$argon2id$"));
+
+  const login = await service.authenticateInternalLogin({
+    email: "target@example.com",
+    password: "Correct horse battery staple 123!"
+  });
+  assert.deepEqual(login, { accountId: "target_account" });
+  assert.equal(failedAttempts.get("target_account"), 0);
+  assert.deepEqual(transactions, ["transaction", "transaction", "transaction"]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "admin_password_setup_token_create",
+    "password_setup_complete",
+    "internal_login"
+  ]);
+});
+
+test("internal invitation registration can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const transactions = [];
+  const accounts = new Map();
+  const credentials = new Map();
+  const memberships = new Map();
+  const invitation = {
+    id: "invite_1",
+    budget_id: "shared_budget",
+    target_account_id: null,
+    target_email: "invitee@example.com",
+    role: "editor",
+    status: "pending",
+    invited_by_account_id: "owner_account",
+    expires_at: "2026-12-01T00:00:00.000Z"
+  };
+  const repo = {
+    accounts: {
+      emailExists(email) {
+        return [...accounts.values()].some(account => account.email === email);
+      },
+      insert({ id, email, displayName }) {
+        accounts.set(id, {
+          id,
+          email,
+          display_name: displayName,
+          status: "active"
+        });
+      },
+      require(id) {
+        const account = accounts.get(id);
+        if (!account) {
+          const error = new Error("Account not found");
+          error.status = 404;
+          throw error;
+        }
+        return { ...account };
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    authConfig: {
+      getActiveMode() {
+        return { active_mode: "internal" };
+      }
+    },
+    identities: {
+      countForAccount: () => 0,
+      listForAccount: () => []
+    },
+    invitations: {
+      acceptForAccount({ accountId, invitationId, role }) {
+        if (invitationId !== invitation.id || invitation.status !== "pending" || role !== invitation.role) return 0;
+        invitation.status = "accepted";
+        invitation.target_account_id = accountId;
+        return 1;
+      },
+      getByTokenHash() {
+        return { ...invitation };
+      }
+    },
+    memberships: {
+      countForAccount(accountId) {
+        return [...memberships.values()].filter(row => row.account_id === accountId).length;
+      },
+      countOwnedForAccount: () => 0,
+      get({ accountId, budgetId }) {
+        return memberships.get(`${budgetId}:${accountId}`) || null;
+      },
+      insert({
+        accountId,
+        budgetId,
+        invitedByAccountId = null,
+        role
+      }) {
+        memberships.set(`${budgetId}:${accountId}`, {
+          account_id: accountId,
+          budget_id: budgetId,
+          invited_by_account_id: invitedByAccountId,
+          role
+        });
+      }
+    },
+    passwordCredentials: {
+      existsForAccount(accountId) {
+        return credentials.has(accountId);
+      },
+      insert({ accountId, passwordHash }) {
+        credentials.set(accountId, passwordHash);
+      }
+    },
+    roles: {
+      listForAccount: () => []
+    },
+    sessions: {
+      listActiveForAccount: () => []
+    }
+  };
+  const service = createCashflowGlobalService({
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const registered = await service.registerInternalAccountWithInvitation({
+    displayName: "Invitee",
+    email: "invitee@example.com",
+    password: "Correct horse battery staple 123!",
+    token: "raw-invitation-token"
+  });
+
+  assert.match(registered.account.id, /^account_/);
+  assert.equal(registered.account.email, "invitee@example.com");
+  assert.equal(registered.account.hasPasswordCredential, true);
+  assert.equal(registered.budgetId, "shared_budget");
+  assert.equal(registered.membership.role, "editor");
+  assert.equal(invitation.status, "accepted");
+  assert.deepEqual(transactions, ["transaction"]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "internal_invitation_register",
+    "budget_invitation_accept"
+  ]);
+});
+
+test("trusted external login can use an external global-store transaction", async () => {
+  const previousSecret = process.env.CASHFLOW_TEST_EXTERNAL_SECRET;
+  process.env.CASHFLOW_TEST_EXTERNAL_SECRET = "test-external-secret";
+  try {
+    const auditEvents = [];
+    const transactions = [];
+    const accounts = new Map();
+    const identities = new Map();
+    const memberships = new Map();
+    const roles = new Map();
+    const invitation = {
+      id: "invite_external",
+      budget_id: "shared_budget",
+      target_account_id: null,
+      target_email: "external@example.com",
+      role: "manager",
+      status: "pending",
+      invited_by_account_id: "owner_account",
+      expires_at: "2026-12-01T00:00:00.000Z"
+    };
+    const repo = {
+      accounts: {
+        emailExists(email) {
+          return [...accounts.values()].some(account => account.email === email);
+        },
+        insert({ id, email, displayName }) {
+          accounts.set(id, {
+            id,
+            email,
+            display_name: displayName,
+            status: "active"
+          });
+        }
+      },
+      audit: {
+        insertSecurityEvent(event) {
+          auditEvents.push(event);
+        }
+      },
+      authConfig: {
+        get() {
+          return {
+            active_mode: "external",
+            draft_mode: "external",
+            session_idle_minutes: 720,
+            session_absolute_minutes: 10080,
+            external_config_json: JSON.stringify({
+              external: {
+                adminGroups: ["admins"],
+                allowedDomains: ["example.com"],
+                assertionSecretEnv: "CASHFLOW_TEST_EXTERNAL_SECRET",
+                assertionSecretHeader: "x-cashflow-auth-secret",
+                displayNameHeader: "x-auth-request-name",
+                emailHeader: "x-auth-request-email",
+                groupsHeader: "x-auth-request-groups",
+                provisioningMode: "allow_invited",
+                subjectHeader: "x-auth-request-user",
+                trustedIssuer: "https://auth.example.test"
+              }
+            }),
+            draft_config_json: "{}",
+            bootstrap_completed_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z"
+          };
+        }
+      },
+      identities: {
+        findWithAccountByProviderSubject(providerId, subject) {
+          const identity = identities.get(`${providerId}:${subject}`);
+          return identity ? { account_id: identity.account_id, status: "active" } : null;
+        },
+        updateProviderLogin({
+          email,
+          profileJson,
+          providerId,
+          subject
+        }) {
+          const identity = identities.get(`${providerId}:${subject}`);
+          if (identity) {
+            identity.email = email;
+            identity.profile_json = profileJson;
+            identity.last_used_at = "now";
+          }
+        },
+        upsert({
+          accountId,
+          email,
+          emailVerified,
+          id = `identity_${identities.size + 1}`,
+          providerId,
+          profileJson,
+          subject
+        }) {
+          identities.set(`${providerId}:${subject}`, {
+            id,
+            account_id: accountId,
+            email,
+            email_verified: emailVerified ? 1 : 0,
+            profile_json: profileJson,
+            provider_id: providerId,
+            subject
+          });
+        }
+      },
+      invitations: {
+        acceptForAccount({ accountId, invitationId, role }) {
+          if (invitationId !== invitation.id || invitation.status !== "pending" || role !== invitation.role) return 0;
+          invitation.status = "accepted";
+          invitation.target_account_id = accountId;
+          return 1;
+        },
+        findPendingForEmail(email) {
+          return invitation.status === "pending" && invitation.target_email === email ? { ...invitation } : null;
+        }
+      },
+      memberships: {
+        insert({
+          accountId,
+          budgetId,
+          invitedByAccountId = null,
+          role
+        }) {
+          memberships.set(`${budgetId}:${accountId}`, {
+            account_id: accountId,
+            budget_id: budgetId,
+            invited_by_account_id: invitedByAccountId,
+            role
+          });
+        }
+      },
+      roles: {
+        insertSystemAdmin({ accountId }) {
+          if (!roles.has(accountId)) roles.set(accountId, new Set());
+          roles.get(accountId).add("system_admin");
+        }
+      }
+    };
+    const service = createCashflowGlobalService({
+      cashflowUserStorageExists: () => true,
+      globalStore: {
+        backend: "postgres",
+        transaction: async fn => {
+          transactions.push("transaction");
+          return await fn(repo);
+        },
+        withRepository: async fn => await fn(repo)
+      },
+      listCashflowUserIds: () => [],
+      openGlobalDb: () => {
+        throw new Error("sync global db should not be used");
+      },
+      openPlanningDb: () => {
+        throw new Error("not needed");
+      }
+    });
+
+    const authenticated = await service.authenticateExternalLogin({
+      "x-auth-request-email": "external@example.com",
+      "x-auth-request-groups": "users,admins",
+      "x-auth-request-name": "External User",
+      "x-auth-request-user": "external-subject",
+      "x-cashflow-auth-secret": "test-external-secret"
+    });
+
+    assert.match(authenticated.accountId, /^account_/);
+    assert.equal(accounts.get(authenticated.accountId).display_name, "External User");
+    assert.equal(invitation.status, "accepted");
+    assert.equal(memberships.get(`shared_budget:${authenticated.accountId}`).role, "manager");
+    assert.ok(roles.get(authenticated.accountId).has("system_admin"));
+    assert.equal(identities.size, 1);
+    assert.deepEqual(transactions, ["transaction"]);
+    assert.deepEqual(auditEvents.map(event => event.action), [
+      "external_account_provision",
+      "external_login"
+    ]);
+  } finally {
+    if (previousSecret === undefined) {
+      delete process.env.CASHFLOW_TEST_EXTERNAL_SECRET;
+    } else {
+      process.env.CASHFLOW_TEST_EXTERNAL_SECRET = previousSecret;
+    }
+  }
+});
+
+test("provider login and link startup can use an external global-store transaction", async () => {
+  const transactions = [];
+  const states = [];
+  const repo = {
+    accounts: {
+      require(id) {
+        return {
+          id,
+          email: "admin@example.com",
+          display_name: "Admin Account",
+          status: "active"
+        };
+      }
+    },
+    authConfig: {
+      getActiveMode() {
+        return { active_mode: "internal" };
+      }
+    },
+    authProviders: {
+      get(id) {
+        if (id !== "github") return null;
+        return {
+          id: "github",
+          kind: "github",
+          display_name: "GitHub",
+          enabled: 1,
+          issuer: "https://github.example.test",
+          client_id: "client-id",
+          secret_ref: "",
+          config_json: JSON.stringify({
+            authorizationEndpoint: "https://github.example.test/login/oauth/authorize",
+            redirectUri: "https://cashflow.example.test/auth/github/callback",
+            tokenEndpoint: "https://github.example.test/login/oauth/access_token",
+            userInfoEndpoint: "https://github.example.test/user"
+          }),
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-02T00:00:00Z"
+        };
+      }
+    },
+    oauthStates: {
+      insert(state) {
+        states.push(state);
+        return `oauth_state_${states.length}`;
+      }
+    }
+  };
+  const service = createCashflowGlobalService({
+    authProviderHook: async ({ action, state }) => {
+      if (action !== "authorization_url") return null;
+      return {
+        authorizationUrl: `https://provider.example.test/authorize?state=${state}`
+      };
+    },
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const login = await service.startAuthProviderLogin("github");
+  assert.match(login.authorizationUrl, /^https:\/\/provider\.example\.test\/authorize\?state=/);
+  assert.equal(states[0].purpose, "login");
+  assert.equal(states[0].providerId, "github");
+
+  const link = await service.startAuthProviderLink("admin_account", "github");
+  assert.match(link.authorizationUrl, /^https:\/\/provider\.example\.test\/authorize\?state=/);
+  assert.equal(states[1].purpose, "link");
+  assert.equal(states[1].accountId, "admin_account");
+  assert.deepEqual(transactions, ["transaction", "transaction"]);
+});
+
+test("provider callback completion can use external global-store transactions", async () => {
+  const auditEvents = [];
+  const identities = new Map();
+  const transactions = [];
+  const stateRow = {
+    id: "oauth_state_1",
+    account_id: "admin_account",
+    code_verifier: "verifier",
+    expires_at: "2026-12-01T00:00:00.000Z",
+    nonce: "nonce",
+    provider_id: "github",
+    purpose: "link",
+    redirect_uri: "https://cashflow.example.test/auth/github/callback",
+    state_hash: "hash",
+    status: "pending"
+  };
+  const providerRow = {
+    id: "github",
+    kind: "github",
+    display_name: "GitHub",
+    enabled: 1,
+    issuer: "https://github.example.test",
+    client_id: "client-id",
+    secret_ref: "",
+    config_json: JSON.stringify({
+      authorizationEndpoint: "https://github.example.test/login/oauth/authorize",
+      redirectUri: "https://cashflow.example.test/auth/github/callback",
+      tokenEndpoint: "https://github.example.test/login/oauth/access_token",
+      userInfoEndpoint: "https://github.example.test/user"
+    }),
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z"
+  };
+  const repo = {
+    accounts: {
+      require(id) {
+        return {
+          id,
+          email: "admin@example.com",
+          display_name: "Admin Account",
+          status: "active"
+        };
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    authProviders: {
+      get(id) {
+        return id === "github" ? providerRow : null;
+      }
+    },
+    identities: {
+      findWithAccountByProviderSubject(providerId, subject) {
+        const identity = identities.get(`${providerId}:${subject}`);
+        return identity ? { account_id: identity.account_id, status: "active" } : null;
+      },
+      updateProviderLogin() {
+        throw new Error("login path should not be used");
+      },
+      upsert({
+        accountId,
+        email,
+        emailVerified,
+        providerId,
+        profileJson,
+        subject
+      }) {
+        identities.set(`${providerId}:${subject}`, {
+          account_id: accountId,
+          email,
+          email_verified: emailVerified ? 1 : 0,
+          profile_json: profileJson,
+          provider_id: providerId,
+          subject
+        });
+      }
+    },
+    oauthStates: {
+      get(id) {
+        return id === stateRow.id ? { ...stateRow } : null;
+      },
+      getByHashAndProvider({ providerId }) {
+        return providerId === "github" ? { ...stateRow } : null;
+      },
+      markConsumed(id) {
+        if (id === stateRow.id) stateRow.status = "consumed";
+      },
+      markExpired(id) {
+        if (id === stateRow.id) stateRow.status = "expired";
+      }
+    }
+  };
+  const service = createCashflowGlobalService({
+    authProviderHook: async ({ action }) => {
+      if (action !== "callback") return null;
+      return {
+        profile: {
+          email: "admin@example.com",
+          email_verified: true,
+          name: "Admin Account",
+          sub: "provider-subject"
+        }
+      };
+    },
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const completed = await service.completeAuthProviderCallback(
+    "github",
+    "https://cashflow.example.test/auth/github/callback?state=raw-state"
+  );
+  assert.deepEqual(completed, {
+    accountId: "admin_account",
+    linked: true
+  });
+  assert.equal(stateRow.status, "consumed");
+  assert.equal(identities.get("github:provider-subject").account_id, "admin_account");
+  assert.deepEqual(transactions, ["transaction", "transaction"]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "internal_provider_identity_link"
+  ]);
+});
+
+test("admin auth draft async update and activation can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const transactions = [];
+  let sessionsRevoked = 0;
+  const authConfig = {
+    active_mode: "none",
+    draft_mode: "none",
+    session_idle_minutes: 720,
+    session_absolute_minutes: 10080,
+    draft_config_json: "{}",
+    external_config_json: "{}",
+    bootstrap_completed_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z"
+  };
+  const repo = {
+    accounts: {
+      countActiveExternalSystemAdmins: () => 0,
+      countActiveInternalSystemAdmins: () => 1,
+      countActiveSystemAdmins: () => 1
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    authConfig: {
+      activateDraft() {
+        authConfig.active_mode = authConfig.draft_mode;
+        authConfig.external_config_json = authConfig.draft_config_json;
+      },
+      get() {
+        return { ...authConfig };
+      },
+      updateDraft({
+        draftConfigJson,
+        draftMode,
+        sessionAbsoluteMinutes,
+        sessionIdleMinutes
+      }) {
+        authConfig.draft_mode = draftMode;
+        authConfig.draft_config_json = draftConfigJson;
+        authConfig.session_absolute_minutes = sessionAbsoluteMinutes;
+        authConfig.session_idle_minutes = sessionIdleMinutes;
+      }
+    },
+    sessions: {
+      revokeAll() {
+        sessionsRevoked += 1;
+      }
+    }
+  };
+  const service = createCashflowGlobalService({
+    cashflowUserStorageExists: () => true,
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactions.push("transaction");
+        return await fn(repo);
+      },
+      withRepository: async fn => await fn(repo)
+    },
+    listCashflowUserIds: () => [],
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    },
+    openPlanningDb: () => {
+      throw new Error("not needed");
+    }
+  });
+
+  const draft = await service.updateAdminAuthDraftAsync("admin_account", {
+    draftMode: "internal",
+    sessionIdleMinutes: 30,
+    sessionAbsoluteMinutes: 60
+  });
+  assert.equal(draft.draftMode, "internal");
+  assert.equal(draft.sessionIdleMinutes, 30);
+
+  const draftTest = await service.testAdminAuthDraftAsync("admin_account");
+  assert.equal(draftTest.ok, true);
+  assert.equal(draftTest.activatable, true);
+
+  const activated = await service.activateAdminAuthDraftAsync("admin_account");
+  assert.equal(activated.activeMode, "internal");
+  assert.equal(sessionsRevoked, 1);
+  assert.deepEqual(transactions, ["transaction", "transaction", "transaction"]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "admin_auth_draft_update",
+    "admin_auth_draft_test",
+    "admin_auth_activate"
+  ]);
 });
 
 test("admin auth configuration is staged, validated, audited, and safe to activate", async () => withHarness(async harness => {

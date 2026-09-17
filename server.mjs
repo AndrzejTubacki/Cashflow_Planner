@@ -4,6 +4,14 @@ import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { DEFAULT_TIMEZONE } from "./src/server/cashflow-constants.js";
 import { normalizeTimezone } from "./src/server/cashflow-date-utils.js";
+import {
+  assertCashflowDatabaseUrlConfigured,
+  assertCashflowDbBackendSupported,
+  resolveCashflowDbConfig
+} from "./src/server/cashflow-db-config.js";
+import {
+  createCashflowRuntimeLockService
+} from "./src/server/cashflow-runtime-lock-service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +27,7 @@ const logTimezone = normalizeTimezone(process.env.CASHFLOW_LOG_TIMEZONE || DEFAU
 const jsonLimit = process.env.CASHFLOW_JSON_LIMIT || "10mb";
 const mirrorLogsToStdout = enabledByEnv(process.env.CASHFLOW_MIRROR_LOGS_TO_STDOUT);
 const readyzCheckDefaultBudget = enabledByEnv(process.env.CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET);
+const databaseConfig = resolveCashflowDbConfig(process.env);
 const publicDir = path.join(__dirname, "public");
 const localeDir = path.join(publicDir, "app", "cashflow", "locales");
 const startedAt = new Date();
@@ -122,6 +131,18 @@ function appendApiLogLine(line) {
 
 logServerEvent("server_entry", { port, dataDir, logsDir, publicDir });
 
+try {
+  assertCashflowDbBackendSupported(databaseConfig);
+  assertCashflowDatabaseUrlConfigured(databaseConfig);
+} catch (error) {
+  logError("cashflow_database_backend_unsupported", {
+    backend: databaseConfig.backend,
+    databaseUrlConfigured: databaseConfig.databaseUrlConfigured,
+    error: error.message
+  });
+  throw error;
+}
+
 let express;
 let helmet;
 let rateLimit;
@@ -175,16 +196,34 @@ try {
   throw error;
 }
 
-const cashflow = createCashflowModule({
-  appVersion,
-  dataDir,
-  localeDir,
-  getCurrentFxSnapshot: () => null,
-  getFxSnapshotForDate: null,
+const runtimeLockRuntime = await createCashflowRuntimeLockService({
+  env: process.env,
   logError,
-  logServerEvent,
-  appendApiLogLine
+  logServerEvent
 });
+
+let cashflow;
+try {
+  cashflow = await createCashflowModule({
+    appVersion,
+    dataDir,
+    databaseConfig,
+    localeDir,
+    getCurrentFxSnapshot: () => null,
+    getFxSnapshotForDate: null,
+    lockService: runtimeLockRuntime.lockService,
+    logError,
+    logServerEvent,
+    appendApiLogLine
+  });
+} catch (error) {
+  logError("cashflow_module_init_failed", {
+    backend: databaseConfig.backend,
+    databaseUrlConfigured: databaseConfig.databaseUrlConfigured,
+    error: error.message
+  });
+  throw error;
+}
 
 // Register every /api route supplied by the domain module.
 cashflow.registerRoutes(app);
@@ -203,13 +242,13 @@ function checkDataDirWritable() {
   fs.rmSync(tempPath, { force: true });
 }
 
-app.get("/readyz", (req, res) => {
+app.get("/readyz", async (req, res) => {
   // Cheap readiness check for any process manager; this is intentionally not a full data integrity scan.
   const checks = [];
 
-  function runCheck(name, fn) {
+  async function runCheck(name, fn) {
     try {
-      const details = fn();
+      const details = await fn();
       checks.push({ name, ok: true, ...(details && typeof details === "object" ? { details } : {}) });
     } catch (error) {
       checks.push({
@@ -220,20 +259,20 @@ app.get("/readyz", (req, res) => {
     }
   }
 
-  runCheck("app_initialized", () => {
+  await runCheck("app_initialized", () => {
     if (!cashflow || typeof cashflow.readinessCheck !== "function") {
       throw new Error("Cashflow module is not initialized");
     }
   });
-  runCheck("data_dir_exists", () => {
+  await runCheck("data_dir_exists", () => {
     if (!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory()) {
       throw new Error("DATA_DIR does not exist or is not a directory");
     }
   });
-  runCheck("data_dir_writable", () => {
+  await runCheck("data_dir_writable", () => {
     checkDataDirWritable();
   });
-  runCheck("global_metadata", () => cashflow.readinessCheck({
+  await runCheck("global_metadata", () => cashflow.readinessCheck({
     checkDefaultBudget: readyzCheckDefaultBudget
   }));
 
@@ -251,6 +290,7 @@ app.get("/api/system", (req, res) => {
     ok: true,
     app: "cashflow",
     version: appVersion,
+    databaseBackend: databaseConfig.backend,
     pid: process.pid,
     uptimeSeconds: Math.round(process.uptime()),
     startedAt: startedAt.toISOString(),
@@ -296,6 +336,7 @@ const server = app.listen(port, "0.0.0.0", () => {
     port,
     dataDir,
     logsDir,
+    databaseBackend: databaseConfig.backend,
     publicDir
   });
   console.log(`Cashflow listening on ${port}`);
@@ -331,6 +372,7 @@ async function shutdown(signal) {
 
   try {
     await closeServer();
+    await runtimeLockRuntime.close();
     clearTimeout(forceExitTimer);
     logServerEvent("server_shutdown_complete", { signal });
     process.exit(0);

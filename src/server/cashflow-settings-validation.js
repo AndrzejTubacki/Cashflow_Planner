@@ -21,7 +21,10 @@ export const OPERATIONAL_SETTINGS_COLUMNS = new Set([
   "auto_backup_enabled",
   "backup_interval_minutes",
   "backup_retention_count",
+  "notification_channel",
   "ntfy_url",
+  "ntfy_auth_token",
+  "discord_webhook_url",
   "notification_delivery_time",
   "notify_goal_impossible",
   "notify_necessary_underfunded",
@@ -48,6 +51,7 @@ export const USER_SETTINGS_UPDATE_KEYS = new Set([
   "holiday_country",
   "minimum_reserve_enabled",
   "minimum_reserve_amount",
+  "ledger_history_compaction_months",
   "budget_period_income_id",
   "fx_buffer_percent",
   "fx_provider",
@@ -80,6 +84,7 @@ const PRIORITY_FIELDS = new Set([
 ]);
 
 const PRIORITIES = new Set(["min", "low", "default", "high", "urgent"]);
+const NOTIFICATION_CHANNELS = new Set(["ntfy", "discord"]);
 const TIME_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
 function requireTimezone(value, field = "timezone") {
@@ -220,18 +225,37 @@ function requireBackupLocation(value) {
   return resolved;
 }
 
-function requireNtfyUrl(value) {
+function requireHttpUrl(value, field, example) {
   if (value === null || value === undefined || value === "") return null;
 
-  const ntfyUrl = String(value).trim();
+  const url = String(value).trim();
   try {
-    const parsed = new URL(ntfyUrl);
+    const parsed = new URL(url);
     if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported protocol");
   } catch {
-    validationError("ntfy_url", "must_be_http_url", "ntfy_url must be a full http(s) URL, for example https://ntfy.example.com/topic");
+    validationError(field, "must_be_http_url", `${field} must be a full http(s) URL, for example ${example}`);
   }
 
-  return ntfyUrl;
+  return url;
+}
+
+function requireNtfyUrl(value) {
+  return requireHttpUrl(value, "ntfy_url", "https://ntfy.example.com/topic");
+}
+
+function requireDiscordWebhookUrl(value) {
+  return requireHttpUrl(value, "discord_webhook_url", "https://discord.com/api/webhooks/...");
+}
+
+function requireNtfyAuthToken(value) {
+  if (value === null || value === undefined || value === "") return null;
+
+  const token = String(value).trim();
+  if (token.length > 500) {
+    validationError("ntfy_auth_token", "too_long", "ntfy_auth_token must be 500 characters or fewer");
+  }
+
+  return token;
 }
 
 export function validateAndNormalizeSettings(values = {}, options = {}) {
@@ -274,6 +298,13 @@ export function validateAndNormalizeSettings(values = {}, options = {}) {
   if (has("minimum_reserve_amount")) {
     next.minimum_reserve_amount = requireMoneyAmount(next.minimum_reserve_amount, "minimum_reserve_amount", { min: 0 });
   }
+  if (has("ledger_history_compaction_months")) {
+    next.ledger_history_compaction_months = requireNumber(
+      next.ledger_history_compaction_months,
+      "ledger_history_compaction_months",
+      { min: 0, max: 600, integer: true }
+    );
+  }
   if (has("fx_buffer_percent")) {
     next.fx_buffer_percent = requireNumber(next.fx_buffer_percent, "fx_buffer_percent", { min: 0, max: 100 });
   }
@@ -307,7 +338,16 @@ export function validateAndNormalizeSettings(values = {}, options = {}) {
   }
 
   if (has("backup_location")) next.backup_location = requireBackupLocation(next.backup_location);
+  if (has("notification_channel")) {
+    const channel = String(next.notification_channel || "").trim().toLowerCase();
+    if (!NOTIFICATION_CHANNELS.has(channel)) {
+      validationError("notification_channel", "unsupported_notification_channel", "notification_channel must be ntfy or discord");
+    }
+    next.notification_channel = channel;
+  }
   if (has("ntfy_url")) next.ntfy_url = requireNtfyUrl(next.ntfy_url);
+  if (has("ntfy_auth_token")) next.ntfy_auth_token = requireNtfyAuthToken(next.ntfy_auth_token);
+  if (has("discord_webhook_url")) next.discord_webhook_url = requireDiscordWebhookUrl(next.discord_webhook_url);
 
   if (has("notification_delivery_time")) {
     const time = String(next.notification_delivery_time || "").trim();

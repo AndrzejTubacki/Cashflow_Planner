@@ -1,13 +1,12 @@
-import Database from "better-sqlite3";
 import argon2 from "argon2";
 import crypto from "crypto";
 import fs from "fs";
 import * as oidcClient from "openid-client";
 import path from "path";
 import { capabilitiesFor, CAPABILITIES } from "./cashflow-authorization.js";
-import { createCashflowGlobalMigrationService } from "./cashflow-global-migration-recovery.js";
+import { createCashflowGlobalDbService } from "./cashflow-global-db-service.js";
+import { createSqliteGlobalRepository } from "./cashflow-global-repository.js";
 import {
-  ensureLegacyBudget,
   LEGACY_ADMIN_ACCOUNT_ID
 } from "./cashflow-global-schema.js";
 import {
@@ -94,13 +93,6 @@ const PROVIDER_PRESETS = {
     subjectField: "sub"
   }
 };
-
-function initPragmas(db) {
-  db.pragma("foreign_keys = ON");
-  db.pragma("journal_mode = WAL");
-  db.pragma("synchronous = NORMAL");
-  db.pragma("busy_timeout = 5000");
-}
 
 function normalizePermissions(value) {
   const parsed = (() => {
@@ -420,6 +412,13 @@ function addMinutesIso(minutes) {
   return new Date(Date.now() + minutes * 60 * 1000).toISOString();
 }
 
+function databaseTimestampMs(value) {
+  const text = String(value || "").trim();
+  if (!text) return NaN;
+  if (/[zZ]|[+-]\d\d:?\d\d$/.test(text)) return Date.parse(text);
+  return Date.parse(`${text}Z`);
+}
+
 function passwordMaterial(password) {
   const pepper = String(process.env.CASHFLOW_PASSWORD_PEPPER || "");
   return pepper ? `${pepper}\0${password}` : password;
@@ -489,44 +488,56 @@ function mapGlobalConstraintError(error) {
 export function createCashflowGlobalService({
   authProviderHook = null,
   beforeGlobalMigrationStep = () => {},
+  budgetStore = null,
   cashflowUserStorageExists,
+  createGlobalRepository = createSqliteGlobalRepository,
   dataDir,
   deleteCashflowUserStorage = null,
+  globalStore = null,
   listCashflowUserIds,
   logError = () => {},
   logServerEvent = () => {},
   normalizeLocale = value => String(value || "en"),
+  openGlobalDb: injectedOpenGlobalDb = null,
   openPlanningDb
 }) {
-  const globalDbPath = path.join(dataDir, "cashflow-global.sqlite");
-  const globalMigration = createCashflowGlobalMigrationService({
-    dataDir,
-    logError,
-    logServerEvent
-  });
-
-  function openGlobalDb() {
-    fs.mkdirSync(dataDir, { recursive: true });
-    const db = new Database(globalDbPath);
-    initPragmas(db);
-    try {
-      globalMigration.initializeOrMigrate(db, {
-        beforeStep: beforeGlobalMigrationStep,
-        storageProfileIds: listCashflowUserIds()
+  const globalDbService = injectedOpenGlobalDb
+    ? { backend: "custom", openGlobalDb: injectedOpenGlobalDb }
+    : createCashflowGlobalDbService({
+        beforeGlobalMigrationStep,
+        dataDir,
+        listCashflowUserIds,
+        logError,
+        logServerEvent
       });
-      db.prepare(`
-        UPDATE global_options
-        SET holiday_country = CASE
-              WHEN UPPER(COALESCE(holiday_country, 'PL')) IN ('PL', 'DE') THEN UPPER(COALESCE(holiday_country, 'PL'))
-              ELSE 'PL'
-            END
-        WHERE id = 1
-      `).run();
-      return db;
-    } catch (error) {
-      db.close();
-      throw error;
+  const { openGlobalDb } = globalDbService;
+
+  function globalRepository(db) {
+    return createGlobalRepository(db);
+  }
+
+  async function withGlobalRepository(fn) {
+    if (globalStore && typeof globalStore.withRepository === "function") {
+      return await globalStore.withRepository(fn);
     }
+
+    const db = openGlobalDb();
+    try {
+      return await fn(globalRepository(db), db);
+    } finally {
+      db.close();
+    }
+  }
+
+  async function withExternalGlobalTransaction(fn, syncFallback) {
+    if (
+      !globalStore
+      || globalStore.backend === "sqlite"
+      || typeof globalStore.transaction !== "function"
+    ) {
+      return syncFallback();
+    }
+    return await globalStore.transaction(async repo => await fn(repo));
   }
 
   function auditGlobalSecurity(db, {
@@ -537,47 +548,31 @@ export function createCashflowGlobalService({
     targetId = null,
     targetType = null
   }) {
-    db.prepare(`
-      INSERT INTO security_audit_log (
-        id, actor_account_id, action, target_type, target_id, outcome,
-        details_json, created_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run(
-      `audit_${crypto.randomUUID()}`,
-      actorAccountId || null,
+    globalRepository(db).audit.insertSecurityEvent({
       action,
-      targetType,
-      targetId,
+      actorAccountId,
+      details,
       outcome,
-      JSON.stringify(details || {})
-    );
+      targetId,
+      targetType
+    });
   }
 
   function getGlobalOptions() {
     const db = openGlobalDb();
     try {
-      return db.prepare("SELECT * FROM global_options WHERE id = 1").get();
+      return globalRepository(db).globalOptions.get();
     } finally {
       db.close();
     }
   }
 
+  async function getGlobalOptionsAsync() {
+    return await withGlobalRepository(async repo => await repo.globalOptions.get());
+  }
+
   function ensureUserMetadata(db, userId, displayName = "") {
-    const normalizedId = normalizeUserId(userId);
-    const name = String(displayName || normalizedId).trim() || normalizedId;
-    db.prepare(`
-      INSERT INTO users (id, display_name, permissions, created_at, updated_at)
-      VALUES (?, ?, '["admin"]', datetime('now'), datetime('now'))
-      ON CONFLICT(id) DO UPDATE SET
-        display_name = CASE
-          WHEN excluded.display_name != excluded.id THEN excluded.display_name
-          ELSE users.display_name
-        END,
-        permissions = COALESCE(NULLIF(users.permissions, ''), '["admin"]'),
-        updated_at = datetime('now')
-    `).run(normalizedId, name);
-    return normalizedId;
+    return globalRepository(db).users.ensureMetadata(userId, displayName);
   }
 
   function ensureCompatibilityBudget(db, userId, displayName = "") {
@@ -592,8 +587,28 @@ export function createCashflowGlobalService({
       return normalizedId;
     }
 
-    ensureLegacyBudget(db, {
-      budgetId: normalizedId,
+    globalRepository(db).budgets.ensureLegacy({
+      id: normalizedId,
+      displayName: String(displayName || normalizedId).trim() || normalizedId,
+      storageKey: normalizedId
+    });
+    return normalizedId;
+  }
+
+  async function ensureCompatibilityBudgetForRepo(repo, userId, displayName = "") {
+    const normalizedId = normalizeUserId(userId);
+    if (await repo.budgets.get(normalizedId)) {
+      return normalizedId;
+    }
+    if (
+      typeof cashflowUserStorageExists !== "function"
+      || !cashflowUserStorageExists(normalizedId)
+    ) {
+      return normalizedId;
+    }
+
+    await repo.budgets.ensureLegacy({
+      id: normalizedId,
       displayName: String(displayName || normalizedId).trim() || normalizedId,
       storageKey: normalizedId
     });
@@ -602,20 +617,12 @@ export function createCashflowGlobalService({
 
   function metadataUser(db, userId) {
     const normalizedId = normalizeUserId(userId);
-    return db.prepare(`
-      SELECT id, display_name, permissions
-      FROM users
-      WHERE id = ?
-    `).get(normalizedId);
+    return globalRepository(db).users.getMetadata(normalizedId);
   }
 
   function budgetMetadata(db, budgetId) {
     const normalizedId = normalizeUserId(budgetId);
-    return db.prepare(`
-      SELECT id, storage_key, display_name, status
-      FROM budgets
-      WHERE id = ?
-    `).get(normalizedId);
+    return globalRepository(db).budgets.get(normalizedId);
   }
 
   function syncExistingStorageBudgets(db, {
@@ -640,6 +647,13 @@ export function createCashflowGlobalService({
     } finally {
       db.close();
     }
+  }
+
+  async function userExistsAsync(userId) {
+    const normalizedId = normalizeUserId(userId);
+    if (normalizedId === "local") return true;
+    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) return true;
+    return await withGlobalRepository(async repo => Boolean(await repo.users.getMetadata(normalizedId)));
   }
 
   function applyDefaultsToUser(userId, options = null) {
@@ -679,6 +693,32 @@ export function createCashflowGlobalService({
     return normalizedId;
   }
 
+  // Postgres has no per-budget file to create: `settings` is a shared table
+  // with a budget_id column, and every column but budget_id already has a
+  // DDL-level default, so a brand-new budget's row is a single insert of
+  // just the global-option overrides — there is no existing default row to
+  // UPDATE the way the SQLite path does.
+  async function initializeBudgetStorageAsync(budgetId, options = null) {
+    if (!budgetStore || budgetStore.backend !== "postgres") {
+      return initializeBudgetStorage(budgetId);
+    }
+    const normalizedId = normalizeUserId(budgetId);
+    const defaults = options || await getGlobalOptionsAsync();
+    await budgetStore.insertPlanningRows(normalizedId, "settings", [{
+      fx_buffer_percent: Math.max(0, Math.min(100, Number(defaults?.fx_buffer_percent) || DEFAULT_FX_BUFFER_PERCENT)),
+      fx_provider: normalizeFxProvider(defaults?.fx_provider || "nbp"),
+      future_periods: Math.max(1, Math.min(60, Number(defaults?.future_periods) || DEFAULT_FUTURE_PERIODS)),
+      holiday_country: normalizeHolidayCountry(defaults?.holiday_country || "PL"),
+      ledger_currency: normalizeSupportedCurrency(defaults?.ledger_currency || "PLN"),
+      locale: normalizeLocale(defaults?.locale || "en"),
+      timezone: normalizeTimezone(defaults?.timezone || DEFAULT_TIMEZONE),
+      // settings.updated_at is NOT NULL with no DDL default (unlike every
+      // other column this insert touches), so it must be supplied here.
+      updated_at: new Date().toISOString()
+    }]);
+    return normalizedId;
+  }
+
   function listUsers() {
     const db = openGlobalDb();
     try {
@@ -690,11 +730,7 @@ export function createCashflowGlobalService({
         }
       })();
 
-      return db.prepare(`
-        SELECT id, display_name, permissions, created_at, updated_at, last_selected_at
-        FROM users
-        ORDER BY COALESCE(last_selected_at, created_at) DESC, id ASC
-      `).all().map(row => ({
+      return globalRepository(db).users.listMetadata().map(row => ({
         ...row,
         permissions: normalizePermissions(row.permissions)
       }));
@@ -703,73 +739,75 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function listUsersAsync() {
+    return await withGlobalRepository(async repo => {
+      const ids = new Set(["local", ...listCashflowUserIds()]);
+      for (const userId of ids) {
+        await repo.users.ensureMetadata(userId);
+        const metadata = await repo.users.getMetadata(userId);
+        await ensureCompatibilityBudgetForRepo(repo, userId, metadata?.display_name);
+      }
+
+      const rows = await repo.users.listMetadata();
+      return rows.map(row => ({
+        ...row,
+        permissions: normalizePermissions(row.permissions)
+      }));
+    });
+  }
+
+  async function syncExistingStorageBudgetsForRepo(repo, {
+    excludeIds = []
+  } = {}) {
+    const excluded = new Set([...excludeIds].map(id => normalizeUserId(id)));
+    for (const userId of listCashflowUserIds()) {
+      if (excluded.has(normalizeUserId(userId))) continue;
+      const metadata = await repo.users.getMetadata(userId);
+      await ensureCompatibilityBudgetForRepo(repo, userId, metadata?.display_name || userId);
+    }
+  }
+
   function accountExistsRow(db, accountId) {
-    const normalizedId = normalizeUserId(accountId);
-    const account = db.prepare(`
-      SELECT id, email, display_name, status, created_at, updated_at, disabled_at, deleted_at
-      FROM accounts
-      WHERE id = ?
-    `).get(normalizedId);
-    if (!account) throw notFound("Account not found");
-    return account;
+    return globalRepository(db).accounts.require(accountId);
   }
 
   function activeSessionsForAccount(db, accountId) {
-    const nowMs = Date.now();
-    return db.prepare(`
-      SELECT id, auth_method, selected_budget_id, created_at, last_seen_at,
-        idle_expires_at, absolute_expires_at
-      FROM auth_sessions
-      WHERE account_id = ?
-        AND revoked_at IS NULL
-      ORDER BY last_seen_at DESC, created_at DESC
-    `).all(accountId).filter(session =>
-      Date.parse(session.idle_expires_at) > nowMs &&
-      Date.parse(session.absolute_expires_at) > nowMs
-    );
+    return globalRepository(db).sessions.listActiveForAccount(accountId);
   }
 
   function accountSummary(db, accountId) {
+    const repo = globalRepository(db);
     const account = accountExistsRow(db, accountId);
-    const globalRoles = db.prepare(`
-      SELECT role
-      FROM account_global_roles
-      WHERE account_id = ?
-      ORDER BY role
-    `).all(account.id).map(row => row.role);
-    const membershipCount = db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM budget_memberships bm
-      JOIN budgets b ON b.id = bm.budget_id
-      WHERE bm.account_id = ?
-        AND b.status != 'deleted'
-    `).get(account.id).count;
-    const ownedBudgetCount = db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM budget_memberships bm
-      JOIN budgets b ON b.id = bm.budget_id
-      WHERE bm.account_id = ?
-        AND bm.role = 'owner'
-        AND b.status != 'deleted'
-    `).get(account.id).count;
-    const identityCount = db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM auth_identities
-      WHERE account_id = ?
-    `).get(account.id).count;
-    const identities = db.prepare(`
-      SELECT id, provider_id, subject, email, email_verified, created_at, updated_at, last_used_at
-      FROM auth_identities
-      WHERE account_id = ?
-      ORDER BY provider_id, subject
-    `).all(account.id);
-    const hasPasswordCredential = Boolean(db.prepare(`
-      SELECT 1
-      FROM password_credentials
-      WHERE account_id = ?
-      LIMIT 1
-    `).get(account.id));
+    const globalRoles = repo.roles.listForAccount(account.id);
+    const membershipCount = repo.memberships.countForAccount(account.id);
+    const ownedBudgetCount = repo.memberships.countOwnedForAccount(account.id);
+    const identityCount = repo.identities.countForAccount(account.id);
+    const identities = repo.identities.listForAccount(account.id);
+    const hasPasswordCredential = repo.passwordCredentials.existsForAccount(account.id);
     const sessions = activeSessionsForAccount(db, account.id);
+
+    return {
+      ...account,
+      globalRoles,
+      hasPasswordCredential,
+      identities,
+      identityCount,
+      membershipCount,
+      ownedBudgetCount,
+      sessions,
+      activeSessionCount: sessions.length
+    };
+  }
+
+  async function accountSummaryForRepo(repo, accountId) {
+    const account = await repo.accounts.require(accountId);
+    const globalRoles = await repo.roles.listForAccount(account.id);
+    const membershipCount = await repo.memberships.countForAccount(account.id);
+    const ownedBudgetCount = await repo.memberships.countOwnedForAccount(account.id);
+    const identityCount = await repo.identities.countForAccount(account.id);
+    const identities = await repo.identities.listForAccount(account.id);
+    const hasPasswordCredential = await repo.passwordCredentials.existsForAccount(account.id);
+    const sessions = await repo.sessions.listActiveForAccount(account.id);
 
     return {
       ...account,
@@ -787,15 +825,21 @@ export function createCashflowGlobalService({
   function listAdminAccounts() {
     const db = openGlobalDb();
     try {
-      return db.prepare(`
-        SELECT id
-        FROM accounts
-        ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'disabled' THEN 1 ELSE 2 END,
-          LOWER(display_name), id
-      `).all().map(row => accountSummary(db, row.id));
+      return globalRepository(db).accounts.listAdminIds().map(row => accountSummary(db, row.id));
     } finally {
       db.close();
     }
+  }
+
+  async function listAdminAccountsAsync() {
+    return await withGlobalRepository(async repo => {
+      const rows = await repo.accounts.listAdminIds();
+      const accounts = [];
+      for (const row of rows) {
+        accounts.push(await accountSummaryForRepo(repo, row.id));
+      }
+      return accounts;
+    });
   }
 
   function updateAdminAccount(actorAccountId, accountId, input = {}) {
@@ -822,32 +866,18 @@ export function createCashflowGlobalService({
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         const account = accountExistsRow(db, normalizedId);
         if (account.status === "deleted") throw conflict("Deleted accounts cannot be changed");
 
         if (updates.displayName) {
-          db.prepare(`
-            UPDATE accounts
-            SET display_name = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-          `).run(updates.displayName, normalizedId);
-          db.prepare(`
-            UPDATE users
-            SET display_name = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-          `).run(updates.displayName, normalizedId);
+          repo.accounts.updateDisplayName(normalizedId, updates.displayName);
+          repo.users.setDisplayName(normalizedId, updates.displayName);
         }
 
         if (updates.email && updates.email !== account.email) {
           try {
-            db.prepare(`
-              UPDATE accounts
-              SET email = ?,
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(updates.email, normalizedId);
+            repo.accounts.updateEmail(normalizedId, updates.email);
           } catch (error) {
             if (String(error?.message || "").includes("UNIQUE")) {
               throw conflict("Email is already assigned to another account", [{
@@ -861,24 +891,13 @@ export function createCashflowGlobalService({
 
         if (updates.status && updates.status !== account.status) {
           try {
-            db.prepare(`
-              UPDATE accounts
-              SET status = ?,
-                  disabled_at = CASE WHEN ? = 'disabled' THEN datetime('now') ELSE NULL END,
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(updates.status, updates.status, normalizedId);
+            repo.accounts.updateStatus(normalizedId, updates.status);
           } catch (error) {
             mapGlobalConstraintError(error);
           }
 
           if (updates.status !== "active") {
-            db.prepare(`
-              UPDATE auth_sessions
-              SET revoked_at = COALESCE(revoked_at, datetime('now'))
-              WHERE account_id = ?
-                AND revoked_at IS NULL
-            `).run(normalizedId);
+            repo.sessions.revokeForAccount(normalizedId);
           }
         }
 
@@ -901,6 +920,76 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function updateAdminAccountAsync(actorAccountId, accountId, input = {}) {
+    const normalizedId = normalizeUserId(accountId);
+    const updates = {};
+    if (Object.prototype.hasOwnProperty.call(input, "displayName") || Object.prototype.hasOwnProperty.call(input, "display_name")) {
+      updates.displayName = normalizeAccountDisplayName(input.displayName ?? input.display_name, "displayName");
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "email")) {
+      updates.email = normalizeAccountEmail(input.email, "email");
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "status")) {
+      const status = String(input.status || "").trim();
+      if (!["active", "disabled"].includes(status)) {
+        throw badRequest("status must be active or disabled", [{
+          field: "status",
+          reason: "unsupported_value"
+        }]);
+      }
+      updates.status = status;
+    }
+
+    return await withExternalGlobalTransaction(async repo => {
+      const account = await repo.accounts.require(normalizedId);
+      if (account.status === "deleted") throw conflict("Deleted accounts cannot be changed");
+
+      if (updates.displayName) {
+        await repo.accounts.updateDisplayName(normalizedId, updates.displayName);
+        await repo.users.setDisplayName(normalizedId, updates.displayName);
+      }
+
+      if (updates.email && updates.email !== account.email) {
+        try {
+          await repo.accounts.updateEmail(normalizedId, updates.email);
+        } catch (error) {
+          if (String(error?.message || "").includes("UNIQUE") || error?.code === "23505") {
+            throw conflict("Email is already assigned to another account", [{
+              field: "email",
+              reason: "not_unique"
+            }]);
+          }
+          throw error;
+        }
+      }
+
+      if (updates.status && updates.status !== account.status) {
+        try {
+          await repo.accounts.updateStatus(normalizedId, updates.status);
+        } catch (error) {
+          mapGlobalConstraintError(error);
+        }
+
+        if (updates.status !== "active") {
+          await repo.sessions.revokeForAccount(normalizedId);
+        }
+      }
+
+      await repo.audit.insertSecurityEvent({
+        action: "admin_account_update",
+        actorAccountId,
+        details: {
+          changedDisplayName: Boolean(updates.displayName),
+          changedEmail: Boolean(updates.email),
+          status: updates.status || null
+        },
+        targetId: normalizedId,
+        targetType: "account"
+      });
+      return await accountSummaryForRepo(repo, normalizedId);
+    }, () => updateAdminAccount(actorAccountId, normalizedId, input));
+  }
+
   function setAccountSystemAdmin(actorAccountId, accountId, enabledValue) {
     const normalizedId = normalizeUserId(accountId);
     const enabled = normalizeAdminBoolean(enabledValue, "enabled");
@@ -908,35 +997,17 @@ export function createCashflowGlobalService({
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         const account = accountExistsRow(db, normalizedId);
         if (account.status !== "active") throw conflict("Only active accounts can hold system administrator role");
 
         try {
           if (enabled) {
-            db.prepare(`
-              INSERT OR IGNORE INTO account_global_roles (
-                account_id, role, granted_by_account_id, created_at
-              )
-              VALUES (?, 'system_admin', ?, datetime('now'))
-            `).run(normalizedId, actorAccountId || null);
-            db.prepare(`
-              UPDATE users
-              SET permissions = '["admin"]',
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(normalizedId);
+            repo.roles.insertSystemAdmin({ accountId: normalizedId, grantedByAccountId: actorAccountId || null });
+            repo.users.setPermissions(normalizedId, '["admin"]');
           } else {
-            db.prepare(`
-              DELETE FROM account_global_roles
-              WHERE account_id = ?
-                AND role = 'system_admin'
-            `).run(normalizedId);
-            db.prepare(`
-              UPDATE users
-              SET permissions = '[]',
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(normalizedId);
+            repo.roles.deleteSystemAdmin(normalizedId);
+            repo.users.setPermissions(normalizedId, "[]");
           }
         } catch (error) {
           mapGlobalConstraintError(error);
@@ -956,6 +1027,35 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function setAccountSystemAdminAsync(actorAccountId, accountId, enabledValue) {
+    const normalizedId = normalizeUserId(accountId);
+    const enabled = normalizeAdminBoolean(enabledValue, "enabled");
+    return await withExternalGlobalTransaction(async repo => {
+      const account = await repo.accounts.require(normalizedId);
+      if (account.status !== "active") throw conflict("Only active accounts can hold system administrator role");
+
+      try {
+        if (enabled) {
+          await repo.roles.insertSystemAdmin({ accountId: normalizedId, grantedByAccountId: actorAccountId || null });
+          await repo.users.setPermissions(normalizedId, '["admin"]');
+        } else {
+          await repo.roles.deleteSystemAdmin(normalizedId);
+          await repo.users.setPermissions(normalizedId, "[]");
+        }
+      } catch (error) {
+        mapGlobalConstraintError(error);
+      }
+
+      await repo.audit.insertSecurityEvent({
+        action: enabled ? "admin_account_grant_system_admin" : "admin_account_revoke_system_admin",
+        actorAccountId,
+        targetId: normalizedId,
+        targetType: "account"
+      });
+      return await accountSummaryForRepo(repo, normalizedId);
+    }, () => setAccountSystemAdmin(actorAccountId, normalizedId, enabled));
+  }
+
   function revokeAdminAccountSession(actorAccountId, accountId, sessionId) {
     const normalizedId = normalizeUserId(accountId);
     const normalizedSessionId = String(sessionId || "").trim();
@@ -965,14 +1065,9 @@ export function createCashflowGlobalService({
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         accountExistsRow(db, normalizedId);
-        const changes = db.prepare(`
-          UPDATE auth_sessions
-          SET revoked_at = COALESCE(revoked_at, datetime('now'))
-          WHERE id = ?
-            AND account_id = ?
-            AND revoked_at IS NULL
-        `).run(normalizedSessionId, normalizedId).changes;
+        const changes = repo.sessions.revoke(normalizedSessionId, normalizedId);
         if (changes !== 1) throw notFound("Session not found");
         auditGlobalSecurity(db, {
           action: "admin_account_session_revoke",
@@ -988,76 +1083,57 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function revokeAdminAccountSessionAsync(actorAccountId, accountId, sessionId) {
+    const normalizedId = normalizeUserId(accountId);
+    const normalizedSessionId = String(sessionId || "").trim();
+    if (!normalizedSessionId) throw badRequest("sessionId is required", [{ field: "sessionId", reason: "required" }]);
+
+    return await withExternalGlobalTransaction(async repo => {
+      await repo.accounts.require(normalizedId);
+      const changes = await repo.sessions.revoke(normalizedSessionId, normalizedId);
+      if (changes !== 1) throw notFound("Session not found");
+      await repo.audit.insertSecurityEvent({
+        action: "admin_account_session_revoke",
+        actorAccountId,
+        targetId: normalizedSessionId,
+        targetType: "auth_session"
+      });
+      return await accountSummaryForRepo(repo, normalizedId);
+    }, () => revokeAdminAccountSession(actorAccountId, normalizedId, normalizedSessionId));
+  }
+
   function deleteAdminAccount(actorAccountId, accountId) {
     const normalizedId = normalizeUserId(accountId);
     const db = openGlobalDb();
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         const account = accountExistsRow(db, normalizedId);
         if (account.status === "deleted") {
           result = accountSummary(db, normalizedId);
           return;
         }
 
-        const ownedBudgetCount = db.prepare(`
-          SELECT COUNT(*) AS count
-          FROM budget_memberships bm
-          JOIN budgets b ON b.id = bm.budget_id
-          WHERE bm.account_id = ?
-            AND bm.role = 'owner'
-            AND b.status != 'deleted'
-        `).get(normalizedId).count;
+        const ownedBudgetCount = repo.memberships.countOwnedForAccount(normalizedId);
         if (ownedBudgetCount > 0) throw conflict("Transfer or delete owned budgets before deleting this account");
 
-        const membershipCount = db.prepare(`
-          SELECT COUNT(*) AS count
-          FROM budget_memberships bm
-          JOIN budgets b ON b.id = bm.budget_id
-          WHERE bm.account_id = ?
-            AND b.status != 'deleted'
-        `).get(normalizedId).count;
+        const membershipCount = repo.memberships.countForAccount(normalizedId);
         if (membershipCount > 0) throw conflict("Remove this account from budgets before deleting it");
 
         try {
-          db.prepare(`
-            DELETE FROM account_global_roles
-            WHERE account_id = ?
-          `).run(normalizedId);
+          repo.roles.deleteSystemAdmin(normalizedId);
         } catch (error) {
           mapGlobalConstraintError(error);
         }
 
-        db.prepare(`
-          UPDATE auth_sessions
-          SET revoked_at = COALESCE(revoked_at, datetime('now'))
-          WHERE account_id = ?
-            AND revoked_at IS NULL
-        `).run(normalizedId);
-        db.prepare("DELETE FROM auth_identities WHERE account_id = ?").run(normalizedId);
-        db.prepare("DELETE FROM password_credentials WHERE account_id = ?").run(normalizedId);
-        db.prepare("DELETE FROM password_reset_tokens WHERE account_id = ?").run(normalizedId);
-        db.prepare(`
-          UPDATE budget_invitations
-          SET status = 'revoked',
-              revoked_at = COALESCE(revoked_at, datetime('now')),
-              updated_at = datetime('now')
-          WHERE target_account_id = ?
-            AND status = 'pending'
-        `).run(normalizedId);
-        db.prepare(`
-          UPDATE accounts
-          SET status = 'deleted',
-              deleted_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE id = ?
-        `).run(normalizedId);
-        db.prepare(`
-          UPDATE users
-          SET permissions = '[]',
-              updated_at = datetime('now')
-          WHERE id = ?
-        `).run(normalizedId);
+        repo.sessions.revokeForAccount(normalizedId);
+        repo.identities.deleteForAccount(normalizedId);
+        repo.passwordCredentials.deleteForAccount(normalizedId);
+        repo.passwordResetTokens.deleteForAccount(normalizedId);
+        repo.invitations.revokePendingForTargetAccount(normalizedId);
+        repo.accounts.markDeleted(normalizedId);
+        repo.users.setPermissions(normalizedId, "[]");
         auditGlobalSecurity(db, {
           action: "admin_account_delete",
           actorAccountId,
@@ -1072,16 +1148,48 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function deleteAdminAccountAsync(actorAccountId, accountId) {
+    const normalizedId = normalizeUserId(accountId);
+    return await withExternalGlobalTransaction(async repo => {
+      const account = await repo.accounts.require(normalizedId);
+      if (account.status === "deleted") {
+        return await accountSummaryForRepo(repo, normalizedId);
+      }
+
+      const ownedBudgetCount = await repo.memberships.countOwnedForAccount(normalizedId);
+      if (ownedBudgetCount > 0) throw conflict("Transfer or delete owned budgets before deleting this account");
+
+      const membershipCount = await repo.memberships.countForAccount(normalizedId);
+      if (membershipCount > 0) throw conflict("Remove this account from budgets before deleting it");
+
+      try {
+        await repo.roles.deleteSystemAdmin(normalizedId);
+      } catch (error) {
+        mapGlobalConstraintError(error);
+      }
+
+      await repo.sessions.revokeForAccount(normalizedId);
+      await repo.identities.deleteForAccount(normalizedId);
+      await repo.passwordCredentials.deleteForAccount(normalizedId);
+      await repo.passwordResetTokens.deleteForAccount(normalizedId);
+      await repo.invitations.revokePendingForTargetAccount(normalizedId);
+      await repo.accounts.markDeleted(normalizedId);
+      await repo.users.setPermissions(normalizedId, "[]");
+      await repo.audit.insertSecurityEvent({
+        action: "admin_account_delete",
+        actorAccountId,
+        targetId: normalizedId,
+        targetType: "account"
+      });
+      return await accountSummaryForRepo(repo, normalizedId);
+    }, () => deleteAdminAccount(actorAccountId, normalizedId));
+  }
+
   function listActiveBudgetIds() {
     const db = openGlobalDb();
     try {
       syncExistingStorageBudgets(db);
-      return db.prepare(`
-        SELECT id, storage_key
-        FROM budgets
-        WHERE status = 'active'
-        ORDER BY id
-      `).all()
+      return globalRepository(db).budgets.listActiveStorage()
         .filter(row =>
           typeof cashflowUserStorageExists !== "function"
           || cashflowUserStorageExists(row.storage_key)
@@ -1090,6 +1198,19 @@ export function createCashflowGlobalService({
     } finally {
       db.close();
     }
+  }
+
+  async function listActiveBudgetIdsAsync() {
+    return await withGlobalRepository(async repo => {
+      await syncExistingStorageBudgetsForRepo(repo);
+      const rows = await repo.budgets.listActiveStorage();
+      return rows
+        .filter(row =>
+          typeof cashflowUserStorageExists !== "function"
+          || cashflowUserStorageExists(row.storage_key)
+        )
+        .map(row => row.id);
+    });
   }
 
   function resolveBudgetStorageKey(budgetId = "") {
@@ -1111,33 +1232,23 @@ export function createCashflowGlobalService({
     const options = getGlobalOptions();
     const db = openGlobalDb();
     try {
+      const repo = globalRepository(db);
       db.transaction(() => {
         syncExistingStorageBudgets(db);
-        const existing = db.prepare(`
-          SELECT id FROM users WHERE id = ?
-          UNION ALL
-          SELECT id FROM accounts WHERE id = ?
-          UNION ALL
-          SELECT id FROM budgets WHERE id = ?
-          LIMIT 1
-        `).get(userId, userId, userId);
         if (
-          existing
+          repo.identity.legacyUserAccountOrBudgetExists(userId)
           || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId))
         ) {
           throw conflict("User already exists");
         }
-        if (email && db.prepare("SELECT 1 FROM accounts WHERE email = ?").get(email)) {
+        if (email && repo.accounts.emailExists(email)) {
           throw conflict("Email is already assigned to another account", [{
             field: "email",
             reason: "not_unique"
           }]);
         }
 
-        db.prepare(`
-          INSERT INTO users (id, display_name, permissions, created_at, updated_at, last_selected_at)
-          VALUES (?, ?, '[]', datetime('now'), datetime('now'), datetime('now'))
-        `).run(userId, displayName);
+        repo.users.insertNew({ id: userId, displayName });
       })();
     } finally {
       db.close();
@@ -1149,51 +1260,23 @@ export function createCashflowGlobalService({
       const metadataDb = openGlobalDb();
       try {
         metadataDb.transaction(() => {
+          const repo = globalRepository(metadataDb);
           syncExistingStorageBudgets(metadataDb, { excludeIds: [userId] });
-          const bootstrapRequired = Number(metadataDb.prepare(`
-            SELECT COUNT(*) AS count
-            FROM accounts
-          `).get()?.count || 0) === 0;
+          const bootstrapRequired = repo.accounts.count() === 0;
 
-          metadataDb.prepare(`
-            INSERT INTO accounts (
-              id, email, display_name, status, created_at, updated_at
-            )
-            VALUES (?, ?, ?, 'active', datetime('now'), datetime('now'))
-          `).run(userId, email, displayName);
-          metadataDb.prepare(`
-            INSERT INTO budgets (
-              id, storage_key, display_name, status, created_by_account_id,
-              created_at, updated_at
-            )
-            VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'))
-          `).run(userId, userId, displayName, userId);
-          metadataDb.prepare(`
-            INSERT INTO budget_memberships (
-              budget_id, account_id, role, invited_by_account_id, created_at, updated_at
-            )
-            VALUES (?, ?, 'owner', NULL, datetime('now'), datetime('now'))
-          `).run(userId, userId);
+          repo.accounts.insert({ id: userId, email, displayName });
+          repo.budgets.insert({
+            id: userId,
+            storageKey: userId,
+            displayName,
+            createdByAccountId: userId
+          });
+          repo.memberships.insertOwner({ budgetId: userId, accountId: userId });
 
           if (bootstrapRequired) {
-            metadataDb.prepare(`
-              INSERT INTO account_global_roles (
-                account_id, role, granted_by_account_id, created_at
-              )
-              VALUES (?, 'system_admin', NULL, datetime('now'))
-            `).run(userId);
-            metadataDb.prepare(`
-              UPDATE auth_config
-              SET bootstrap_completed_at = COALESCE(bootstrap_completed_at, datetime('now')),
-                  updated_at = datetime('now')
-              WHERE id = 1
-            `).run();
-            metadataDb.prepare(`
-              UPDATE users
-              SET permissions = '["admin"]',
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(userId);
+            repo.roles.insertSystemAdmin({ accountId: userId });
+            repo.authConfig.markBootstrapCompleted();
+            repo.users.setPermissions(userId, '["admin"]');
           }
         })();
       } finally {
@@ -1202,16 +1285,11 @@ export function createCashflowGlobalService({
     } catch (error) {
       const cleanupDb = openGlobalDb();
       try {
-        cleanupDb.prepare(`
-          UPDATE budgets
-          SET status = 'deleted',
-              deleted_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE id = ?
-        `).run(userId);
-        cleanupDb.prepare("DELETE FROM budgets WHERE id = ?").run(userId);
-        cleanupDb.prepare("DELETE FROM accounts WHERE id = ?").run(userId);
-        cleanupDb.prepare("DELETE FROM users WHERE id = ?").run(userId);
+        const repo = globalRepository(cleanupDb);
+        repo.budgets.markDeleted(userId);
+        repo.budgets.delete(userId);
+        repo.accounts.delete(userId);
+        repo.users.delete(userId);
       } finally {
         cleanupDb.close();
       }
@@ -1234,6 +1312,108 @@ export function createCashflowGlobalService({
     }).session;
   }
 
+  // Postgres port of createUser. Kept as the same multi-phase shape as the
+  // SQLite version above rather than one atomic transaction — budgetStore
+  // and globalStore are separate connections/transactions in this
+  // codebase's abstraction even when they point at the same Postgres
+  // database, so there is no single transaction that could span both
+  // writes anyway, matching createBudgetAsync's already-established
+  // pattern in cashflow-budget-service.js. **The phase order is not the
+  // same as the SQLite version above**, though: SQLite creates the
+  // planning.sqlite file (with its own independent default settings row)
+  // before touching the global accounts/budgets tables, which is safe only
+  // because separate SQLite files have no foreign key between them. In
+  // Postgres, `settings.budget_id` has a real foreign key to `budgets.id`,
+  // so the budget row must exist first — initializeBudgetStorageAsync (the
+  // settings insert) runs after the accounts/budgets/memberships/
+  // bootstrap-admin transaction here, not before it.
+  async function createUserAsync(input = {}) {
+    if (!globalStore || globalStore.backend === "sqlite" || typeof globalStore.transaction !== "function") {
+      return createUser(input);
+    }
+
+    const userId = normalizeUserId(input.userId || input.id);
+    const displayName = String(input.displayName || input.display_name || userId).trim() || userId;
+    const email = Object.prototype.hasOwnProperty.call(input, "email")
+      ? normalizeAccountEmail(input.email, "email")
+      : null;
+    const options = await getGlobalOptionsAsync();
+
+    await globalStore.transaction(async repo => {
+      await syncExistingStorageBudgetsForRepo(repo);
+      if (
+        await repo.identity.legacyUserAccountOrBudgetExists(userId)
+        || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId))
+      ) {
+        throw conflict("User already exists");
+      }
+      if (email && await repo.accounts.emailExists(email)) {
+        throw conflict("Email is already assigned to another account", [{
+          field: "email",
+          reason: "not_unique"
+        }]);
+      }
+
+      await repo.users.insertNew({ id: userId, displayName });
+    });
+
+    try {
+      await globalStore.transaction(async repo => {
+        await syncExistingStorageBudgetsForRepo(repo, { excludeIds: [userId] });
+        const bootstrapRequired = (await repo.accounts.count()) === 0;
+
+        await repo.accounts.insert({ id: userId, email, displayName });
+        await repo.budgets.insert({
+          id: userId,
+          storageKey: userId,
+          displayName,
+          createdByAccountId: userId
+        });
+        await repo.memberships.insertOwner({ budgetId: userId, accountId: userId });
+
+        if (bootstrapRequired) {
+          await repo.roles.insertSystemAdmin({ accountId: userId });
+          await repo.authConfig.markBootstrapCompleted();
+          await repo.users.setPermissions(userId, '["admin"]');
+        }
+      });
+      await initializeBudgetStorageAsync(userId, options);
+    } catch (error) {
+      try {
+        // Deleting the budgets row cascades to settings (ON DELETE CASCADE)
+        // if initializeBudgetStorageAsync had already run, so no separate
+        // settings cleanup is needed here.
+        await globalStore.transaction(async repo => {
+          await repo.budgets.markDeleted(userId);
+          await repo.budgets.delete(userId);
+          await repo.accounts.delete(userId);
+          await repo.users.delete(userId);
+        });
+      } catch (cleanupError) {
+        logError("cashflow_user_create_cleanup_failed", {
+          userId,
+          error: cleanupError.message
+        });
+      }
+      if (typeof deleteCashflowUserStorage === "function") {
+        try {
+          deleteCashflowUserStorage(userId);
+        } catch (cleanupError) {
+          logError("cashflow_user_storage_cleanup_failed", {
+            userId,
+            error: cleanupError.message
+          });
+        }
+      }
+      throw error;
+    }
+
+    return (await resolveBudgetContextAsync(userId, {
+      accountId: userId,
+      skipStorageExistenceCheck: true
+    })).session;
+  }
+
   function selectUser(userId = "") {
     const normalizedId = normalizeUserId(userId);
     if (normalizedId !== "local" && !userExists(normalizedId)) {
@@ -1242,26 +1422,49 @@ export function createCashflowGlobalService({
 
     const db = openGlobalDb();
     try {
+      const repo = globalRepository(db);
       ensureUserMetadata(db, normalizedId);
-      db.prepare(`
-        UPDATE users
-        SET last_selected_at = datetime('now'),
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(normalizedId);
+      repo.users.touchSelection(normalizedId);
       openPlanningDb(normalizedId).close();
       ensureCompatibilityBudget(db, normalizedId, metadataUser(db, normalizedId)?.display_name);
-      const ownerAccountId = db.prepare(`
-        SELECT account_id
-        FROM budget_memberships
-        WHERE budget_id = ? AND role = 'owner'
-      `).get(normalizedId)?.account_id;
+      const ownerAccountId = repo.memberships.ownerAccountId(normalizedId);
       return resolveBudgetContext(normalizedId, {
         accountId: ownerAccountId || LEGACY_ADMIN_ACCOUNT_ID
       }).session;
     } finally {
       db.close();
     }
+  }
+
+  // Postgres port of selectUser. Skips the SQLite version's
+  // `openPlanningDb(normalizedId).close()` call — that's a lazy
+  // create-if-missing/schema-migration touch on the planning file, which
+  // has no Postgres equivalent (a Postgres budget's settings row already
+  // exists once its budgets row does; there's nothing to lazily create on
+  // selection). ensureCompatibilityBudgetForRepo is still safe to call: it
+  // only does anything when cashflowUserStorageExists() finds real local
+  // storage, which a genuine Postgres-native budget never has.
+  async function selectUserAsync(userId = "") {
+    if (!globalStore || globalStore.backend === "sqlite" || typeof globalStore.transaction !== "function") {
+      return selectUser(userId);
+    }
+
+    const normalizedId = normalizeUserId(userId);
+    if (normalizedId !== "local" && !(await userExistsAsync(normalizedId))) {
+      throw userNotFoundError(normalizedId);
+    }
+
+    const ownerAccountId = await globalStore.transaction(async repo => {
+      await repo.users.ensureMetadata(normalizedId);
+      await repo.users.touchSelection(normalizedId);
+      const metadata = await repo.users.getMetadata(normalizedId);
+      await ensureCompatibilityBudgetForRepo(repo, normalizedId, metadata?.display_name);
+      return await repo.memberships.ownerAccountId(normalizedId);
+    });
+
+    return (await resolveBudgetContextAsync(normalizedId, {
+      accountId: ownerAccountId || LEGACY_ADMIN_ACCOUNT_ID
+    })).session;
   }
 
   function resolveSession(userId = "") {
@@ -1277,24 +1480,29 @@ export function createCashflowGlobalService({
     return resolveBudgetContext(userId).session;
   }
 
+  async function resolveSessionAsync(userId = "") {
+    if (!String(userId || "").trim()) {
+      return {
+        authenticated: false,
+        userId: "",
+        displayName: "",
+        permissions: []
+      };
+    }
+
+    return (await resolveBudgetContextAsync(userId)).session;
+  }
+
   function resolveAccountContext(accountId = "") {
     const normalizedId = normalizeUserId(accountId);
     const db = openGlobalDb();
     try {
-      const account = db.prepare(`
-        SELECT id, display_name, status
-        FROM accounts
-        WHERE id = ?
-      `).get(normalizedId);
+      const repo = globalRepository(db);
+      const account = repo.accounts.get(normalizedId);
       if (!account || account.status !== "active") {
         throw userNotFoundError(normalizedId);
       }
-      const globalRoles = db.prepare(`
-        SELECT role
-        FROM account_global_roles
-        WHERE account_id = ?
-        ORDER BY role
-      `).all(normalizedId).map(row => row.role);
+      const globalRoles = repo.roles.listForAccount(normalizedId);
       const capabilities = capabilitiesFor({ globalRoles });
       const permissions = capabilities.includes(CAPABILITIES.SYSTEM_ADMIN) ? ["admin"] : [];
 
@@ -1330,6 +1538,47 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function resolveAccountContextAsync(accountId = "") {
+    const normalizedId = normalizeUserId(accountId);
+    return await withGlobalRepository(async repo => {
+      const account = await repo.accounts.get(normalizedId);
+      if (!account || account.status !== "active") {
+        throw userNotFoundError(normalizedId);
+      }
+      const globalRoles = await repo.roles.listForAccount(normalizedId);
+      const capabilities = capabilitiesFor({ globalRoles });
+      const permissions = capabilities.includes(CAPABILITIES.SYSTEM_ADMIN) ? ["admin"] : [];
+
+      return {
+        account: {
+          id: account.id,
+          displayName: account.display_name,
+          status: account.status
+        },
+        authenticated: true,
+        authMode: "none",
+        budget: null,
+        capabilities,
+        globalRoles,
+        session: {
+          authenticated: true,
+          accountId: account.id,
+          accountDisplayName: account.display_name,
+          authMode: "none",
+          budgetId: "",
+          budgetDisplayName: "",
+          budgetRole: "",
+          capabilities,
+          displayName: account.display_name,
+          globalRoles,
+          permissions,
+          userId: ""
+        },
+        storageKey: null
+      };
+    });
+  }
+
   function resolveBudgetContext(budgetId = "", {
     accountId = LEGACY_ADMIN_ACCOUNT_ID,
     skipStorageExistenceCheck = false
@@ -1337,6 +1586,7 @@ export function createCashflowGlobalService({
     const normalizedId = normalizeUserId(budgetId);
     const db = openGlobalDb();
     try {
+      const repo = globalRepository(db);
       let budget = budgetMetadata(db, normalizedId);
       if (!budget) {
         const storageExists = normalizedId === "local"
@@ -1366,22 +1616,12 @@ export function createCashflowGlobalService({
         throw userNotFoundError(normalizedId);
       }
 
-      const account = db.prepare(`
-        SELECT id, display_name, status
-        FROM accounts
-        WHERE id = ?
-      `).get(accountId);
-      const globalRoles = db.prepare(`
-        SELECT role
-        FROM account_global_roles
-        WHERE account_id = ?
-        ORDER BY role
-      `).all(accountId).map(row => row.role);
-      const membership = db.prepare(`
-        SELECT role
-        FROM budget_memberships
-        WHERE budget_id = ? AND account_id = ?
-      `).get(budget.id, accountId);
+      const account = repo.accounts.get(accountId);
+      const globalRoles = repo.roles.listForAccount(accountId);
+      const membership = repo.memberships.getRole({
+        accountId,
+        budgetId: budget.id
+      });
       if (!account || account.status !== "active" || !membership) {
         throw forbidden("Budget access denied");
       }
@@ -1429,6 +1669,101 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function resolveBudgetContextAsync(budgetId = "", options = {}) {
+    const {
+      accountId = LEGACY_ADMIN_ACCOUNT_ID,
+      skipStorageExistenceCheck = false
+    } = options;
+    const normalizedId = normalizeUserId(budgetId);
+    return await withGlobalRepository(async repo => {
+      let budget = await repo.budgets.get(normalizedId);
+      if (!budget) {
+        const storageExists = normalizedId === "local"
+          || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId));
+        if (!storageExists) {
+          throw userNotFoundError(normalizedId);
+        }
+
+        let metadata = await repo.users.getMetadata(normalizedId);
+        if (!metadata) {
+          await repo.users.ensureMetadata(normalizedId);
+          metadata = await repo.users.getMetadata(normalizedId);
+        }
+        await ensureCompatibilityBudgetForRepo(repo, normalizedId, metadata?.display_name);
+        budget = await repo.budgets.get(normalizedId);
+      }
+
+      if (
+        !budget
+        || budget.status !== "active"
+        || (
+          typeof cashflowUserStorageExists === "function"
+          && !skipStorageExistenceCheck
+          // A Postgres budget has no local SQLite directory to check — its
+          // row in `budgets` (already confirmed active above) is the only
+          // existence signal that applies. Without this guard every
+          // Postgres-backed budget context lookup that doesn't pass
+          // skipStorageExistenceCheck (e.g. GET /api/budgets/:id/export)
+          // would incorrectly 404, since cashflowUserStorageExists() can
+          // only ever see local files.
+          && globalStore?.backend !== "postgres"
+          && !cashflowUserStorageExists(budget.storage_key)
+        )
+      ) {
+        throw userNotFoundError(normalizedId);
+      }
+
+      const account = await repo.accounts.get(accountId);
+      const globalRoles = await repo.roles.listForAccount(accountId);
+      const membership = await repo.memberships.getRole({
+        accountId,
+        budgetId: budget.id
+      });
+      if (!account || account.status !== "active" || !membership) {
+        throw forbidden("Budget access denied");
+      }
+      const capabilities = capabilitiesFor({
+        budgetRole: membership?.role || "",
+        globalRoles
+      });
+      const permissions = capabilities.includes(CAPABILITIES.SYSTEM_ADMIN) ? ["admin"] : [];
+
+      return {
+        account: account ? {
+          id: account.id,
+          displayName: account.display_name,
+          status: account.status
+        } : null,
+        authenticated: Boolean(account && membership),
+        authMode: "none",
+        budget: {
+          id: budget.id,
+          displayName: budget.display_name,
+          role: membership?.role || "",
+          status: budget.status,
+          storageKey: budget.storage_key
+        },
+        capabilities,
+        globalRoles,
+        session: {
+          authenticated: Boolean(account && membership),
+          accountId: account?.id || "",
+          accountDisplayName: account?.display_name || "",
+          authMode: "none",
+          budgetId: budget.id,
+          budgetDisplayName: budget.display_name,
+          budgetRole: membership?.role || "",
+          capabilities,
+          displayName: budget.display_name,
+          globalRoles,
+          permissions,
+          userId: budget.id
+        },
+        storageKey: budget.storage_key
+      };
+    });
+  }
+
   function updateGlobalOptions(updates = {}) {
     const current = getGlobalOptions();
     const normalized = validateAndNormalizeSettings(updates, {
@@ -1444,31 +1779,32 @@ export function createCashflowGlobalService({
 
     const db = openGlobalDb();
     try {
-      db.prepare(`
-        UPDATE global_options
-        SET ledger_currency = ?,
-            locale = ?,
-            timezone = ?,
-            holiday_country = ?,
-            future_periods = ?,
-            fx_provider = ?,
-            fx_buffer_percent = ?,
-            updated_at = datetime('now')
-        WHERE id = 1
-      `).run(
-        safe.ledger_currency,
-        safe.locale,
-        safe.timezone,
-        safe.holiday_country,
-        safe.future_periods,
-        safe.fx_provider,
-        safe.fx_buffer_percent
-      );
+      globalRepository(db).globalOptions.updatePlannerDefaults(safe);
     } finally {
       db.close();
     }
 
     return getGlobalOptions();
+  }
+
+  async function updateGlobalOptionsAsync(updates = {}) {
+    const current = await getGlobalOptionsAsync();
+    const normalized = validateAndNormalizeSettings(updates, {
+      allowedKeys: GLOBAL_OPTIONS_KEYS,
+      allowedKeysOnly: true,
+      currentSettings: current,
+      normalizeLocale
+    });
+    const safe = {
+      ...current,
+      ...normalized
+    };
+
+    await withGlobalRepository(async repo => {
+      await repo.globalOptions.updatePlannerDefaults(safe);
+    });
+
+    return await getGlobalOptionsAsync();
   }
 
   function authConfigFromRow(row = {}) {
@@ -1490,61 +1826,30 @@ export function createCashflowGlobalService({
   function getAdminAuthConfig() {
     const db = openGlobalDb();
     try {
-      const row = db.prepare("SELECT * FROM auth_config WHERE id = 1").get();
+      const row = globalRepository(db).authConfig.get();
       return authConfigFromRow(row || {});
     } finally {
       db.close();
     }
   }
 
+  async function getAdminAuthConfigAsync() {
+    return await withGlobalRepository(async repo =>
+      authConfigFromRow(await repo.authConfig.get() || {})
+    );
+  }
+
   function countActiveSystemAdmins(db) {
-    return Number(db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM account_global_roles agr
-      JOIN accounts a ON a.id = agr.account_id
-      WHERE agr.role = 'system_admin'
-        AND a.status = 'active'
-    `).get()?.count || 0);
+    return globalRepository(db).accounts.countActiveSystemAdmins();
   }
 
   function countActiveInternalSystemAdmins(db) {
-    return Number(db.prepare(`
-      SELECT COUNT(DISTINCT a.id) AS count
-      FROM account_global_roles agr
-      JOIN accounts a ON a.id = agr.account_id
-      WHERE agr.role = 'system_admin'
-        AND a.status = 'active'
-        AND (
-          (
-            COALESCE(a.email, '') != ''
-            AND EXISTS (
-              SELECT 1
-              FROM password_credentials pc
-              WHERE pc.account_id = a.id
-            )
-          )
-          OR EXISTS (
-            SELECT 1
-            FROM auth_identities ai
-            JOIN auth_providers ap ON ap.id = ai.provider_id
-            WHERE ai.account_id = a.id
-              AND ap.enabled = 1
-          )
-        )
-    `).get()?.count || 0);
+    return globalRepository(db).accounts.countActiveInternalSystemAdmins();
   }
 
   function countActiveExternalSystemAdmins(db, externalConfig = {}) {
     const providerId = externalProviderId(externalConfig);
-    return Number(db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM account_global_roles agr
-      JOIN accounts a ON a.id = agr.account_id
-      JOIN auth_identities ai ON ai.account_id = a.id
-      WHERE agr.role = 'system_admin'
-        AND a.status = 'active'
-        AND ai.provider_id = ?
-    `).get(providerId)?.count || 0);
+    return globalRepository(db).accounts.countActiveExternalSystemAdmins(providerId);
   }
 
   function genericLoginError() {
@@ -1692,21 +1997,29 @@ export function createCashflowGlobalService({
   function listAuthProviders({ publicOnly = false } = {}) {
     const db = openGlobalDb();
     try {
-      const rows = db.prepare(`
-        SELECT *
-        FROM auth_providers
-        ${publicOnly ? "WHERE enabled = 1" : ""}
-        ORDER BY display_name COLLATE NOCASE, id
-      `).all();
+      const rows = globalRepository(db).authProviders.list({ publicOnly });
       return rows.map(providerConfigFromRow).filter(Boolean);
     } finally {
       db.close();
     }
   }
 
+  async function listAuthProvidersAsync(options = {}) {
+    return await withGlobalRepository(async repo =>
+      (await repo.authProviders.list(options)).map(providerConfigFromRow).filter(Boolean)
+    );
+  }
+
   function authProviderRow(db, providerId) {
     const id = normalizeAuthProviderId(providerId);
-    const row = db.prepare("SELECT * FROM auth_providers WHERE id = ?").get(id);
+    const row = globalRepository(db).authProviders.get(id);
+    if (!row) throw notFound("Authentication provider not found");
+    return row;
+  }
+
+  async function authProviderRowForRepo(repo, providerId) {
+    const id = normalizeAuthProviderId(providerId);
+    const row = await repo.authProviders.get(id);
     if (!row) throw notFound("Authentication provider not found");
     return row;
   }
@@ -1717,33 +2030,19 @@ export function createCashflowGlobalService({
     try {
       let result;
       db.transaction(() => {
-        const existing = db.prepare("SELECT * FROM auth_providers WHERE id = ?").get(id);
+        const repo = globalRepository(db);
+        const existing = repo.authProviders.get(id);
         const next = normalizeProviderPayload(id, input, existing || null);
-        db.prepare(`
-          INSERT INTO auth_providers (
-            id, kind, display_name, enabled, issuer, client_id, secret_ref,
-            config_json, created_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-          ON CONFLICT(id) DO UPDATE SET
-            kind = excluded.kind,
-            display_name = excluded.display_name,
-            enabled = excluded.enabled,
-            issuer = excluded.issuer,
-            client_id = excluded.client_id,
-            secret_ref = excluded.secret_ref,
-            config_json = excluded.config_json,
-            updated_at = datetime('now')
-        `).run(
+        repo.authProviders.upsert({
           id,
-          next.kind,
-          next.displayName,
-          next.enabled ? 1 : 0,
-          next.issuer,
-          next.clientId,
-          next.secretRef,
-          JSON.stringify(next.config)
-        );
+          kind: next.kind,
+          displayName: next.displayName,
+          enabled: next.enabled,
+          issuer: next.issuer,
+          clientId: next.clientId,
+          secretRef: next.secretRef,
+          configJson: JSON.stringify(next.config)
+        });
         auditGlobalSecurity(db, {
           action: "admin_auth_provider_upsert",
           actorAccountId,
@@ -1755,7 +2054,7 @@ export function createCashflowGlobalService({
           targetId: id,
           targetType: "auth_provider"
         });
-        result = providerConfigFromRow(db.prepare("SELECT * FROM auth_providers WHERE id = ?").get(id));
+        result = providerConfigFromRow(repo.authProviders.get(id));
       })();
       return result;
     } finally {
@@ -1763,13 +2062,44 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function upsertAdminAuthProviderAsync(actorAccountId, providerId, input = {}) {
+    const id = normalizeAuthProviderId(providerId);
+    return await withExternalGlobalTransaction(async repo => {
+      const existing = await repo.authProviders.get(id);
+      const next = normalizeProviderPayload(id, input, existing || null);
+      await repo.authProviders.upsert({
+        id,
+        kind: next.kind,
+        displayName: next.displayName,
+        enabled: next.enabled,
+        issuer: next.issuer,
+        clientId: next.clientId,
+        secretRef: next.secretRef,
+        configJson: JSON.stringify(next.config)
+      });
+      await repo.audit.insertSecurityEvent({
+        action: "admin_auth_provider_upsert",
+        actorAccountId,
+        details: {
+          enabled: next.enabled,
+          kind: next.kind,
+          providerId: id
+        },
+        targetId: id,
+        targetType: "auth_provider"
+      });
+      return providerConfigFromRow(await repo.authProviders.get(id));
+    }, () => upsertAdminAuthProvider(actorAccountId, id, input));
+  }
+
   function deleteAdminAuthProvider(actorAccountId, providerId) {
     const id = normalizeAuthProviderId(providerId);
     const db = openGlobalDb();
     try {
       db.transaction(() => {
+        const repo = globalRepository(db);
         const row = authProviderRow(db, id);
-        db.prepare("DELETE FROM auth_providers WHERE id = ?").run(row.id);
+        repo.authProviders.delete(row.id);
         auditGlobalSecurity(db, {
           action: "admin_auth_provider_delete",
           actorAccountId,
@@ -1781,6 +2111,21 @@ export function createCashflowGlobalService({
     } finally {
       db.close();
     }
+  }
+
+  async function deleteAdminAuthProviderAsync(actorAccountId, providerId) {
+    const id = normalizeAuthProviderId(providerId);
+    return await withExternalGlobalTransaction(async repo => {
+      const row = await authProviderRowForRepo(repo, id);
+      await repo.authProviders.delete(row.id);
+      await repo.audit.insertSecurityEvent({
+        action: "admin_auth_provider_delete",
+        actorAccountId,
+        targetId: id,
+        targetType: "auth_provider"
+      });
+      return { deleted: true, providerId: id };
+    }, () => deleteAdminAuthProvider(actorAccountId, id));
   }
 
   function providerSubjectFromProfile(provider, profile = {}) {
@@ -1822,8 +2167,8 @@ export function createCashflowGlobalService({
     };
   }
 
-  async function oidcConfigurationForProvider(provider) {
-    const secret = providerSecret(provider.id);
+  async function oidcConfigurationForProvider(provider, explicitSecret = null) {
+    const secret = explicitSecret === null ? providerSecret(provider.id) : explicitSecret;
     const metadata = providerClientMetadata(provider, secret);
     if (provider.kind === "oidc" || provider.kind === "google") {
       return oidcClient.discovery(new URL(provider.issuer), provider.clientId, metadata, undefined, {
@@ -1838,7 +2183,7 @@ export function createCashflowGlobalService({
     }, provider.clientId, metadata);
   }
 
-  async function authorizationUrlForProvider(provider, { nonce, state, codeVerifier }) {
+  async function authorizationUrlForProvider(provider, { nonce, state, codeVerifier, secret = null }) {
     const codeChallenge = await oidcClient.calculatePKCECodeChallenge(codeVerifier);
     if (typeof authProviderHook === "function") {
       const hooked = await authProviderHook({
@@ -1850,7 +2195,7 @@ export function createCashflowGlobalService({
       });
       if (hooked?.authorizationUrl) return hooked.authorizationUrl;
     }
-    const config = await oidcConfigurationForProvider(provider);
+    const config = await oidcConfigurationForProvider(provider, secret);
     const url = oidcClient.buildAuthorizationUrl(config, {
       client_id: provider.clientId,
       code_challenge: codeChallenge,
@@ -1864,7 +2209,7 @@ export function createCashflowGlobalService({
     return url.href;
   }
 
-  async function providerProfileFromCallback(provider, callbackUrl, stateRow) {
+  async function providerProfileFromCallback(provider, callbackUrl, stateRow, secret = null) {
     if (typeof authProviderHook === "function") {
       const hooked = await authProviderHook({
         action: "callback",
@@ -1874,7 +2219,7 @@ export function createCashflowGlobalService({
       });
       if (hooked?.profile) return hooked.profile;
     }
-    const config = await oidcConfigurationForProvider(provider);
+    const config = await oidcConfigurationForProvider(provider, secret);
     const tokens = await oidcClient.authorizationCodeGrant(
       config,
       new URL(callbackUrl),
@@ -1902,13 +2247,24 @@ export function createCashflowGlobalService({
     return provider;
   }
 
-  async function startAuthProviderLogin(providerId) {
+  function providerForUseRow(row) {
+    const provider = providerConfigFromRow(row);
+    if (!provider) throw notFound("Authentication provider not found");
+    if (!provider.enabled) throw forbidden("Authentication provider is disabled");
+    if (!provider.clientId || !provider.config.redirectUri) {
+      throw conflict("Authentication provider is incomplete");
+    }
+    return provider;
+  }
+
+  async function startAuthProviderLoginSqlite(providerId) {
     const db = openGlobalDb();
     try {
       let stateRow;
       let provider;
       db.transaction(() => {
-        const config = db.prepare("SELECT active_mode FROM auth_config WHERE id = 1").get() || {};
+        const repo = globalRepository(db);
+        const config = repo.authConfig.getActiveMode();
         if ((config.active_mode || "none") !== "internal") {
           throw forbidden("Provider login is available only in internal authentication mode");
         }
@@ -1925,21 +2281,15 @@ export function createCashflowGlobalService({
           state,
           state_hash: authTokenHash(state)
         };
-        db.prepare(`
-          INSERT INTO auth_oauth_states (
-            id, state_hash, provider_id, account_id, purpose, code_verifier,
-            nonce, redirect_uri, status, expires_at, consumed_at, created_at, updated_at
-          )
-          VALUES (?, ?, ?, NULL, 'login', ?, ?, ?, 'pending', ?, NULL, datetime('now'), datetime('now'))
-        `).run(
-          `oauth_state_${crypto.randomUUID()}`,
-          stateRow.state_hash,
-          provider.id,
+        repo.oauthStates.insert({
+          stateHash: stateRow.state_hash,
+          providerId: provider.id,
+          purpose: "login",
           codeVerifier,
           nonce,
-          provider.config.redirectUri,
+          redirectUri: provider.config.redirectUri,
           expiresAt
-        );
+        });
       })();
       return {
         authorizationUrl: await authorizationUrlForProvider(provider, {
@@ -1954,14 +2304,65 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function startAuthProviderLink(actorAccountId, providerId) {
+  async function startAuthProviderLogin(providerId) {
+    const id = normalizeAuthProviderId(providerId);
+    const prepared = await withExternalGlobalTransaction(async repo => {
+      const config = await repo.authConfig.getActiveMode();
+      if ((config.active_mode || "none") !== "internal") {
+        throw forbidden("Provider login is available only in internal authentication mode");
+      }
+      const providerRow = await authProviderRowForRepo(repo, id);
+      const provider = providerForUseRow(providerRow);
+      const state = oidcClient.randomState();
+      const codeVerifier = oidcClient.randomPKCECodeVerifier();
+      const nonce = oidcClient.randomNonce();
+      const expiresAt = addMinutesIso(OAUTH_STATE_TTL_MINUTES);
+      const stateRow = {
+        code_verifier: codeVerifier,
+        nonce,
+        provider_id: provider.id,
+        redirect_uri: provider.config.redirectUri,
+        state,
+        state_hash: authTokenHash(state)
+      };
+      await repo.oauthStates.insert({
+        stateHash: stateRow.state_hash,
+        providerId: provider.id,
+        purpose: "login",
+        codeVerifier,
+        nonce,
+        redirectUri: provider.config.redirectUri,
+        expiresAt
+      });
+      return {
+        provider,
+        secret: secretValueFromRef(providerRow.secret_ref || ""),
+        stateRow
+      };
+    }, () => null);
+
+    if (!prepared) return await startAuthProviderLoginSqlite(providerId);
+
+    return {
+      authorizationUrl: await authorizationUrlForProvider(prepared.provider, {
+        codeVerifier: prepared.stateRow.code_verifier,
+        nonce: prepared.stateRow.nonce,
+        secret: prepared.secret,
+        state: prepared.stateRow.state
+      }),
+      provider: prepared.provider
+    };
+  }
+
+  async function startAuthProviderLinkSqlite(actorAccountId, providerId) {
     const accountId = normalizeUserId(actorAccountId);
     const db = openGlobalDb();
     try {
       let stateRow;
       let provider;
       db.transaction(() => {
-        const config = db.prepare("SELECT active_mode FROM auth_config WHERE id = 1").get() || {};
+        const repo = globalRepository(db);
+        const config = repo.authConfig.getActiveMode();
         if ((config.active_mode || "none") !== "internal") {
           throw forbidden("Provider linking is available only in internal authentication mode");
         }
@@ -1980,22 +2381,16 @@ export function createCashflowGlobalService({
           state,
           state_hash: authTokenHash(state)
         };
-        db.prepare(`
-          INSERT INTO auth_oauth_states (
-            id, state_hash, provider_id, account_id, purpose, code_verifier,
-            nonce, redirect_uri, status, expires_at, consumed_at, created_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, 'link', ?, ?, ?, 'pending', ?, NULL, datetime('now'), datetime('now'))
-        `).run(
-          `oauth_state_${crypto.randomUUID()}`,
-          stateRow.state_hash,
-          provider.id,
+        repo.oauthStates.insert({
+          stateHash: stateRow.state_hash,
+          providerId: provider.id,
           accountId,
+          purpose: "link",
           codeVerifier,
           nonce,
-          provider.config.redirectUri,
+          redirectUri: provider.config.redirectUri,
           expiresAt
-        );
+        });
       })();
       return {
         authorizationUrl: await authorizationUrlForProvider(provider, {
@@ -2010,7 +2405,61 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function completeAuthProviderCallback(providerId, callbackUrl) {
+  async function startAuthProviderLink(actorAccountId, providerId) {
+    const accountId = normalizeUserId(actorAccountId);
+    const id = normalizeAuthProviderId(providerId);
+    const prepared = await withExternalGlobalTransaction(async repo => {
+      const config = await repo.authConfig.getActiveMode();
+      if ((config.active_mode || "none") !== "internal") {
+        throw forbidden("Provider linking is available only in internal authentication mode");
+      }
+      const account = await repo.accounts.require(accountId);
+      if (account.status !== "active") throw conflict("Only active accounts can link authentication providers");
+      const providerRow = await authProviderRowForRepo(repo, id);
+      const provider = providerForUseRow(providerRow);
+      const state = oidcClient.randomState();
+      const codeVerifier = oidcClient.randomPKCECodeVerifier();
+      const nonce = oidcClient.randomNonce();
+      const expiresAt = addMinutesIso(OAUTH_STATE_TTL_MINUTES);
+      const stateRow = {
+        code_verifier: codeVerifier,
+        nonce,
+        provider_id: provider.id,
+        redirect_uri: provider.config.redirectUri,
+        state,
+        state_hash: authTokenHash(state)
+      };
+      await repo.oauthStates.insert({
+        stateHash: stateRow.state_hash,
+        providerId: provider.id,
+        accountId,
+        purpose: "link",
+        codeVerifier,
+        nonce,
+        redirectUri: provider.config.redirectUri,
+        expiresAt
+      });
+      return {
+        provider,
+        secret: secretValueFromRef(providerRow.secret_ref || ""),
+        stateRow
+      };
+    }, () => null);
+
+    if (!prepared) return await startAuthProviderLinkSqlite(actorAccountId, providerId);
+
+    return {
+      authorizationUrl: await authorizationUrlForProvider(prepared.provider, {
+        codeVerifier: prepared.stateRow.code_verifier,
+        nonce: prepared.stateRow.nonce,
+        secret: prepared.secret,
+        state: prepared.stateRow.state
+      }),
+      provider: prepared.provider
+    };
+  }
+
+  async function completeAuthProviderCallbackSqlite(providerId, callbackUrl) {
     const id = normalizeAuthProviderId(providerId);
     const currentUrl = new URL(callbackUrl);
     const state = String(currentUrl.searchParams.get("state") || "");
@@ -2020,20 +2469,15 @@ export function createCashflowGlobalService({
       let stateRow;
       let provider;
       db.transaction(() => {
+        const repo = globalRepository(db);
         provider = authProviderForUse(db, id);
-        stateRow = db.prepare(`
-          SELECT *
-          FROM auth_oauth_states
-          WHERE state_hash = ? AND provider_id = ?
-        `).get(authTokenHash(state), provider.id);
+        stateRow = repo.oauthStates.getByHashAndProvider({
+          providerId: provider.id,
+          stateHash: authTokenHash(state)
+        });
         if (!stateRow || stateRow.status !== "pending" || Date.parse(stateRow.expires_at) <= Date.now()) {
           if (stateRow?.status === "pending") {
-            db.prepare(`
-              UPDATE auth_oauth_states
-              SET status = 'expired',
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(stateRow.id);
+            repo.oauthStates.markExpired(stateRow.id);
           }
           throw unauthorized("Authentication state is invalid or expired");
         }
@@ -2047,16 +2491,12 @@ export function createCashflowGlobalService({
       let result;
 
       db.transaction(() => {
-        const freshState = db.prepare("SELECT * FROM auth_oauth_states WHERE id = ?").get(stateRow.id);
+        const repo = globalRepository(db);
+        const freshState = repo.oauthStates.get(stateRow.id);
         if (!freshState || freshState.status !== "pending") {
           throw unauthorized("Authentication state is invalid or expired");
         }
-        const existing = db.prepare(`
-          SELECT ai.account_id, a.status
-          FROM auth_identities ai
-          JOIN accounts a ON a.id = ai.account_id
-          WHERE ai.provider_id = ? AND ai.subject = ?
-        `).get(provider.id, subject);
+        const existing = repo.identities.findWithAccountByProviderSubject(provider.id, subject);
 
         if (freshState.purpose === "link") {
           if (!freshState.account_id) throw unauthorized("Authentication state is invalid or expired");
@@ -2070,31 +2510,18 @@ export function createCashflowGlobalService({
             }]);
           }
           accountExistsRow(db, freshState.account_id);
-          db.prepare(`
-            INSERT INTO auth_identities (
-              id, account_id, provider_id, subject, email, email_verified,
-              profile_json, created_at, updated_at, last_used_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'))
-            ON CONFLICT(provider_id, subject) DO UPDATE SET
-              account_id = excluded.account_id,
-              email = excluded.email,
-              email_verified = excluded.email_verified,
-              profile_json = excluded.profile_json,
-              last_used_at = datetime('now'),
-              updated_at = datetime('now')
-          `).run(
-            `identity_${crypto.randomUUID()}`,
-            freshState.account_id,
-            provider.id,
+          repo.identities.upsert({
+            accountId: freshState.account_id,
+            providerId: provider.id,
             subject,
             email,
-            emailVerified ? 1 : 0,
-            JSON.stringify({
+            emailVerified,
+            lastUsedNow: true,
+            profileJson: JSON.stringify({
               displayName,
               providerKind: provider.kind
             })
-          );
+          });
           result = {
             accountId: freshState.account_id,
             linked: true
@@ -2112,24 +2539,16 @@ export function createCashflowGlobalService({
           if (!existing || existing.status !== "active") {
             throw unauthorized("Provider login is not linked to an active account");
           }
-          db.prepare(`
-            UPDATE auth_identities
-            SET email = COALESCE(?, email),
-                email_verified = ?,
-                profile_json = ?,
-                last_used_at = datetime('now'),
-                updated_at = datetime('now')
-            WHERE provider_id = ? AND subject = ?
-          `).run(
+          repo.identities.updateProviderLogin({
             email,
-            emailVerified ? 1 : 0,
-            JSON.stringify({
+            emailVerified,
+            profileJson: JSON.stringify({
               displayName,
               providerKind: provider.kind
             }),
-            provider.id,
+            providerId: provider.id,
             subject
-          );
+          });
           result = {
             accountId: existing.account_id,
             linked: false
@@ -2145,18 +2564,133 @@ export function createCashflowGlobalService({
           });
         }
 
-        db.prepare(`
-          UPDATE auth_oauth_states
-          SET status = 'consumed',
-              consumed_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE id = ?
-        `).run(freshState.id);
+        repo.oauthStates.markConsumed(freshState.id);
       })();
       return result;
     } finally {
       db.close();
     }
+  }
+
+  async function completeAuthProviderCallback(providerId, callbackUrl) {
+    if (!globalStore || globalStore.backend === "sqlite") {
+      return await completeAuthProviderCallbackSqlite(providerId, callbackUrl);
+    }
+
+    const id = normalizeAuthProviderId(providerId);
+    const currentUrl = new URL(callbackUrl);
+    const state = String(currentUrl.searchParams.get("state") || "");
+    if (!state) throw badRequest("OAuth state is required", [{ field: "state", reason: "required" }]);
+
+    const prepared = await withExternalGlobalTransaction(async repo => {
+      const providerRow = await authProviderRowForRepo(repo, id);
+      const provider = providerForUseRow(providerRow);
+      const stateRow = await repo.oauthStates.getByHashAndProvider({
+        providerId: provider.id,
+        stateHash: authTokenHash(state)
+      });
+      if (!stateRow || stateRow.status !== "pending" || Date.parse(stateRow.expires_at) <= Date.now()) {
+        if (stateRow?.status === "pending") {
+          await repo.oauthStates.markExpired(stateRow.id);
+        }
+        throw unauthorized("Authentication state is invalid or expired");
+      }
+      return {
+        provider,
+        secret: secretValueFromRef(providerRow.secret_ref || ""),
+        stateRow
+      };
+    }, () => null);
+    if (!prepared) return await completeAuthProviderCallbackSqlite(providerId, callbackUrl);
+
+    const profile = await providerProfileFromCallback(
+      prepared.provider,
+      currentUrl.href,
+      prepared.stateRow,
+      prepared.secret
+    );
+    const subject = providerSubjectFromProfile(prepared.provider, profile);
+    const email = providerEmailFromProfile(prepared.provider, profile);
+    const emailVerified = providerEmailVerifiedFromProfile(prepared.provider, profile);
+    const displayName = providerDisplayNameFromProfile(prepared.provider, profile, email || subject);
+
+    return await withExternalGlobalTransaction(async repo => {
+      const freshState = await repo.oauthStates.get(prepared.stateRow.id);
+      if (!freshState || freshState.status !== "pending") {
+        throw unauthorized("Authentication state is invalid or expired");
+      }
+      const existing = await repo.identities.findWithAccountByProviderSubject(prepared.provider.id, subject);
+
+      let result;
+      if (freshState.purpose === "link") {
+        if (!freshState.account_id) throw unauthorized("Authentication state is invalid or expired");
+        if (!email || !emailVerified) {
+          throw forbidden("A verified provider email is required before linking an identity");
+        }
+        if (existing && existing.account_id !== freshState.account_id) {
+          throw conflict("Provider identity is already linked to another account", [{
+            field: "subject",
+            reason: "not_unique"
+          }]);
+        }
+        await repo.accounts.require(freshState.account_id);
+        await repo.identities.upsert({
+          accountId: freshState.account_id,
+          providerId: prepared.provider.id,
+          subject,
+          email,
+          emailVerified,
+          lastUsedNow: true,
+          profileJson: JSON.stringify({
+            displayName,
+            providerKind: prepared.provider.kind
+          })
+        });
+        result = {
+          accountId: freshState.account_id,
+          linked: true
+        };
+        await repo.audit.insertSecurityEvent({
+          action: "internal_provider_identity_link",
+          actorAccountId: freshState.account_id,
+          details: {
+            providerId: prepared.provider.id
+          },
+          targetId: freshState.account_id,
+          targetType: "account"
+        });
+      } else {
+        if (!existing || existing.status !== "active") {
+          throw unauthorized("Provider login is not linked to an active account");
+        }
+        await repo.identities.updateProviderLogin({
+          email,
+          emailVerified,
+          profileJson: JSON.stringify({
+            displayName,
+            providerKind: prepared.provider.kind
+          }),
+          providerId: prepared.provider.id,
+          subject
+        });
+        result = {
+          accountId: existing.account_id,
+          linked: false
+        };
+        await repo.audit.insertSecurityEvent({
+          action: "internal_provider_login",
+          actorAccountId: existing.account_id,
+          details: {
+            providerId: prepared.provider.id
+          },
+          targetId: existing.account_id,
+          targetType: "account"
+        });
+      }
+
+      await repo.oauthStates.markConsumed(freshState.id);
+      return result;
+    }, () => completeAuthProviderCallbackSqlite(providerId, callbackUrl));
   }
 
   function setAdminProviderIdentity(actorAccountId, accountId, providerId, input = {}) {
@@ -2177,43 +2711,27 @@ export function createCashflowGlobalService({
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         const account = accountExistsRow(db, normalizedAccountId);
         if (account.status !== "active") throw conflict("Only active accounts can receive provider identities");
         authProviderRow(db, normalizedProviderId);
-        const existing = db.prepare(`
-          SELECT account_id
-          FROM auth_identities
-          WHERE provider_id = ? AND subject = ?
-        `).get(normalizedProviderId, subject);
+        const existing = repo.identities.findAccountByProviderSubject(normalizedProviderId, subject);
         if (existing && existing.account_id !== normalizedAccountId) {
           throw conflict("Provider identity is already linked to another account", [{
             field: "subject",
             reason: "not_unique"
           }]);
         }
-        db.prepare(`
-          INSERT INTO auth_identities (
-            id, account_id, provider_id, subject, email, email_verified,
-            profile_json, created_at, updated_at, last_used_at
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL)
-          ON CONFLICT(provider_id, subject) DO UPDATE SET
-            account_id = excluded.account_id,
-            email = excluded.email,
-            email_verified = excluded.email_verified,
-            profile_json = excluded.profile_json,
-            updated_at = datetime('now')
-        `).run(
-          `identity_${crypto.randomUUID()}`,
-          normalizedAccountId,
-          normalizedProviderId,
+        repo.identities.upsert({
+          accountId: normalizedAccountId,
+          providerId: normalizedProviderId,
           subject,
           email,
-          emailVerified ? 1 : 0,
-          JSON.stringify({
+          emailVerified,
+          profileJson: JSON.stringify({
             linkedBy: "admin"
           })
-        );
+        });
         auditGlobalSecurity(db, {
           action: "admin_provider_identity_link",
           actorAccountId,
@@ -2229,6 +2747,59 @@ export function createCashflowGlobalService({
     } finally {
       db.close();
     }
+  }
+
+  async function setAdminProviderIdentityAsync(actorAccountId, accountId, providerId, input = {}) {
+    const normalizedAccountId = normalizeUserId(accountId);
+    const normalizedProviderId = normalizeAuthProviderId(providerId);
+    const subject = normalizeExternalSubject(input.subject, "subject");
+    const email = Object.prototype.hasOwnProperty.call(input, "email") && String(input.email || "").trim()
+      ? normalizeAccountEmail(input.email, "email")
+      : null;
+    const emailVerified = normalizeAdminBoolean(
+      Object.prototype.hasOwnProperty.call(input, "emailVerified") ? input.emailVerified :
+        Object.prototype.hasOwnProperty.call(input, "email_verified") ? input.email_verified :
+          true,
+      "emailVerified"
+    );
+
+    return await withExternalGlobalTransaction(async repo => {
+      const account = await repo.accounts.require(normalizedAccountId);
+      if (account.status !== "active") throw conflict("Only active accounts can receive provider identities");
+      await authProviderRowForRepo(repo, normalizedProviderId);
+      const existing = await repo.identities.findAccountByProviderSubject(normalizedProviderId, subject);
+      if (existing && existing.account_id !== normalizedAccountId) {
+        throw conflict("Provider identity is already linked to another account", [{
+          field: "subject",
+          reason: "not_unique"
+        }]);
+      }
+      await repo.identities.upsert({
+        accountId: normalizedAccountId,
+        providerId: normalizedProviderId,
+        subject,
+        email,
+        emailVerified,
+        profileJson: JSON.stringify({
+          linkedBy: "admin"
+        })
+      });
+      await repo.audit.insertSecurityEvent({
+        action: "admin_provider_identity_link",
+        actorAccountId,
+        details: {
+          providerId: normalizedProviderId
+        },
+        targetId: normalizedAccountId,
+        targetType: "account"
+      });
+      return await accountSummaryForRepo(repo, normalizedAccountId);
+    }, () => setAdminProviderIdentity(actorAccountId, normalizedAccountId, normalizedProviderId, {
+      ...input,
+      email,
+      emailVerified,
+      subject
+    }));
   }
 
   function setAdminExternalIdentity(actorAccountId, accountId, input = {}) {
@@ -2248,15 +2819,12 @@ export function createCashflowGlobalService({
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         const account = accountExistsRow(db, normalizedId);
         if (account.status !== "active") throw conflict("Only active accounts can receive external identities");
-        const config = authConfigFromRow(db.prepare("SELECT * FROM auth_config WHERE id = 1").get() || {});
+        const config = authConfigFromRow(repo.authConfig.get() || {});
         const providerId = externalProviderId(config.draftConfig.external);
-        const existing = db.prepare(`
-          SELECT account_id
-          FROM auth_identities
-          WHERE provider_id = ? AND subject = ?
-        `).get(providerId, subject);
+        const existing = repo.identities.findAccountByProviderSubject(providerId, subject);
         if (existing && existing.account_id !== normalizedId) {
           throw conflict("External identity is already linked to another account", [{
             field: "subject",
@@ -2264,29 +2832,16 @@ export function createCashflowGlobalService({
           }]);
         }
 
-        db.prepare(`
-          INSERT INTO auth_identities (
-            id, account_id, provider_id, subject, email, email_verified,
-            profile_json, created_at, updated_at, last_used_at
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL)
-          ON CONFLICT(provider_id, subject) DO UPDATE SET
-            account_id = excluded.account_id,
-            email = excluded.email,
-            email_verified = excluded.email_verified,
-            profile_json = excluded.profile_json,
-            updated_at = datetime('now')
-        `).run(
-          `identity_${crypto.randomUUID()}`,
-          normalizedId,
+        repo.identities.upsert({
+          accountId: normalizedId,
           providerId,
           subject,
           email,
-          emailVerified ? 1 : 0,
-          JSON.stringify({
+          emailVerified,
+          profileJson: JSON.stringify({
             trustedIssuer: config.draftConfig.external.trustedIssuer || ""
           })
-        );
+        });
         auditGlobalSecurity(db, {
           action: "admin_external_identity_link",
           actorAccountId,
@@ -2304,38 +2859,84 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function createAdminPasswordResetToken(actorAccountId, accountId, input = {}) {
+  async function setAdminExternalIdentityAsync(actorAccountId, accountId, input = {}) {
     const normalizedId = normalizeUserId(accountId);
-    const purpose = String(input.purpose || "password_reset").trim() === "password_setup"
-      ? "password_setup"
-      : "password_reset";
-    const email = Object.prototype.hasOwnProperty.call(input, "email")
+    const subject = normalizeExternalSubject(input.subject, "subject");
+    const email = Object.prototype.hasOwnProperty.call(input, "email") && String(input.email || "").trim()
       ? normalizeAccountEmail(input.email, "email")
       : null;
-    const token = randomAuthToken();
-    const tokenHash = authTokenHash(token);
-    const expiresAt = addHoursIso(PASSWORD_TOKEN_TTL_HOURS);
+    const emailVerified = normalizeAdminBoolean(
+      Object.prototype.hasOwnProperty.call(input, "emailVerified") ? input.emailVerified :
+        Object.prototype.hasOwnProperty.call(input, "email_verified") ? input.email_verified :
+          true,
+      "emailVerified"
+    );
 
+    return await withExternalGlobalTransaction(async repo => {
+      const account = await repo.accounts.require(normalizedId);
+      if (account.status !== "active") throw conflict("Only active accounts can receive external identities");
+      const config = authConfigFromRow(await repo.authConfig.get() || {});
+      const providerId = externalProviderId(config.draftConfig.external);
+      const existing = await repo.identities.findAccountByProviderSubject(providerId, subject);
+      if (existing && existing.account_id !== normalizedId) {
+        throw conflict("External identity is already linked to another account", [{
+          field: "subject",
+          reason: "not_unique"
+        }]);
+      }
+
+      await repo.identities.upsert({
+        accountId: normalizedId,
+        providerId,
+        subject,
+        email,
+        emailVerified,
+        profileJson: JSON.stringify({
+          trustedIssuer: config.draftConfig.external.trustedIssuer || ""
+        })
+      });
+      await repo.audit.insertSecurityEvent({
+        action: "admin_external_identity_link",
+        actorAccountId,
+        details: {
+          providerId
+        },
+        targetId: normalizedId,
+        targetType: "account"
+      });
+      return await accountSummaryForRepo(repo, normalizedId);
+    }, () => setAdminExternalIdentity(actorAccountId, normalizedId, {
+      ...input,
+      email,
+      emailVerified,
+      subject
+    }));
+  }
+
+  function createAdminPasswordResetTokenSqlite(actorAccountId, accountId, {
+    email,
+    expiresAt,
+    normalizedId,
+    purpose,
+    token,
+    tokenHash
+  }) {
     const db = openGlobalDb();
     try {
       let result;
       db.transaction(() => {
+        const repo = globalRepository(db);
         const account = accountExistsRow(db, normalizedId);
         if (account.status !== "active") throw conflict("Only active accounts can receive password setup links");
 
         if (email && email !== account.email) {
-          if (db.prepare("SELECT 1 FROM accounts WHERE email = ? AND id != ?").get(email, normalizedId)) {
+          if (repo.accounts.emailExists(email, { excludeId: normalizedId })) {
             throw conflict("Email is already assigned to another account", [{
               field: "email",
               reason: "not_unique"
             }]);
           }
-          db.prepare(`
-            UPDATE accounts
-            SET email = ?,
-                updated_at = datetime('now')
-            WHERE id = ?
-          `).run(email, normalizedId);
+          repo.accounts.updateEmail(normalizedId, email);
         }
 
         const effectiveEmail = email || account.email;
@@ -2346,27 +2947,14 @@ export function createCashflowGlobalService({
           }]);
         }
 
-        db.prepare(`
-          UPDATE password_reset_tokens
-          SET status = 'revoked',
-              updated_at = datetime('now')
-          WHERE account_id = ?
-            AND status = 'pending'
-        `).run(normalizedId);
-        db.prepare(`
-          INSERT INTO password_reset_tokens (
-            id, account_id, token_hash, purpose, status, expires_at,
-            consumed_at, created_by_account_id, created_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, 'pending', ?, NULL, ?, datetime('now'), datetime('now'))
-        `).run(
-          `password_token_${crypto.randomUUID()}`,
-          normalizedId,
+        repo.passwordResetTokens.revokePendingForAccount(normalizedId);
+        repo.passwordResetTokens.insert({
+          accountId: normalizedId,
           tokenHash,
           purpose,
           expiresAt,
-          actorAccountId || null
-        );
+          createdByAccountId: actorAccountId || null
+        });
         auditGlobalSecurity(db, {
           action: purpose === "password_setup" ? "admin_password_setup_token_create" : "admin_password_reset_token_create",
           actorAccountId,
@@ -2390,40 +2978,88 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function completeInternalPasswordSetup(input = {}) {
-    const rawToken = String(input.token || "").trim();
-    if (!rawToken) {
-      throw badRequest("Password setup token is invalid or expired", [{
-        field: "token",
-        reason: "invalid_or_expired"
-      }]);
-    }
-    const password = normalizePassword(input.password, "password");
-    const passwordHash = await argon2.hash(passwordMaterial(password), {
-      type: argon2.argon2id
-    });
-    const tokenHash = authTokenHash(rawToken);
-    const nowMs = Date.now();
+  async function createAdminPasswordResetToken(actorAccountId, accountId, input = {}) {
+    const normalizedId = normalizeUserId(accountId);
+    const purpose = String(input.purpose || "password_reset").trim() === "password_setup"
+      ? "password_setup"
+      : "password_reset";
+    const email = Object.prototype.hasOwnProperty.call(input, "email")
+      ? normalizeAccountEmail(input.email, "email")
+      : null;
+    const token = randomAuthToken();
+    const tokenHash = authTokenHash(token);
+    const expiresAt = addHoursIso(PASSWORD_TOKEN_TTL_HOURS);
 
+    return await withExternalGlobalTransaction(async repo => {
+      const account = await repo.accounts.require(normalizedId);
+      if (account.status !== "active") throw conflict("Only active accounts can receive password setup links");
+
+      if (email && email !== account.email) {
+        if (await repo.accounts.emailExists(email, { excludeId: normalizedId })) {
+          throw conflict("Email is already assigned to another account", [{
+            field: "email",
+            reason: "not_unique"
+          }]);
+        }
+        await repo.accounts.updateEmail(normalizedId, email);
+      }
+
+      const effectiveEmail = email || account.email;
+      if (!effectiveEmail) {
+        throw badRequest("Account email is required before issuing an internal login setup link", [{
+          field: "email",
+          reason: "required"
+        }]);
+      }
+
+      await repo.passwordResetTokens.revokePendingForAccount(normalizedId);
+      await repo.passwordResetTokens.insert({
+        accountId: normalizedId,
+        tokenHash,
+        purpose,
+        expiresAt,
+        createdByAccountId: actorAccountId || null
+      });
+      await repo.audit.insertSecurityEvent({
+        action: purpose === "password_setup" ? "admin_password_setup_token_create" : "admin_password_reset_token_create",
+        actorAccountId,
+        details: {
+          expiresAt,
+          purpose
+        },
+        targetId: normalizedId,
+        targetType: "account"
+      });
+      return {
+        account: await accountSummaryForRepo(repo, normalizedId),
+        expiresAt,
+        purpose,
+        token
+      };
+    }, () => createAdminPasswordResetTokenSqlite(actorAccountId, normalizedId, {
+      email,
+      expiresAt,
+      normalizedId,
+      purpose,
+      token,
+      tokenHash
+    }));
+  }
+
+  function completeInternalPasswordSetupSqlite({
+    nowMs,
+    passwordHash,
+    tokenHash
+  }) {
     const db = openGlobalDb();
     try {
       let result;
       db.transaction(() => {
-        const tokenRow = db.prepare(`
-          SELECT prt.*, a.email, a.display_name, a.status AS account_status
-          FROM password_reset_tokens prt
-          JOIN accounts a ON a.id = prt.account_id
-          WHERE prt.token_hash = ?
-            AND prt.status = 'pending'
-        `).get(tokenHash);
+        const repo = globalRepository(db);
+        const tokenRow = repo.passwordResetTokens.getPendingWithAccountByHash(tokenHash);
         if (!tokenRow || Date.parse(tokenRow.expires_at) <= nowMs || tokenRow.account_status !== "active") {
           if (tokenRow && Date.parse(tokenRow.expires_at) <= nowMs) {
-            db.prepare(`
-              UPDATE password_reset_tokens
-              SET status = 'expired',
-                  updated_at = datetime('now')
-              WHERE id = ?
-            `).run(tokenRow.id);
+            repo.passwordResetTokens.markExpired(tokenRow.id);
           }
           throw badRequest("Password setup token is invalid or expired", [{
             field: "token",
@@ -2434,32 +3070,12 @@ export function createCashflowGlobalService({
           throw conflict("Account email is required before setting an internal login password");
         }
 
-        db.prepare(`
-          INSERT INTO password_credentials (
-            account_id, password_hash, password_changed_at, failed_attempts,
-            locked_until, created_at, updated_at
-          )
-          VALUES (?, ?, datetime('now'), 0, NULL, datetime('now'), datetime('now'))
-          ON CONFLICT(account_id) DO UPDATE SET
-            password_hash = excluded.password_hash,
-            password_changed_at = excluded.password_changed_at,
-            failed_attempts = 0,
-            locked_until = NULL,
-            updated_at = datetime('now')
-        `).run(tokenRow.account_id, passwordHash);
-        db.prepare(`
-          UPDATE password_reset_tokens
-          SET status = 'consumed',
-              consumed_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE id = ?
-        `).run(tokenRow.id);
-        db.prepare(`
-          UPDATE auth_sessions
-          SET revoked_at = COALESCE(revoked_at, datetime('now'))
-          WHERE account_id = ?
-            AND revoked_at IS NULL
-        `).run(tokenRow.account_id);
+        repo.passwordCredentials.upsert({
+          accountId: tokenRow.account_id,
+          passwordHash
+        });
+        repo.passwordResetTokens.markConsumed(tokenRow.id);
+        repo.sessions.revokeForAccount(tokenRow.account_id);
         auditGlobalSecurity(db, {
           action: tokenRow.purpose === "password_setup" ? "password_setup_complete" : "password_reset_complete",
           actorAccountId: tokenRow.account_id,
@@ -2477,7 +3093,60 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function authenticateInternalLogin(input = {}) {
+  async function completeInternalPasswordSetup(input = {}) {
+    const rawToken = String(input.token || "").trim();
+    if (!rawToken) {
+      throw badRequest("Password setup token is invalid or expired", [{
+        field: "token",
+        reason: "invalid_or_expired"
+      }]);
+    }
+    const password = normalizePassword(input.password, "password");
+    const passwordHash = await argon2.hash(passwordMaterial(password), {
+      type: argon2.argon2id
+    });
+    const tokenHash = authTokenHash(rawToken);
+    const nowMs = Date.now();
+
+    return await withExternalGlobalTransaction(async repo => {
+      const tokenRow = await repo.passwordResetTokens.getPendingWithAccountByHash(tokenHash);
+      if (!tokenRow || Date.parse(tokenRow.expires_at) <= nowMs || tokenRow.account_status !== "active") {
+        if (tokenRow && Date.parse(tokenRow.expires_at) <= nowMs) {
+          await repo.passwordResetTokens.markExpired(tokenRow.id);
+        }
+        throw badRequest("Password setup token is invalid or expired", [{
+          field: "token",
+          reason: "invalid_or_expired"
+        }]);
+      }
+      if (!tokenRow.email) {
+        throw conflict("Account email is required before setting an internal login password");
+      }
+
+      await repo.passwordCredentials.upsert({
+        accountId: tokenRow.account_id,
+        passwordHash
+      });
+      await repo.passwordResetTokens.markConsumed(tokenRow.id);
+      await repo.sessions.revokeForAccount(tokenRow.account_id);
+      await repo.audit.insertSecurityEvent({
+        action: tokenRow.purpose === "password_setup" ? "password_setup_complete" : "password_reset_complete",
+        actorAccountId: tokenRow.account_id,
+        targetId: tokenRow.account_id,
+        targetType: "account"
+      });
+      return {
+        account: await accountSummaryForRepo(repo, tokenRow.account_id),
+        ok: true
+      };
+    }, () => completeInternalPasswordSetupSqlite({
+      nowMs,
+      passwordHash,
+      tokenHash
+    }));
+  }
+
+  async function authenticateInternalLoginSqlite(input = {}) {
     let email;
     try {
       email = normalizeAccountEmail(input.email, "email");
@@ -2489,7 +3158,8 @@ export function createCashflowGlobalService({
     const db = openGlobalDb();
     let row;
     try {
-      const config = db.prepare("SELECT active_mode, draft_config_json FROM auth_config WHERE id = 1").get() || {};
+      const repo = globalRepository(db);
+      const config = repo.authConfig.getActiveModeAndDraftConfig();
       if ((config.active_mode || "none") !== "internal") {
         throw forbidden("Internal login is disabled");
       }
@@ -2497,12 +3167,7 @@ export function createCashflowGlobalService({
       if (draftConfig.internal.allowPasswordLogin === false) {
         throw forbidden("Password login is disabled");
       }
-      row = db.prepare(`
-        SELECT a.id AS account_id, a.status, pc.password_hash, pc.failed_attempts, pc.locked_until
-        FROM accounts a
-        JOIN password_credentials pc ON pc.account_id = a.id
-        WHERE a.email = ?
-      `).get(email);
+      row = repo.passwordCredentials.getLoginByEmail(email);
       if (
         !row
         || row.status !== "active"
@@ -2517,21 +3182,15 @@ export function createCashflowGlobalService({
     const verified = await argon2.verify(row.password_hash, passwordMaterial(input.password));
     const updateDb = openGlobalDb();
     try {
+      const repo = globalRepository(updateDb);
       if (!verified) {
         const attempts = Number(row.failed_attempts || 0) + 1;
-        updateDb.prepare(`
-          UPDATE password_credentials
-          SET failed_attempts = ?,
-              locked_until = CASE WHEN ? >= ? THEN ? ELSE locked_until END,
-              updated_at = datetime('now')
-          WHERE account_id = ?
-        `).run(
+        repo.passwordCredentials.recordFailedLogin({
+          accountId: row.account_id,
           attempts,
-          attempts,
-          PASSWORD_LOCK_THRESHOLD,
-          addMinutesIso(PASSWORD_LOCK_MINUTES),
-          row.account_id
-        );
+          lockThreshold: PASSWORD_LOCK_THRESHOLD,
+          lockUntil: addMinutesIso(PASSWORD_LOCK_MINUTES)
+        });
         auditGlobalSecurity(updateDb, {
           action: "internal_login",
           actorAccountId: row.account_id,
@@ -2542,20 +3201,10 @@ export function createCashflowGlobalService({
         throw genericLoginError();
       }
 
-      const activeAccount = updateDb.prepare(`
-        SELECT status
-        FROM accounts
-        WHERE id = ?
-      `).get(row.account_id);
+      const activeAccount = repo.accounts.getStatus(row.account_id);
       if (!activeAccount || activeAccount.status !== "active") throw genericLoginError();
 
-      updateDb.prepare(`
-        UPDATE password_credentials
-        SET failed_attempts = 0,
-            locked_until = NULL,
-            updated_at = datetime('now')
-        WHERE account_id = ?
-      `).run(row.account_id);
+      repo.passwordCredentials.recordSuccessfulLogin(row.account_id);
       auditGlobalSecurity(updateDb, {
         action: "internal_login",
         actorAccountId: row.account_id,
@@ -2567,6 +3216,155 @@ export function createCashflowGlobalService({
       };
     } finally {
       updateDb.close();
+    }
+  }
+
+  async function authenticateInternalLogin(input = {}) {
+    if (!globalStore || globalStore.backend === "sqlite") {
+      return await authenticateInternalLoginSqlite(input);
+    }
+
+    let email;
+    try {
+      email = normalizeAccountEmail(input.email, "email");
+      normalizePassword(input.password, "password");
+    } catch {
+      throw genericLoginError();
+    }
+
+    const row = await withGlobalRepository(async repo => {
+      const config = await repo.authConfig.getActiveModeAndDraftConfig();
+      if ((config.active_mode || "none") !== "internal") {
+        throw forbidden("Internal login is disabled");
+      }
+      const draftConfig = normalizeDraftAuthConfig(safeJsonParseObject(config.draft_config_json || "{}", "draftConfig"));
+      if (draftConfig.internal.allowPasswordLogin === false) {
+        throw forbidden("Password login is disabled");
+      }
+      const loginRow = await repo.passwordCredentials.getLoginByEmail(email);
+      if (
+        !loginRow
+        || loginRow.status !== "active"
+        || (loginRow.locked_until && Date.parse(loginRow.locked_until) > Date.now())
+      ) {
+        throw genericLoginError();
+      }
+      return loginRow;
+    });
+
+    const verified = await argon2.verify(row.password_hash, passwordMaterial(input.password));
+    return await withExternalGlobalTransaction(async repo => {
+      if (!verified) {
+        const attempts = Number(row.failed_attempts || 0) + 1;
+        await repo.passwordCredentials.recordFailedLogin({
+          accountId: row.account_id,
+          attempts,
+          lockThreshold: PASSWORD_LOCK_THRESHOLD,
+          lockUntil: addMinutesIso(PASSWORD_LOCK_MINUTES)
+        });
+        await repo.audit.insertSecurityEvent({
+          action: "internal_login",
+          actorAccountId: row.account_id,
+          outcome: "failure",
+          targetId: row.account_id,
+          targetType: "account"
+        });
+        throw genericLoginError();
+      }
+
+      const activeAccount = await repo.accounts.getStatus(row.account_id);
+      if (!activeAccount || activeAccount.status !== "active") throw genericLoginError();
+
+      await repo.passwordCredentials.recordSuccessfulLogin(row.account_id);
+      await repo.audit.insertSecurityEvent({
+        action: "internal_login",
+        actorAccountId: row.account_id,
+        targetId: row.account_id,
+        targetType: "account"
+      });
+      return {
+        accountId: row.account_id
+      };
+    }, () => authenticateInternalLoginSqlite(input));
+  }
+
+  function registerInternalAccountWithInvitationSqlite({
+    accountId,
+    email,
+    invitationHash,
+    name,
+    passwordHash
+  }) {
+    const db = openGlobalDb();
+    try {
+      let result;
+      db.transaction(() => {
+        const repo = globalRepository(db);
+        const config = repo.authConfig.getActiveMode();
+        if ((config.active_mode || "none") !== "internal") {
+          throw forbidden("Internal registration is disabled");
+        }
+        const invitation = repo.invitations.getByTokenHash(invitationHash);
+        if (!invitation) throw notFound("Invitation not found");
+        if (invitation.status !== "pending") throw conflict("Invitation is no longer available");
+        if (databaseTimestampMs(invitation.expires_at) <= Date.now()) throw conflict("Invitation has expired");
+        if (invitation.target_account_id) {
+          throw conflict("Invitation is assigned to an existing account");
+        }
+        if (!invitation.target_email) {
+          throw conflict("Invitation requires an email target before account registration");
+        }
+        if (String(invitation.target_email || "").toLowerCase() !== email) {
+          throw forbidden("Invitation target does not match the requested email");
+        }
+        if (repo.accounts.emailExists(email)) {
+          throw conflict("Email is already assigned to another account", [{
+            field: "email",
+            reason: "not_unique"
+          }]);
+        }
+
+        repo.accounts.insert({ id: accountId, email, displayName: name });
+        repo.passwordCredentials.insert({ accountId, passwordHash });
+        repo.invitations.acceptForAccount({
+          accountId,
+          invitationId: invitation.id,
+          role: invitation.role
+        });
+        repo.memberships.insert({
+          budgetId: invitation.budget_id,
+          accountId,
+          role: invitation.role,
+          invitedByAccountId: invitation.invited_by_account_id
+        });
+        auditGlobalSecurity(db, {
+          action: "internal_invitation_register",
+          actorAccountId: accountId,
+          details: {
+            invitationId: invitation.id,
+            role: invitation.role
+          },
+          targetId: accountId,
+          targetType: "account"
+        });
+        auditGlobalSecurity(db, {
+          action: "budget_invitation_accept",
+          actorAccountId: accountId,
+          targetId: invitation.id,
+          targetType: "budget_invitation"
+        });
+        result = {
+          account: accountSummary(db, accountId),
+          budgetId: invitation.budget_id,
+          membership: repo.memberships.get({
+            budgetId: invitation.budget_id,
+            accountId
+          })
+        };
+      })();
+      return result;
+    } finally {
+      db.close();
     }
   }
 
@@ -2587,108 +3385,85 @@ export function createCashflowGlobalService({
     const invitationHash = authTokenHash(rawToken);
     const accountId = `account_${crypto.randomUUID()}`;
 
-    const db = openGlobalDb();
-    try {
-      let result;
-      db.transaction(() => {
-        const config = db.prepare("SELECT active_mode FROM auth_config WHERE id = 1").get() || {};
-        if ((config.active_mode || "none") !== "internal") {
-          throw forbidden("Internal registration is disabled");
-        }
-        const invitation = db.prepare(`
-          SELECT *
-          FROM budget_invitations
-          WHERE token_hash = ?
-        `).get(invitationHash);
-        if (!invitation) throw notFound("Invitation not found");
-        if (invitation.status !== "pending") throw conflict("Invitation is no longer available");
-        if (Date.parse(`${invitation.expires_at}Z`) <= Date.now()) throw conflict("Invitation has expired");
-        if (invitation.target_account_id) {
-          throw conflict("Invitation is assigned to an existing account");
-        }
-        if (!invitation.target_email) {
-          throw conflict("Invitation requires an email target before account registration");
-        }
-        if (String(invitation.target_email || "").toLowerCase() !== email) {
-          throw forbidden("Invitation target does not match the requested email");
-        }
-        if (db.prepare("SELECT 1 FROM accounts WHERE email = ?").get(email)) {
-          throw conflict("Email is already assigned to another account", [{
-            field: "email",
-            reason: "not_unique"
-          }]);
-        }
+    return await withExternalGlobalTransaction(async repo => {
+      const config = await repo.authConfig.getActiveMode();
+      if ((config.active_mode || "none") !== "internal") {
+        throw forbidden("Internal registration is disabled");
+      }
+      const invitation = await repo.invitations.getByTokenHash(invitationHash);
+      if (!invitation) throw notFound("Invitation not found");
+      if (invitation.status !== "pending") throw conflict("Invitation is no longer available");
+      if (databaseTimestampMs(invitation.expires_at) <= Date.now()) throw conflict("Invitation has expired");
+      if (invitation.target_account_id) {
+        throw conflict("Invitation is assigned to an existing account");
+      }
+      if (!invitation.target_email) {
+        throw conflict("Invitation requires an email target before account registration");
+      }
+      if (String(invitation.target_email || "").toLowerCase() !== email) {
+        throw forbidden("Invitation target does not match the requested email");
+      }
+      if (await repo.accounts.emailExists(email)) {
+        throw conflict("Email is already assigned to another account", [{
+          field: "email",
+          reason: "not_unique"
+        }]);
+      }
 
-        db.prepare(`
-          INSERT INTO accounts (
-            id, email, display_name, status, created_at, updated_at
-          )
-          VALUES (?, ?, ?, 'active', datetime('now'), datetime('now'))
-        `).run(accountId, email, name);
-        db.prepare(`
-          INSERT INTO password_credentials (
-            account_id, password_hash, password_changed_at, failed_attempts,
-            locked_until, created_at, updated_at
-          )
-          VALUES (?, ?, datetime('now'), 0, NULL, datetime('now'), datetime('now'))
-        `).run(accountId, passwordHash);
-        db.prepare(`
-          UPDATE budget_invitations
-          SET target_account_id = ?,
-              status = 'accepted',
-              accepted_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE id = ? AND status = 'pending'
-        `).run(accountId, invitation.id);
-        db.prepare(`
-          INSERT INTO budget_memberships (
-            budget_id, account_id, role, invited_by_account_id, created_at, updated_at
-          )
-          VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-        `).run(
-          invitation.budget_id,
-          accountId,
-          invitation.role,
-          invitation.invited_by_account_id
-        );
-        auditGlobalSecurity(db, {
-          action: "internal_invitation_register",
-          actorAccountId: accountId,
-          details: {
-            invitationId: invitation.id,
-            role: invitation.role
-          },
-          targetId: accountId,
-          targetType: "account"
-        });
-        auditGlobalSecurity(db, {
-          action: "budget_invitation_accept",
-          actorAccountId: accountId,
-          targetId: invitation.id,
-          targetType: "budget_invitation"
-        });
-        result = {
-          account: accountSummary(db, accountId),
+      await repo.accounts.insert({ id: accountId, email, displayName: name });
+      await repo.passwordCredentials.insert({ accountId, passwordHash });
+      const accepted = await repo.invitations.acceptForAccount({
+        accountId,
+        invitationId: invitation.id,
+        role: invitation.role
+      });
+      if (accepted !== 1) throw conflict("Invitation is no longer available");
+      await repo.memberships.insert({
+        budgetId: invitation.budget_id,
+        accountId,
+        role: invitation.role,
+        invitedByAccountId: invitation.invited_by_account_id
+      });
+      await repo.audit.insertSecurityEvent({
+        action: "internal_invitation_register",
+        actorAccountId: accountId,
+        details: {
+          invitationId: invitation.id,
+          role: invitation.role
+        },
+        targetId: accountId,
+        targetType: "account"
+      });
+      await repo.audit.insertSecurityEvent({
+        action: "budget_invitation_accept",
+        actorAccountId: accountId,
+        targetId: invitation.id,
+        targetType: "budget_invitation"
+      });
+      return {
+        account: await accountSummaryForRepo(repo, accountId),
+        budgetId: invitation.budget_id,
+        membership: await repo.memberships.get({
           budgetId: invitation.budget_id,
-          membership: db.prepare(`
-            SELECT budget_id, account_id, role, invited_by_account_id, created_at, updated_at
-            FROM budget_memberships
-            WHERE budget_id = ? AND account_id = ?
-          `).get(invitation.budget_id, accountId)
-        };
-      })();
-      return result;
-    } finally {
-      db.close();
-    }
+          accountId
+        })
+      };
+    }, () => registerInternalAccountWithInvitationSqlite({
+      accountId,
+      email,
+      invitationHash,
+      name,
+      passwordHash
+    }));
   }
 
-  function authenticateExternalLogin(headers = {}) {
+  function authenticateExternalLoginSqlite(headers = {}) {
     const db = openGlobalDb();
     try {
       let result;
       db.transaction(() => {
-        const config = authConfigFromRow(db.prepare("SELECT * FROM auth_config WHERE id = 1").get() || {});
+        const repo = globalRepository(db);
+        const config = authConfigFromRow(repo.authConfig.get() || {});
         if (config.activeMode !== "external") {
           throw forbidden("External authentication is disabled");
         }
@@ -2718,12 +3493,7 @@ export function createCashflowGlobalService({
         const groups = externalGroups(groupsHeader ? requestHeader(headers, groupsHeader) : "");
         const providerId = externalProviderId(external);
 
-        let identity = db.prepare(`
-          SELECT ai.account_id, a.status
-          FROM auth_identities ai
-          JOIN accounts a ON a.id = ai.account_id
-          WHERE ai.provider_id = ? AND ai.subject = ?
-        `).get(providerId, subject);
+        let identity = repo.identities.findWithAccountByProviderSubject(providerId, subject);
 
         if (!identity) {
           const provisioningMode = external.provisioningMode || "deny_unknown";
@@ -2736,7 +3506,7 @@ export function createCashflowGlobalService({
           if (!externalEmailAllowed(email, external.allowedDomains || [])) {
             throw forbidden("External email domain is not allowed");
           }
-          if (db.prepare("SELECT 1 FROM accounts WHERE email = ?").get(email)) {
+          if (repo.accounts.emailExists(email)) {
             throw conflict("Email is already assigned to another account", [{
               field: "email",
               reason: "not_unique"
@@ -2745,67 +3515,41 @@ export function createCashflowGlobalService({
 
           const accountId = `account_${crypto.randomUUID()}`;
           const pendingInvitation = provisioningMode === "allow_invited"
-            ? db.prepare(`
-                SELECT *
-                FROM budget_invitations
-                WHERE target_email = ?
-                  AND status = 'pending'
-                  AND target_account_id IS NULL
-                ORDER BY expires_at ASC, created_at ASC
-                LIMIT 1
-              `).get(email)
+            ? repo.invitations.findPendingForEmail(email)
             : null;
           if (provisioningMode === "allow_invited" && (
             !pendingInvitation
-            || Date.parse(`${pendingInvitation.expires_at}Z`) <= Date.now()
+            || databaseTimestampMs(pendingInvitation.expires_at) <= Date.now()
           )) {
             throw unauthorized("External authentication required");
           }
 
-          db.prepare(`
-            INSERT INTO accounts (
-              id, email, display_name, status, created_at, updated_at
-            )
-            VALUES (?, ?, ?, 'active', datetime('now'), datetime('now'))
-          `).run(accountId, email, name);
+          repo.accounts.insert({ id: accountId, email, displayName: name });
           if (pendingInvitation) {
-            db.prepare(`
-              UPDATE budget_invitations
-              SET target_account_id = ?,
-                  status = 'accepted',
-                  accepted_at = datetime('now'),
-                  updated_at = datetime('now')
-              WHERE id = ? AND status = 'pending'
-            `).run(accountId, pendingInvitation.id);
-            db.prepare(`
-              INSERT INTO budget_memberships (
-                budget_id, account_id, role, invited_by_account_id, created_at, updated_at
-              )
-              VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
-            `).run(
-              pendingInvitation.budget_id,
+            repo.invitations.acceptForAccount({
               accountId,
-              pendingInvitation.role,
-              pendingInvitation.invited_by_account_id
-            );
+              invitationId: pendingInvitation.id,
+              role: pendingInvitation.role
+            });
+            repo.memberships.insert({
+              budgetId: pendingInvitation.budget_id,
+              accountId,
+              role: pendingInvitation.role,
+              invitedByAccountId: pendingInvitation.invited_by_account_id
+            });
           }
-          db.prepare(`
-            INSERT INTO auth_identities (
-              id, account_id, provider_id, subject, email, email_verified,
-              profile_json, created_at, updated_at, last_used_at
-            )
-            VALUES (?, ?, ?, ?, ?, 1, ?, datetime('now'), datetime('now'), datetime('now'))
-          `).run(
-            `identity_${crypto.randomUUID()}`,
+          repo.identities.upsert({
             accountId,
             providerId,
             subject,
             email,
-            JSON.stringify({
+            emailVerified: true,
+            lastUsedNow: true,
+            profileJson: JSON.stringify({
               groups,
               trustedIssuer: external.trustedIssuer || ""
             })
-          );
+          });
           auditGlobalSecurity(db, {
             action: "external_account_provision",
             actorAccountId: accountId,
@@ -2824,31 +3568,19 @@ export function createCashflowGlobalService({
 
         if (identity.status !== "active") throw unauthorized("External authentication required");
 
-        db.prepare(`
-          UPDATE auth_identities
-          SET email = COALESCE(?, email),
-              profile_json = ?,
-              last_used_at = datetime('now'),
-              updated_at = datetime('now')
-          WHERE provider_id = ? AND subject = ?
-        `).run(
+        repo.identities.updateProviderLogin({
           email,
-          JSON.stringify({
+          profileJson: JSON.stringify({
             groups,
             trustedIssuer: external.trustedIssuer || ""
           }),
           providerId,
           subject
-        );
+        });
 
         const adminGroups = external.adminGroups || [];
         if (adminGroups.length && groups.some(group => adminGroups.includes(group))) {
-          db.prepare(`
-            INSERT OR IGNORE INTO account_global_roles (
-              account_id, role, granted_by_account_id, created_at
-            )
-            VALUES (?, 'system_admin', NULL, datetime('now'))
-          `).run(identity.account_id);
+          repo.roles.insertSystemAdmin({ accountId: identity.account_id });
         }
         auditGlobalSecurity(db, {
           action: "external_login",
@@ -2867,6 +3599,143 @@ export function createCashflowGlobalService({
     } finally {
       db.close();
     }
+  }
+
+  async function authenticateExternalLogin(headers = {}) {
+    return await withExternalGlobalTransaction(async repo => {
+      const config = authConfigFromRow(await repo.authConfig.get() || {});
+      if (config.activeMode !== "external") {
+        throw forbidden("External authentication is disabled");
+      }
+      const external = config.activeConfig.external || {};
+      const expectedSecret = externalSecretForConfig(external);
+      if (!expectedSecret) {
+        throw forbidden("External authentication secret is not configured");
+      }
+      const secretHeader = external.assertionSecretHeader || DEFAULT_EXTERNAL_SECRET_HEADER;
+      if (!safeSecretMatches(requestHeader(headers, secretHeader), expectedSecret)) {
+        throw unauthorized("External authentication required");
+      }
+
+      const subjectHeader = external.subjectHeader || "x-auth-request-user";
+      const subject = normalizeExternalSubject(requestHeader(headers, subjectHeader), "subject");
+      const emailHeader = external.emailHeader || "";
+      const displayNameHeader = external.displayNameHeader || "";
+      const groupsHeader = external.groupsHeader || "";
+      const email = emailHeader && requestHeader(headers, emailHeader)
+        ? normalizeAccountEmail(requestHeader(headers, emailHeader), "email")
+        : null;
+      const name = externalDisplayName(
+        subject,
+        displayNameHeader ? requestHeader(headers, displayNameHeader) : "",
+        email || ""
+      );
+      const groups = externalGroups(groupsHeader ? requestHeader(headers, groupsHeader) : "");
+      const providerId = externalProviderId(external);
+
+      let identity = await repo.identities.findWithAccountByProviderSubject(providerId, subject);
+
+      if (!identity) {
+        const provisioningMode = external.provisioningMode || "deny_unknown";
+        if (provisioningMode === "deny_unknown") {
+          throw unauthorized("External authentication required");
+        }
+        if (!email) {
+          throw forbidden("External email is required for provisioning");
+        }
+        if (!externalEmailAllowed(email, external.allowedDomains || [])) {
+          throw forbidden("External email domain is not allowed");
+        }
+        if (await repo.accounts.emailExists(email)) {
+          throw conflict("Email is already assigned to another account", [{
+            field: "email",
+            reason: "not_unique"
+          }]);
+        }
+
+        const accountId = `account_${crypto.randomUUID()}`;
+        const pendingInvitation = provisioningMode === "allow_invited"
+          ? await repo.invitations.findPendingForEmail(email)
+          : null;
+        if (provisioningMode === "allow_invited" && (
+          !pendingInvitation
+          || databaseTimestampMs(pendingInvitation.expires_at) <= Date.now()
+        )) {
+          throw unauthorized("External authentication required");
+        }
+
+        await repo.accounts.insert({ id: accountId, email, displayName: name });
+        if (pendingInvitation) {
+          const accepted = await repo.invitations.acceptForAccount({
+            accountId,
+            invitationId: pendingInvitation.id,
+            role: pendingInvitation.role
+          });
+          if (accepted !== 1) throw conflict("Invitation is no longer available");
+          await repo.memberships.insert({
+            budgetId: pendingInvitation.budget_id,
+            accountId,
+            role: pendingInvitation.role,
+            invitedByAccountId: pendingInvitation.invited_by_account_id
+          });
+        }
+        await repo.identities.upsert({
+          accountId,
+          providerId,
+          subject,
+          email,
+          emailVerified: true,
+          lastUsedNow: true,
+          profileJson: JSON.stringify({
+            groups,
+            trustedIssuer: external.trustedIssuer || ""
+          })
+        });
+        await repo.audit.insertSecurityEvent({
+          action: "external_account_provision",
+          actorAccountId: accountId,
+          details: {
+            provisioningMode,
+            withInvitation: Boolean(pendingInvitation)
+          },
+          targetId: accountId,
+          targetType: "account"
+        });
+        identity = {
+          account_id: accountId,
+          status: "active"
+        };
+      }
+
+      if (identity.status !== "active") throw unauthorized("External authentication required");
+
+      await repo.identities.updateProviderLogin({
+        email,
+        profileJson: JSON.stringify({
+          groups,
+          trustedIssuer: external.trustedIssuer || ""
+        }),
+        providerId,
+        subject
+      });
+
+      const adminGroups = external.adminGroups || [];
+      if (adminGroups.length && groups.some(group => adminGroups.includes(group))) {
+        await repo.roles.insertSystemAdmin({ accountId: identity.account_id });
+      }
+      await repo.audit.insertSecurityEvent({
+        action: "external_login",
+        actorAccountId: identity.account_id,
+        details: {
+          providerId
+        },
+        targetId: identity.account_id,
+        targetType: "account"
+      });
+      return {
+        accountId: identity.account_id
+      };
+    }, () => authenticateExternalLoginSqlite(headers));
   }
 
   function updateAdminAuthDraft(actorAccountId, input = {}) {
@@ -2897,20 +3766,12 @@ export function createCashflowGlobalService({
     const db = openGlobalDb();
     try {
       db.transaction(() => {
-        db.prepare(`
-          UPDATE auth_config
-          SET draft_mode = ?,
-              session_idle_minutes = ?,
-              session_absolute_minutes = ?,
-              draft_config_json = ?,
-              updated_at = datetime('now')
-          WHERE id = 1
-        `).run(
+        globalRepository(db).authConfig.updateDraft({
           draftMode,
-          sessionIdleMinutes,
           sessionAbsoluteMinutes,
-          JSON.stringify(draftConfig)
-        );
+          sessionIdleMinutes,
+          draftConfigJson: JSON.stringify(draftConfig)
+        });
         auditGlobalSecurity(db, {
           action: "admin_auth_draft_update",
           actorAccountId,
@@ -2930,10 +3791,57 @@ export function createCashflowGlobalService({
     return getAdminAuthConfig();
   }
 
+  async function updateAdminAuthDraftAsync(actorAccountId, input = {}) {
+    const current = await getAdminAuthConfigAsync();
+    const draftMode = Object.prototype.hasOwnProperty.call(input, "draftMode")
+      || Object.prototype.hasOwnProperty.call(input, "draft_mode")
+        ? normalizeAuthMode(input.draftMode ?? input.draft_mode, "draftMode")
+        : current.draftMode;
+    const sessionIdleMinutes = Object.prototype.hasOwnProperty.call(input, "sessionIdleMinutes")
+      || Object.prototype.hasOwnProperty.call(input, "session_idle_minutes")
+        ? normalizeAuthInteger(input.sessionIdleMinutes ?? input.session_idle_minutes, "sessionIdleMinutes", { min: 5, max: 10080 })
+        : current.sessionIdleMinutes;
+    const sessionAbsoluteMinutes = Object.prototype.hasOwnProperty.call(input, "sessionAbsoluteMinutes")
+      || Object.prototype.hasOwnProperty.call(input, "session_absolute_minutes")
+        ? normalizeAuthInteger(input.sessionAbsoluteMinutes ?? input.session_absolute_minutes, "sessionAbsoluteMinutes", { min: 5, max: 43200 })
+        : current.sessionAbsoluteMinutes;
+    if (sessionAbsoluteMinutes < sessionIdleMinutes) {
+      throw badRequest("sessionAbsoluteMinutes must be greater than or equal to sessionIdleMinutes", [{
+        field: "sessionAbsoluteMinutes",
+        reason: "must_be_greater_or_equal"
+      }]);
+    }
+    const draftConfig = Object.prototype.hasOwnProperty.call(input, "draftConfig")
+      || Object.prototype.hasOwnProperty.call(input, "draft_config")
+        ? normalizeDraftAuthConfig(safeJsonParseObject(input.draftConfig ?? input.draft_config, "draftConfig"))
+        : current.draftConfig;
+
+    return await withExternalGlobalTransaction(async repo => {
+      await repo.authConfig.updateDraft({
+        draftMode,
+        sessionAbsoluteMinutes,
+        sessionIdleMinutes,
+        draftConfigJson: JSON.stringify(draftConfig)
+      });
+      await repo.audit.insertSecurityEvent({
+        action: "admin_auth_draft_update",
+        actorAccountId,
+        details: {
+          draftMode,
+          sessionAbsoluteMinutes,
+          sessionIdleMinutes
+        },
+        targetType: "auth_config",
+        targetId: "1"
+      });
+      return authConfigFromRow(await repo.authConfig.get() || {});
+    }, () => updateAdminAuthDraft(actorAccountId, input));
+  }
+
   function testAdminAuthDraft(actorAccountId) {
     const db = openGlobalDb();
     try {
-      const config = authConfigFromRow(db.prepare("SELECT * FROM auth_config WHERE id = 1").get() || {});
+      const config = authConfigFromRow(globalRepository(db).authConfig.get() || {});
       const activeAdminCount = countActiveSystemAdmins(db);
       const checks = [
         {
@@ -2996,12 +3904,78 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function testAdminAuthDraftAsync(actorAccountId) {
+    return await withExternalGlobalTransaction(async repo => {
+      const config = authConfigFromRow(await repo.authConfig.get() || {});
+      const activeAdminCount = await repo.accounts.countActiveSystemAdmins();
+      const checks = [
+        {
+          ok: activeAdminCount > 0,
+          code: "active_system_admin",
+          message: "At least one active system administrator exists"
+        }
+      ];
+      if (config.draftMode === "external") {
+        const externalSecretConfigured = Boolean(externalSecretForConfig(config.draftConfig.external));
+        const externalAdminCount = await repo.accounts.countActiveExternalSystemAdmins(
+          externalProviderId(config.draftConfig.external)
+        );
+        checks.push({
+          ok: Boolean(config.draftConfig.external.subjectHeader),
+          code: "external_subject_header",
+          message: "External mode has a subject header configured"
+        });
+        checks.push({
+          ok: externalSecretConfigured,
+          code: "external_assertion_secret",
+          message: "External assertion secret environment variable is configured"
+        });
+        checks.push({
+          ok: externalAdminCount > 0,
+          code: "external_admin_identity",
+          message: "At least one active system administrator has an external identity link"
+        });
+      }
+      if (config.draftMode === "internal") {
+        const internalAdminCount = await repo.accounts.countActiveInternalSystemAdmins();
+        checks.push({
+          ok: internalAdminCount > 0,
+          code: "internal_admin_credential",
+          message: "At least one active system administrator has an email and internal password credential"
+        });
+      }
+      const ok = checks.every(check => check.ok);
+      const activatable = ok;
+
+      await repo.audit.insertSecurityEvent({
+        action: "admin_auth_draft_test",
+        actorAccountId,
+        details: {
+          activatable,
+          draftMode: config.draftMode,
+          ok
+        },
+        outcome: ok ? "success" : "failure",
+        targetType: "auth_config",
+        targetId: "1"
+      });
+
+      return {
+        activatable,
+        checks,
+        config,
+        ok
+      };
+    }, () => testAdminAuthDraft(actorAccountId));
+  }
+
   function activateAdminAuthDraft(actorAccountId) {
     const db = openGlobalDb();
     try {
       let result;
       db.transaction(() => {
-        const config = authConfigFromRow(db.prepare("SELECT * FROM auth_config WHERE id = 1").get() || {});
+        const repo = globalRepository(db);
+        const config = authConfigFromRow(repo.authConfig.get() || {});
         const activeAdminCount = countActiveSystemAdmins(db);
         if (activeAdminCount < 1) {
           throw conflict("At least one active system administrator is required");
@@ -3018,19 +3992,9 @@ export function createCashflowGlobalService({
           throw conflict("At least one active system administrator with an internal password is required");
         }
 
-        db.prepare(`
-          UPDATE auth_config
-          SET active_mode = draft_mode,
-              external_config_json = draft_config_json,
-              updated_at = datetime('now')
-          WHERE id = 1
-        `).run();
+        repo.authConfig.activateDraft();
         if (config.activeMode !== config.draftMode) {
-          db.prepare(`
-            UPDATE auth_sessions
-            SET revoked_at = COALESCE(revoked_at, datetime('now'))
-            WHERE revoked_at IS NULL
-          `).run();
+          repo.sessions.revokeAll();
         }
         auditGlobalSecurity(db, {
           action: "admin_auth_activate",
@@ -3041,7 +4005,7 @@ export function createCashflowGlobalService({
           targetType: "auth_config",
           targetId: "1"
         });
-        result = authConfigFromRow(db.prepare("SELECT * FROM auth_config WHERE id = 1").get() || {});
+        result = authConfigFromRow(repo.authConfig.get() || {});
       })();
       return result;
     } finally {
@@ -3049,41 +4013,101 @@ export function createCashflowGlobalService({
     }
   }
 
+  async function activateAdminAuthDraftAsync(actorAccountId) {
+    return await withExternalGlobalTransaction(async repo => {
+      const config = authConfigFromRow(await repo.authConfig.get() || {});
+      const activeAdminCount = await repo.accounts.countActiveSystemAdmins();
+      if (activeAdminCount < 1) {
+        throw conflict("At least one active system administrator is required");
+      }
+      if (config.draftMode === "external") {
+        if (!externalSecretForConfig(config.draftConfig.external)) {
+          throw conflict("External authentication secret is not configured");
+        }
+        if (await repo.accounts.countActiveExternalSystemAdmins(externalProviderId(config.draftConfig.external)) < 1) {
+          throw conflict("At least one active system administrator with an external identity is required");
+        }
+      }
+      if (config.draftMode === "internal" && await repo.accounts.countActiveInternalSystemAdmins() < 1) {
+        throw conflict("At least one active system administrator with an internal password is required");
+      }
+
+      await repo.authConfig.activateDraft();
+      if (config.activeMode !== config.draftMode) {
+        await repo.sessions.revokeAll();
+      }
+      await repo.audit.insertSecurityEvent({
+        action: "admin_auth_activate",
+        actorAccountId,
+        details: {
+          activeMode: config.draftMode
+        },
+        targetType: "auth_config",
+        targetId: "1"
+      });
+      return authConfigFromRow(await repo.authConfig.get() || {});
+    }, () => activateAdminAuthDraft(actorAccountId));
+  }
+
   return {
     activateAdminAuthDraft,
+    activateAdminAuthDraftAsync,
     authenticateInternalLogin,
     authenticateExternalLogin,
     completeAuthProviderCallback,
     completeInternalPasswordSetup,
     createAdminPasswordResetToken,
     createUser,
+    createUserAsync,
     deleteAdminAccount,
+    deleteAdminAccountAsync,
     deleteAdminAuthProvider,
+    deleteAdminAuthProviderAsync,
     getAdminAuthConfig,
+    getAdminAuthConfigAsync,
     getGlobalOptions,
+    getGlobalOptionsAsync,
     initializeBudgetStorage,
+    initializeBudgetStorageAsync,
     listAdminAccounts,
+    listAdminAccountsAsync,
     listActiveBudgetIds,
+    listActiveBudgetIdsAsync,
     listAuthProviders,
+    listAuthProvidersAsync,
     listUsers,
+    listUsersAsync,
     openGlobalDb,
     registerInternalAccountWithInvitation,
     resolveAccountContext,
+    resolveAccountContextAsync,
     resolveBudgetContext,
+    resolveBudgetContextAsync,
     resolveBudgetStorageKey,
     resolveSession,
+    resolveSessionAsync,
     setAdminProviderIdentity,
+    setAdminProviderIdentityAsync,
     setAdminExternalIdentity,
+    setAdminExternalIdentityAsync,
     revokeAdminAccountSession,
+    revokeAdminAccountSessionAsync,
     selectUser,
+    selectUserAsync,
     setAccountSystemAdmin,
+    setAccountSystemAdminAsync,
     startAuthProviderLink,
     startAuthProviderLogin,
     testAdminAuthDraft,
+    testAdminAuthDraftAsync,
     upsertAdminAuthProvider,
+    upsertAdminAuthProviderAsync,
     updateAdminAuthDraft,
+    updateAdminAuthDraftAsync,
     updateAdminAccount,
+    updateAdminAccountAsync,
     userExists,
-    updateGlobalOptions
+    updateGlobalOptions,
+    updateGlobalOptionsAsync
   };
 }

@@ -1,5 +1,6 @@
 import {
   attachCashflowHandlers,
+  renderCashflowVersionStatus,
   renderCashflowPage
 } from "./app/cashflow.js";
 import {
@@ -15,8 +16,17 @@ import {
   localeOf,
   t
 } from "./app/cashflow/shared.js";
+import {
+  applyUiPreferences,
+  loadUiPreferences,
+  normalizeUiPreferences,
+  saveUiPreferences
+} from "./app/cashflow/ui-preferences.js";
 
 const root = document.getElementById("cashflowRoot");
+const RELEASE_API_URL = "https://api.github.com/repos/AndrzejTubacki/Cashflow_Planner/releases/latest";
+const initialAccountId = localStorage.getItem("cashflow_account_id") || "";
+const initialUiPreferences = loadUiPreferences(initialAccountId);
 
 const state = {
   accountSession: null,
@@ -40,15 +50,32 @@ const state = {
   error: "",
   message: "",
   users: [],
-  selectedAccountId: localStorage.getItem("cashflow_account_id") || "",
+  selectedAccountId: initialAccountId,
   selectedUserId: localStorage.getItem("cashflow_budget_id") || localStorage.getItem("cashflow_user_id") || "",
   validationResult: null,
   fx: null,
-  activeTab: sessionStorage.getItem("cashflow_active_tab") || "ledger"
+  activeTab: sessionStorage.getItem("cashflow_active_tab") || initialUiPreferences.defaultTab,
+  versionCheck: null,
+  uiPreferences: initialUiPreferences
 };
+
+let versionCheckStarted = false;
+applyUiPreferences(state.uiPreferences);
 
 function selectedUserId() {
   return String(state.selectedUserId || "").trim();
+}
+
+function uiPreferenceScope() {
+  return String(state.selectedAccountId || state.accountSession?.accountId || state.selectedUserId || "default").trim() || "default";
+}
+
+function refreshUiPreferences({ useDefaultTab = false } = {}) {
+  state.uiPreferences = loadUiPreferences(uiPreferenceScope());
+  applyUiPreferences(state.uiPreferences);
+  if (useDefaultTab && !sessionStorage.getItem("cashflow_active_tab")) {
+    state.activeTab = state.uiPreferences.defaultTab;
+  }
 }
 
 const apiClient = createCashflowApiClient({
@@ -83,6 +110,51 @@ function enforceActiveTabPermissions() {
     state.activeTab = "ledger";
     sessionStorage.setItem("cashflow_active_tab", "ledger");
   }
+}
+
+function compareVersions(left, right) {
+  const leftParts = String(left || "").replace(/^v/i, "").split(".").map(part => Number.parseInt(part, 10) || 0);
+  const rightParts = String(right || "").replace(/^v/i, "").split(".").map(part => Number.parseInt(part, 10) || 0);
+  const length = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+    if (difference !== 0) return difference;
+  }
+
+  return 0;
+}
+
+async function checkLatestVersion() {
+  if (versionCheckStarted || !state.cashflow?.app?.version) return;
+  versionCheckStarted = true;
+  state.versionCheck = { status: "checking" };
+
+  try {
+    const response = await fetch(RELEASE_API_URL, {
+      cache: "no-store",
+      headers: { accept: "application/vnd.github+json" }
+    });
+    if (!response.ok) throw new Error("Version check failed");
+
+    const latest = await response.json();
+    const latestVersion = String(latest?.tag_name || latest?.name || "").replace(/^v/i, "");
+    if (!latestVersion) throw new Error("Version check failed");
+
+    state.versionCheck = compareVersions(latestVersion, state.cashflow.app.version) > 0
+      ? { status: "available", latestVersion, htmlUrl: latest?.html_url || "" }
+      : { status: "current", latestVersion };
+  } catch {
+    state.versionCheck = { status: "unavailable" };
+  }
+
+  updateVersionStatus();
+}
+
+function updateVersionStatus() {
+  const target = root.querySelector("[data-cashflow-version-status-root]");
+  if (!target) return;
+  target.innerHTML = renderCashflowVersionStatus(localeOf(state.cashflow), state.versionCheck);
 }
 
 function render() {
@@ -234,8 +306,10 @@ async function loadCashflow(messageKey = "") {
     state.accountSession = state.cashflow.session || state.accountSession;
     state.selectedAccountId = state.cashflow.session?.accountId || state.selectedAccountId;
     if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+    refreshUiPreferences({ useDefaultTab: true });
     await loadBudgetManagerData({ preserveInvitation: true });
     state.message = messageKey ? t(locale, messageKey) : "";
+    void checkLatestVersion();
   } catch (error) {
     state.error = error.message || t(null, "Failed to load cashflow");
   }
@@ -317,6 +391,7 @@ function attachShellHandlers() {
       if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
       localStorage.removeItem("cashflow_budget_id");
       localStorage.removeItem("cashflow_user_id");
+      refreshUiPreferences({ useDefaultTab: true });
       render();
     } catch (error) {
       state.error = error.message || t(null, "Failed to log in with external authentication");
@@ -365,6 +440,7 @@ function attachShellHandlers() {
       if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
       localStorage.removeItem("cashflow_budget_id");
       localStorage.removeItem("cashflow_user_id");
+      refreshUiPreferences({ useDefaultTab: true });
       render();
     } catch (error) {
       state.error = error.message || t(null, "Failed to log in");
@@ -405,6 +481,7 @@ function attachShellHandlers() {
       state.accountSession = result?.session || null;
       state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
       if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+      refreshUiPreferences({ useDefaultTab: true });
       if (state.selectedUserId) {
         localStorage.setItem("cashflow_budget_id", state.selectedUserId);
         localStorage.setItem("cashflow_user_id", state.selectedUserId);
@@ -436,6 +513,7 @@ function attachShellHandlers() {
         state.selectedUserId = "";
         localStorage.setItem("cashflow_account_id", state.selectedAccountId);
         localStorage.removeItem("cashflow_budget_id");
+        refreshUiPreferences({ useDefaultTab: true });
         render();
       } catch (error) {
         state.error = error.message || t(null, "Failed to select account");
@@ -463,6 +541,7 @@ function attachShellHandlers() {
         if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
         localStorage.setItem("cashflow_budget_id", state.selectedUserId);
         localStorage.setItem("cashflow_user_id", state.selectedUserId);
+        refreshUiPreferences({ useDefaultTab: true });
         await loadCashflow();
       } catch (error) {
         state.error = error.message || t(null, "Failed to select user");
@@ -486,6 +565,7 @@ function attachShellHandlers() {
       state.accountSession = result?.session || null;
       state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
       localStorage.setItem("cashflow_account_id", state.selectedAccountId);
+      refreshUiPreferences({ useDefaultTab: true });
       render();
     } catch (error) {
       state.error = error.message || t(null, "Failed to create account");
@@ -666,6 +746,30 @@ window.addEventListener("cashflow-error", (event) => {
 window.addEventListener("cashflow-error-dismiss", () => {
   state.error = "";
   render();
+});
+
+window.addEventListener("cashflow-ui-preferences-change", (event) => {
+  state.uiPreferences = saveUiPreferences(uiPreferenceScope(), normalizeUiPreferences({
+    ...state.uiPreferences,
+    ...(event.detail || {})
+  }));
+  applyUiPreferences(state.uiPreferences);
+});
+
+window.addEventListener("cashflow-language-change", async (event) => {
+  const locale = String(event.detail?.locale || "").trim();
+  if (!locale) return;
+
+  try {
+    await apiClient.json("/api/settings", {
+      method: "PUT",
+      body: { locale }
+    });
+    await loadCashflow("Settings saved");
+  } catch (error) {
+    state.error = error.message || t(null, "Failed to save settings");
+    render();
+  }
 });
 
 window.addEventListener("cashflow-validated", (event) => {

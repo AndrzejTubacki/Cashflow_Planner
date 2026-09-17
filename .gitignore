@@ -7,6 +7,8 @@ AGENTS.override.md
 data/
 logs/
 backups/
+external-migration-snapshots/
+external-database-exports/
 local/
 .env
 .env.*
@@ -14,3 +16,5 @@ local/
 *.sqlite
 *.sqlite-*
 todo.md
+context.md
+dev/

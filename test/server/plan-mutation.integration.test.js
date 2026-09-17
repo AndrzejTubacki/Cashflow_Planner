@@ -174,7 +174,7 @@ test("confirmed goal and flex sources cannot be deleted while confirmed one-offs
     body: {
       name: "Confirmed goal source",
       currency: "PLN",
-      amount: 50,
+      amount: 60,
       due_date: "2026-01-03",
       priority: 1,
       active: 1
@@ -281,6 +281,57 @@ test("confirmed goal and flex sources cannot be deleted while confirmed one-offs
   assert.match(deleteGoal.body.error, /confirmed goal/i);
   assert.equal(deleteFlex.response.status, 400);
   assert.match(deleteFlex.body.error, /confirmed flex/i);
+}));
+
+test("fully funded confirmed goals can be deleted after detaching ledger history", async () => withHarness(async harness => {
+  await configure(harness);
+  await seedConfirmedIncome(harness);
+
+  const goal = await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Reached goal source",
+      currency: "PLN",
+      amount: 50,
+      due_date: "2026-01-03",
+      priority: 1,
+      active: 1
+    }
+  });
+
+  insertPendingWithSource(harness, {
+    id: "pend-goal-reached",
+    name: "Reached goal source",
+    amount: 50,
+    type: "goal_allocation",
+    date: "2026-01-03",
+    sourceGoalId: goal.id,
+    occurrenceKey: "confirmed-reached-goal"
+  });
+
+  await harness.api(`/api/pending/${encodeURIComponent("pend-goal-reached")}/confirm`, {
+    method: "POST",
+    body: {
+      amount: 50,
+      confirmed_date: "2026-01-03"
+    }
+  });
+
+  const response = await harness.request(`/api/goals/${encodeURIComponent(goal.id)}`, { method: "DELETE" });
+  assert.equal(response.response.status, 200);
+
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.goals.some(row => row.id === goal.id), false);
+  assert.equal(snapshot.pendingTransactions.some(row => row.source_goal_id === goal.id), false);
+  assert.equal(snapshot.futureTransactions.some(row => row.source_goal_id === goal.id), false);
+
+  const ledgerDb = harness.openLedgerDb("2026");
+  try {
+    const row = ledgerDb.prepare("SELECT source_goal_id FROM confirmed_transactions WHERE id = ?").get("pend-goal-reached");
+    assert.equal(row.source_goal_id, null);
+  } finally {
+    ledgerDb.close();
+  }
 }));
 
 test("budget period income setting is cleared when selected income is disabled or deleted", async () => withHarness(async harness => {

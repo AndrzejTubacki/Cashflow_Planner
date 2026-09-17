@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { createCashflowBudgetService } from "../../src/server/cashflow-budget-service.js";
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 
 function withSession(session, options = {}) {
@@ -138,6 +139,619 @@ test("budget management keeps storage keys immutable and supports archive, resto
   } finally {
     await harness.cleanup();
   }
+});
+
+test("budget metadata async mutations can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const budget = {
+    id: "external_budget",
+    storage_key: "external_budget",
+    display_name: "External Budget",
+    status: "active",
+    created_by_account_id: "owner_account",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    archived_at: null,
+    deleted_at: null
+  };
+  const repo = {
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    budgets: {
+      get(id) {
+        assert.equal(id, budget.id);
+        return { ...budget };
+      },
+      markActive(id) {
+        assert.equal(id, budget.id);
+        budget.status = "active";
+        budget.archived_at = null;
+      },
+      markArchived(id) {
+        assert.equal(id, budget.id);
+        budget.status = "archived";
+        budget.archived_at = "2026-01-02T00:00:00Z";
+      },
+      updateDisplayName(id, displayName) {
+        assert.equal(id, budget.id);
+        budget.display_name = displayName;
+      }
+    },
+    memberships: {
+      getRole({ accountId, budgetId }) {
+        assert.equal(accountId, "owner_account");
+        assert.equal(budgetId, budget.id);
+        return { role: "owner" };
+      }
+    }
+  };
+  let transactionCount = 0;
+  const service = createCashflowBudgetService({
+    deleteBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactionCount += 1;
+        return await fn(repo);
+      }
+    },
+    initializeBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    }
+  });
+
+  const renamed = await service.renameBudgetAsync("owner_account", budget.id, {
+    displayName: "Renamed External"
+  });
+  assert.equal(renamed.display_name, "Renamed External");
+
+  const archived = await service.archiveBudgetAsync("owner_account", budget.id);
+  assert.equal(archived.status, "archived");
+  assert.equal(archived.archived_at, "2026-01-02T00:00:00Z");
+
+  const restored = await service.restoreBudgetAsync("owner_account", budget.id);
+  assert.equal(restored.status, "active");
+  assert.equal(restored.archived_at, null);
+
+  assert.equal(transactionCount, 3);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "budget_rename",
+    "budget_archive",
+    "budget_restore"
+  ]);
+});
+
+test("createBudgetAsync uses an external global-store transaction instead of the fake sync wrapper", async () => {
+  const auditEvents = [];
+  const insertedBudgets = [];
+  const insertedOwners = [];
+  let storageInitialized = null;
+  let transactionCount = 0;
+  const budgetRows = new Map();
+
+  const repo = {
+    accounts: {
+      get(id) {
+        assert.equal(id, "owner_account");
+        return { id, status: "active" };
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    budgets: {
+      insert(row) {
+        insertedBudgets.push(row);
+        budgetRows.set(row.id, {
+          id: row.id,
+          storage_key: row.storageKey,
+          display_name: row.displayName,
+          status: "active",
+          created_by_account_id: row.createdByAccountId,
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          archived_at: null,
+          deleted_at: null
+        });
+      },
+      get(id) {
+        return budgetRows.get(id);
+      }
+    },
+    memberships: {
+      insertOwner({ accountId, budgetId }) {
+        insertedOwners.push({ accountId, budgetId });
+      }
+    }
+  };
+
+  const service = createCashflowBudgetService({
+    deleteBudgetStorage: () => {
+      throw new Error("should not clean up storage when creation succeeds");
+    },
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactionCount += 1;
+        return await fn(repo);
+      }
+    },
+    initializeBudgetStorage: budgetId => {
+      storageInitialized = budgetId;
+    },
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used")
+    }
+  });
+
+  const created = await service.createBudgetAsync("owner_account", { displayName: "New External Budget" });
+
+  assert.equal(created.role, "owner");
+  assert.equal(created.display_name, "New External Budget");
+  assert.equal(created.created_by_account_id, "owner_account");
+  assert.equal(storageInitialized, created.id);
+  assert.equal(transactionCount, 2);
+  assert.equal(insertedBudgets.length, 1);
+  assert.equal(insertedOwners.length, 1);
+  assert.equal(insertedOwners[0].accountId, "owner_account");
+  assert.equal(insertedOwners[0].budgetId, created.id);
+  assert.deepEqual(auditEvents.map(event => event.action), ["budget_create"]);
+});
+
+test("createBudgetAsync cleans up physical storage if the metadata transaction fails", async () => {
+  let cleanedUpBudgetId = null;
+  let transactionCount = 0;
+
+  const service = createCashflowBudgetService({
+    deleteBudgetStorage: budgetId => {
+      cleanedUpBudgetId = budgetId;
+    },
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactionCount += 1;
+        // First call is the active-account check (must succeed); second call
+        // is the metadata write, which fails and must trigger physical
+        // storage cleanup.
+        if (transactionCount === 1) {
+          return await fn({ accounts: { get: () => ({ id: "owner_account", status: "active" }) } });
+        }
+        throw new Error("metadata insert failed");
+      }
+    },
+    initializeBudgetStorage: () => {},
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    }
+  });
+
+  await assert.rejects(
+    () => service.createBudgetAsync("owner_account", { displayName: "Doomed Budget" }),
+    /metadata insert failed/
+  );
+  assert.ok(cleanedUpBudgetId);
+});
+
+test("purgeBudgetAsync uses an external global-store transaction instead of the fake sync wrapper", async () => {
+  const auditEvents = [];
+  const revokedSessionBudgets = [];
+  const deletedInvitationBudgets = [];
+  const deletedMembershipBudgets = [];
+  let deletedStorageBudgetId = null;
+  let backupCreatedForBudgetId = null;
+  let markedDeletedBudgetId = null;
+  let transactionCount = 0;
+
+  const budget = {
+    id: "external_budget",
+    storage_key: "external_budget",
+    display_name: "External Budget",
+    status: "archived",
+    created_by_account_id: "owner_account",
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+    archived_at: "2026-01-02T00:00:00Z",
+    deleted_at: null
+  };
+
+  const service = createCashflowBudgetService({
+    createBudgetBackupAsync: async budgetId => {
+      backupCreatedForBudgetId = budgetId;
+      return `/recoveries/${budgetId}.json`;
+    },
+    deleteBudgetStorage: budgetId => {
+      deletedStorageBudgetId = budgetId;
+    },
+    globalStore: {
+      backend: "postgres",
+      async transaction(fn) {
+        transactionCount += 1;
+        return await fn({
+          accounts: {
+            get: () => ({ id: "owner_account", status: "active" })
+          },
+          audit: {
+            insertSecurityEvent(event) {
+              auditEvents.push(event);
+            }
+          },
+          budgets: {
+            get(id) {
+              assert.equal(id, budget.id);
+              return { ...budget, status: markedDeletedBudgetId ? "deleted" : budget.status };
+            },
+            markDeleted(id) {
+              markedDeletedBudgetId = id;
+            }
+          },
+          memberships: {
+            getRole({ accountId, budgetId }) {
+              assert.equal(accountId, "owner_account");
+              assert.equal(budgetId, budget.id);
+              return { role: "owner" };
+            },
+            deleteAllForBudget(budgetId) {
+              deletedMembershipBudgets.push(budgetId);
+            }
+          },
+          invitations: {
+            deleteAllForBudget(budgetId) {
+              deletedInvitationBudgets.push(budgetId);
+            }
+          },
+          sessions: {
+            revokeAllForBudget(budgetId) {
+              revokedSessionBudgets.push(budgetId);
+            }
+          }
+        });
+      }
+    },
+    initializeBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    }
+  });
+
+  const result = await service.purgeBudgetAsync("owner_account", budget.id);
+
+  assert.equal(result.status, "deleted");
+  assert.equal(result.safetyBackup, "/recoveries/external_budget.json");
+  assert.equal(backupCreatedForBudgetId, budget.id);
+  assert.equal(deletedStorageBudgetId, budget.id);
+  assert.equal(markedDeletedBudgetId, budget.id);
+  assert.deepEqual(revokedSessionBudgets, [budget.id]);
+  assert.deepEqual(deletedInvitationBudgets, [budget.id]);
+  assert.deepEqual(deletedMembershipBudgets, [budget.id]);
+  assert.equal(transactionCount, 2);
+  assert.deepEqual(auditEvents.map(event => event.action), ["budget_purge"]);
+  assert.equal(auditEvents[0].details.safetyBackup, "/recoveries/external_budget.json");
+});
+
+test("purgeBudgetAsync rejects a budget that is not archived before touching storage or metadata", async () => {
+  const service = createCashflowBudgetService({
+    createBudgetBackupAsync: async () => {
+      throw new Error("should not create a safety backup for a rejected purge");
+    },
+    deleteBudgetStorage: () => {
+      throw new Error("should not delete storage for a rejected purge");
+    },
+    globalStore: {
+      backend: "postgres",
+      async transaction(fn) {
+        return await fn({
+          accounts: { get: () => ({ id: "owner_account", status: "active" }) },
+          budgets: { get: () => ({ id: "active_budget", status: "active" }) },
+          memberships: { getRole: () => ({ role: "owner" }) }
+        });
+      }
+    },
+    initializeBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    }
+  });
+
+  await assert.rejects(
+    () => service.purgeBudgetAsync("owner_account", "active_budget"),
+    /archived/
+  );
+});
+
+test("budget member async mutations can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const revokedSessions = [];
+  const accounts = new Map([
+    ["owner_account", { id: "owner_account", status: "active" }],
+    ["member_account", { id: "member_account", status: "active" }],
+    ["leaver_account", { id: "leaver_account", status: "active" }],
+    ["target_account", { id: "target_account", status: "active" }]
+  ]);
+  const memberships = new Map([
+    ["external_budget:owner_account", {
+      budget_id: "external_budget",
+      account_id: "owner_account",
+      role: "owner"
+    }],
+    ["external_budget:member_account", {
+      budget_id: "external_budget",
+      account_id: "member_account",
+      role: "viewer"
+    }],
+    ["external_budget:leaver_account", {
+      budget_id: "external_budget",
+      account_id: "leaver_account",
+      role: "editor"
+    }],
+    ["external_budget:target_account", {
+      budget_id: "external_budget",
+      account_id: "target_account",
+      role: "editor"
+    }]
+  ]);
+  const key = (budgetId, accountId) => `${budgetId}:${accountId}`;
+  const repo = {
+    accounts: {
+      get(id) {
+        return accounts.get(id) || null;
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    memberships: {
+      delete({ accountId, budgetId }) {
+        memberships.delete(key(budgetId, accountId));
+      },
+      get({ accountId, budgetId }) {
+        const row = memberships.get(key(budgetId, accountId));
+        return row ? { ...row } : null;
+      },
+      getRole({ accountId, budgetId }) {
+        const row = memberships.get(key(budgetId, accountId));
+        return row ? { role: row.role } : null;
+      },
+      insert({ accountId, budgetId, invitedByAccountId = null, role }) {
+        memberships.set(key(budgetId, accountId), {
+          budget_id: budgetId,
+          account_id: accountId,
+          role,
+          invited_by_account_id: invitedByAccountId
+        });
+      },
+      updateOwnerAccount({ budgetId, fromAccountId, toAccountId }) {
+        const owner = memberships.get(key(budgetId, fromAccountId));
+        assert.equal(owner?.role, "owner");
+        memberships.delete(key(budgetId, fromAccountId));
+        memberships.set(key(budgetId, toAccountId), {
+          ...owner,
+          account_id: toAccountId
+        });
+      },
+      updateRole({ accountId, budgetId, role }) {
+        memberships.get(key(budgetId, accountId)).role = role;
+      }
+    },
+    sessions: {
+      revokeForAccountBudget(accountId, budgetId) {
+        revokedSessions.push({ accountId, budgetId });
+      }
+    }
+  };
+  let transactionCount = 0;
+  const service = createCashflowBudgetService({
+    deleteBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactionCount += 1;
+        return await fn(repo);
+      }
+    },
+    initializeBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    }
+  });
+
+  const changedRole = await service.updateMemberRoleAsync(
+    "owner_account",
+    "external_budget",
+    "member_account",
+    { role: "manager" }
+  );
+  assert.equal(changedRole.role, "manager");
+
+  assert.equal(await service.removeMemberAsync("owner_account", "external_budget", "member_account"), true);
+  assert.equal(memberships.has("external_budget:member_account"), false);
+
+  assert.equal(await service.leaveBudgetAsync("leaver_account", "external_budget"), true);
+  assert.equal(memberships.has("external_budget:leaver_account"), false);
+
+  const newOwner = await service.transferOwnershipAsync(
+    "owner_account",
+    "external_budget",
+    "target_account"
+  );
+  assert.equal(newOwner.role, "owner");
+  assert.equal(memberships.get("external_budget:owner_account").role, "manager");
+
+  assert.equal(transactionCount, 4);
+  assert.deepEqual(revokedSessions, [
+    { accountId: "member_account", budgetId: "external_budget" },
+    { accountId: "leaver_account", budgetId: "external_budget" }
+  ]);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "budget_member_role_update",
+    "budget_member_remove",
+    "budget_member_leave",
+    "budget_ownership_transfer"
+  ]);
+});
+
+test("budget invitation async create, accept, and revoke can use an external global-store transaction", async () => {
+  const auditEvents = [];
+  const invitations = new Map();
+  const memberships = new Map([
+    ["external_budget:owner_account", {
+      budget_id: "external_budget",
+      account_id: "owner_account",
+      role: "owner"
+    }]
+  ]);
+  const memberKey = (budgetId, accountId) => `${budgetId}:${accountId}`;
+  const repo = {
+    accounts: {
+      get(id) {
+        return id === "target_account"
+          ? { id, status: "active", email: "target@example.com" }
+          : null;
+      }
+    },
+    audit: {
+      insertSecurityEvent(event) {
+        auditEvents.push(event);
+      }
+    },
+    budgets: {
+      get(id) {
+        return id === "external_budget"
+          ? { id, status: "active", display_name: "External Budget" }
+          : null;
+      }
+    },
+    invitations: {
+      acceptForAccount({ accountId, invitationId, role }) {
+        const row = invitations.get(invitationId);
+        assert.equal(row.role, role);
+        row.target_account_id = accountId;
+        row.status = "accepted";
+        row.accepted_at = "2026-01-02T00:00:00Z";
+        return 1;
+      },
+      getByTokenHash(tokenHash) {
+        return [...invitations.values()].find(row => row.token_hash === tokenHash) || null;
+      },
+      getForBudget({ budgetId, invitationId }) {
+        const row = invitations.get(invitationId);
+        return row && row.budget_id === budgetId ? { ...row } : null;
+      },
+      insertPending({
+        budgetId,
+        expiresAt,
+        id,
+        invitedByAccountId,
+        role,
+        targetAccountId,
+        targetEmail,
+        tokenHash
+      }) {
+        invitations.set(id, {
+          id,
+          budget_id: budgetId,
+          target_account_id: targetAccountId,
+          target_email: targetEmail,
+          role,
+          status: "pending",
+          invited_by_account_id: invitedByAccountId,
+          expires_at: expiresAt,
+          token_hash: tokenHash
+        });
+      },
+      revokePending(invitationId) {
+        invitations.get(invitationId).status = "revoked";
+        return 1;
+      }
+    },
+    memberships: {
+      get({ accountId, budgetId }) {
+        const row = memberships.get(memberKey(budgetId, accountId));
+        return row ? { ...row } : null;
+      },
+      getRole({ accountId, budgetId }) {
+        const row = memberships.get(memberKey(budgetId, accountId));
+        return row ? { role: row.role } : null;
+      },
+      upsertFromInvitation({ accountId, budgetId, invitedByAccountId, role }) {
+        memberships.set(memberKey(budgetId, accountId), {
+          budget_id: budgetId,
+          account_id: accountId,
+          role,
+          invited_by_account_id: invitedByAccountId
+        });
+      }
+    }
+  };
+  let transactionCount = 0;
+  const service = createCashflowBudgetService({
+    deleteBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    globalStore: {
+      backend: "postgres",
+      transaction: async fn => {
+        transactionCount += 1;
+        return await fn(repo);
+      }
+    },
+    initializeBudgetStorage: () => {
+      throw new Error("not needed");
+    },
+    openGlobalDb: () => {
+      throw new Error("sync global db should not be used");
+    }
+  });
+
+  const created = await service.createInvitationAsync("owner_account", "external_budget", {
+    accountId: "target_account",
+    role: "editor",
+    expiresInHours: 24
+  });
+  assert.match(created.id, /^invite_/);
+  assert.equal(created.role, "editor");
+  assert.equal(created.target_account_id, "target_account");
+  assert.ok(created.token);
+  assert.equal(invitations.get(created.id).status, "pending");
+
+  const accepted = await service.acceptInvitationAsync("target_account", created.token);
+  assert.equal(accepted.budgetId, "external_budget");
+  assert.equal(accepted.membership.role, "editor");
+  assert.equal(invitations.get(created.id).status, "accepted");
+
+  const revokedSource = await service.createInvitationAsync("owner_account", "external_budget", {
+    accountId: "target_account",
+    role: "viewer",
+    expiresInHours: 24
+  });
+  assert.equal(await service.revokeInvitationAsync("owner_account", "external_budget", revokedSource.id), true);
+  assert.equal(invitations.get(revokedSource.id).status, "revoked");
+  assert.equal(transactionCount, 4);
+  assert.deepEqual(auditEvents.map(event => event.action), [
+    "budget_invitation_create",
+    "budget_invitation_accept",
+    "budget_invitation_create",
+    "budget_invitation_revoke"
+  ]);
 });
 
 test("deleted budget recovery retention keeps a bounded set of completed exports", async () => {
@@ -371,6 +985,10 @@ test("authorization matrix covers account, budget role, and system-admin context
       method: "POST",
       body: {}
     });
+    await assertStatus("editor cannot compact ledger history", 403, "/api/ledger/compact-history", editor, {
+      method: "POST",
+      body: {}
+    });
 
     await assertStatus("manager can rename budgets", 200, `/api/budgets/${targetBudgetId}`, manager, {
       method: "PUT",
@@ -399,12 +1017,20 @@ test("authorization matrix covers account, budget role, and system-admin context
       method: "POST",
       body: {}
     });
+    await assertStatus("manager cannot compact ledger history", 403, "/api/ledger/compact-history", manager, {
+      method: "POST",
+      body: {}
+    });
     await assertStatus("manager cannot create backups", 403, "/api/backup", manager, {
       method: "POST",
       body: {}
     });
 
     await assertStatus("owner can run maintenance", 200, "/api/pending/recalculate", owner, {
+      method: "POST",
+      body: {}
+    });
+    await assertStatus("owner can compact ledger history", 200, "/api/ledger/compact-history", owner, {
       method: "POST",
       body: {}
     });

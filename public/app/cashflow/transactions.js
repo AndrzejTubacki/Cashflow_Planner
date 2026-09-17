@@ -111,7 +111,10 @@ function renderLedgerCell(tx, locale) {
 }
 
 function renderTransactionRow(tx, locale, options = {}) {
-  const showLedgerAmount = options.showLedgerAmount !== false;
+  const compactLedgerColumns = Boolean(options.compactLedgerColumns);
+  const showLedgerAmount = Object.prototype.hasOwnProperty.call(options, "showLedgerAmount")
+    ? options.showLedgerAmount !== false
+    : !compactLedgerColumns;
   const showRunningBalance = options.showRunningBalance !== false;
   const entityType = options.entityType || tx.entityType || tx.source_type || "";
   const canEdit = typeof options.canEdit === "function"
@@ -131,17 +134,34 @@ function renderTransactionRow(tx, locale, options = {}) {
   const deleteConfirm = options.deleteConfirm || "";
 
   const runningBalance = tx.running_balance ?? tx.runningBalance;
+  const dateLabel = tx.date || tx.period || tx.due_date || EMPTY_VALUE;
+  const nameCell = `
+    <td>
+      <div class="cashflow-row-stack cashflow-row-stack--identity">
+        <strong>${escapeHtml(tx.name || EMPTY_VALUE)}</strong>
+        ${compactLedgerColumns ? `<small>${escapeHtml(dateLabel)}</small>` : ""}
+        ${tx.note ? `<small class="cashflow-note">${escapeHtml(tx.note)}</small>` : ""}
+        ${tx.warning ? `<small class="cashflow-warning-text">${escapeHtml(String(tx.warning))}</small>` : ""}
+      </div>
+    </td>
+  `;
+  const typeCell = compactLedgerColumns
+    ? `
+      <td>
+        <div class="cashflow-row-stack cashflow-row-stack--type">
+          <strong>${escapeHtml(transactionTypeLabel(locale, tx.type))}</strong>
+          ${renderStatusBadge(locale, tx.status)}
+        </div>
+      </td>
+    `
+    : `<td>${escapeHtml(transactionTypeLabel(locale, tx.type))}</td>`;
 
   return `
     <tr data-tx-id="${escapeHtml(tx.id)}" data-tx-type="${escapeHtml(entityType)}">
-      <td>${escapeHtml(tx.date || tx.period || tx.due_date || EMPTY_VALUE)}</td>
-      <td>
-        <strong>${escapeHtml(tx.name || EMPTY_VALUE)}</strong>
-        ${tx.note ? `<small class="cashflow-note">${escapeHtml(tx.note)}</small>` : ""}
-        ${tx.warning ? `<small class="cashflow-warning-text">${escapeHtml(String(tx.warning))}</small>` : ""}
-      </td>
-      <td>${escapeHtml(transactionTypeLabel(locale, tx.type))}</td>
-      <td>${renderStatusBadge(locale, tx.status)}</td>
+      ${compactLedgerColumns ? "" : `<td>${escapeHtml(dateLabel)}</td>`}
+      ${nameCell}
+      ${typeCell}
+      ${compactLedgerColumns ? "" : `<td>${renderStatusBadge(locale, tx.status)}</td>`}
       <td>${renderAmountCell(tx, locale)}</td>
       ${showLedgerAmount ? `<td>${renderLedgerAmountCell(tx, locale)}</td>` : ""}
       ${showRunningBalance
@@ -174,19 +194,33 @@ function renderTransactionTable(transactions, locale, options = {}) {
     return `<p>${escapeHtml(t(locale, "None"))}</p>`;
   }
 
-  const showLedgerAmount = options.showLedgerAmount !== false;
+  const compactLedgerColumns = Boolean(options.compactLedgerColumns);
+  const showLedgerAmount = Object.prototype.hasOwnProperty.call(options, "showLedgerAmount")
+    ? options.showLedgerAmount !== false
+    : !compactLedgerColumns;
   const showRunningBalance = options.showRunningBalance !== false;
   const ledgerAmountLabel = options.ledgerAmountLabel || t(locale, "Ledger amount");
+  let columnWidths = [];
+  if (compactLedgerColumns && showLedgerAmount && showRunningBalance) {
+    columnWidths = ["24%", "12%", "17%", "17%", "18%", "12%"];
+  } else if (compactLedgerColumns && (showLedgerAmount || showRunningBalance)) {
+    columnWidths = ["32%", "13%", "20%", "23%", "12%"];
+  } else if (compactLedgerColumns) {
+    columnWidths = ["42%", "16%", "28%", "14%"];
+  }
 
   return `
     <div class="cashflow-table-wrap">
-      <table class="cashflow-table">
+      <table class="cashflow-table${compactLedgerColumns ? " cashflow-table--ledger-compact" : ""}">
+        ${columnWidths.length
+          ? `<colgroup>${columnWidths.map(width => `<col style="width: ${escapeHtml(width)};">`).join("")}</colgroup>`
+          : ""}
         <thead>
           <tr>
-            <th>${escapeHtml(t(locale, "Date"))}</th>
+            ${compactLedgerColumns ? "" : `<th>${escapeHtml(t(locale, "Date"))}</th>`}
             <th>${escapeHtml(t(locale, "Name"))}</th>
             <th>${escapeHtml(t(locale, "Type"))}</th>
-            <th>${escapeHtml(t(locale, "Status"))}</th>
+            ${compactLedgerColumns ? "" : `<th>${escapeHtml(t(locale, "Status"))}</th>`}
             <th>${escapeHtml(t(locale, "Amount"))}</th>
             ${showLedgerAmount ? `<th>${escapeHtml(ledgerAmountLabel)}</th>` : ""}
             ${showRunningBalance ? `<th>${escapeHtml(t(locale, "Running balance"))}</th>` : ""}

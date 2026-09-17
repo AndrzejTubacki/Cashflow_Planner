@@ -16,10 +16,10 @@ const TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\
 const TABLE_COLUMNS = {
   settings: [
     "id", "ledger_currency", "timezone", "locale", "holiday_country", "future_periods",
-    "minimum_reserve_enabled", "minimum_reserve_amount", "budget_period_income_id",
+    "minimum_reserve_enabled", "minimum_reserve_amount", "ledger_history_compaction_months", "budget_period_income_id",
     "fx_buffer_percent", "fx_provider", "fx_used_currencies", "manual_fx_rates",
     "auto_backup_enabled", "backup_interval_minutes", "backup_retention_count", "backup_location",
-    "ntfy_url", "notification_delivery_time", "notify_goal_impossible",
+    "notification_channel", "ntfy_url", "ntfy_auth_token", "discord_webhook_url", "notification_delivery_time", "notify_goal_impossible",
     "notify_necessary_underfunded", "notify_funding_shortfall", "notify_income_missing",
     "notify_pending_summary", "notify_goal_funded", "notify_fx_changed",
     "ntfy_priority_goal_impossible", "ntfy_priority_necessary_underfunded",

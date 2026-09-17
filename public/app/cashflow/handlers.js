@@ -6,7 +6,7 @@ import {
 } from "./actions.js";
 import { escapeHtml } from "../utils.js";
 import { DEFAULT_LEDGER_CURRENCY, FX_PROVIDER_NOTES } from "./constants.js";
-import { openCashflowModal } from "./modal.js";
+import { normalizeCashflowNumericInput, openCashflowModal } from "./modal.js";
 import { localeOf, t } from "./shared.js";
 
 function selectedOptionValues(select) {
@@ -96,6 +96,47 @@ function dispatchBudgetSelectionCleared(detail = {}) {
   window.dispatchEvent(new CustomEvent("cashflow-budget-selection-cleared", { detail }));
 }
 
+function closeHelpPopovers(root, except = null) {
+  root.querySelectorAll(".cashflow-help-popover[open]").forEach(popover => {
+    if (popover !== except) {
+      popover.removeAttribute("open");
+    }
+  });
+}
+
+function bindHelpPopoverHandlers(root) {
+  const popovers = [...root.querySelectorAll(".cashflow-help-popover")];
+  if (!popovers.length) return;
+
+  popovers.forEach(popover => {
+    if (popover.dataset.cashflowHelpPopoverBound === "true") return;
+    popover.dataset.cashflowHelpPopoverBound = "true";
+    const summary = popover.querySelector("summary");
+    summary?.addEventListener("click", () => {
+      window.setTimeout(() => {
+        if (popover.open) {
+          closeHelpPopovers(root, popover);
+        }
+      }, 0);
+    });
+  });
+
+  if (root.dataset.cashflowHelpPopoversBound === "true") return;
+  root.dataset.cashflowHelpPopoversBound = "true";
+  if (typeof document === "undefined") return;
+
+  document.addEventListener("click", event => {
+    if (!root.isConnected) return;
+    if (event.target?.closest?.(".cashflow-help-popover")) return;
+    closeHelpPopovers(root);
+  });
+
+  document.addEventListener("keydown", event => {
+    if (!root.isConnected || event.key !== "Escape") return;
+    closeHelpPopovers(root);
+  });
+}
+
 function adminAuthPayload(form) {
   const value = name => String(form.querySelector(`[name="${name}"]`)?.value || "").trim();
   return {
@@ -183,6 +224,8 @@ export function attachCashflowHandlers(root, props = {}) {
   const apiClient = props.apiClient;
   const locale = localeOf(cashflow);
 
+  bindHelpPopoverHandlers(root);
+
   const tabButtons = root.querySelectorAll("[data-cashflow-tab]");
   if (tabButtons.length) {
     tabButtons.forEach(btn => {
@@ -196,10 +239,44 @@ export function attachCashflowHandlers(root, props = {}) {
     });
   }
 
+  root.querySelectorAll("[data-cashflow-menu-tab]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const tabId = btn.getAttribute("data-cashflow-menu-tab");
+      if (tabId) {
+        sessionStorage.setItem("cashflow_active_tab", tabId);
+        window.dispatchEvent(new CustomEvent("cashflow-tab-change", { detail: { tabId } }));
+        btn.closest(".cashflow-user-menu")?.removeAttribute("open");
+      }
+    });
+  });
+
+  root.querySelectorAll("[data-cashflow-ui-preference]").forEach(select => {
+    select.addEventListener("change", () => {
+      const container = select.closest("[data-cashflow-ui-preferences]");
+      const detail = Object.fromEntries(
+        [...(container?.querySelectorAll("[data-cashflow-ui-preference]") || [])]
+          .map(input => [input.getAttribute("data-cashflow-ui-preference"), input.value])
+          .filter(([key]) => key)
+      );
+      window.dispatchEvent(new CustomEvent("cashflow-ui-preferences-change", { detail }));
+    });
+  });
+
   root.querySelectorAll("[data-cashflow-dismiss-error]").forEach(button => {
     button.addEventListener("click", () => {
       window.dispatchEvent(new CustomEvent("cashflow-error-dismiss"));
     });
+  });
+
+  root.querySelector("[data-cashflow-language-select]")?.addEventListener("change", (event) => {
+    const localeValue = String(event.currentTarget.value || "").trim();
+    if (!localeValue || localeValue === locale) return;
+
+    window.dispatchEvent(new CustomEvent("cashflow-language-change", {
+      detail: {
+        locale: localeValue
+      }
+    }));
   });
 
   root.querySelectorAll("[data-cashflow-toggle-funding]").forEach(button => {
@@ -606,6 +683,16 @@ export function attachCashflowHandlers(root, props = {}) {
       });
     });
 
+    settingsForm.querySelector("[data-cashflow-compact-ledger-history]")?.addEventListener("click", (event) => {
+      if (!window.confirm(t(locale, "Compact old confirmed ledger rows? A safety backup will be created first."))) return;
+
+      withBusyButton(event.currentTarget, t(locale, "Compacting..."), async () => {
+        const months = Number(settingsForm.querySelector('input[name="ledger_history_compaction_months"]')?.value || 0);
+        const result = await postCashflowJson(apiClient, "/api/ledger/compact-history", { months });
+        window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
+      });
+    });
+
     settingsForm.addEventListener("submit", (e) => {
       e.preventDefault();
 
@@ -628,13 +715,14 @@ export function attachCashflowHandlers(root, props = {}) {
       });
 
       updates.future_periods = Number(updates.future_periods || 11);
+      updates.ledger_history_compaction_months = Number(updates.ledger_history_compaction_months || 0);
       updates.fx_buffer_percent = Number(updates.fx_buffer_percent || 0);
       updates.necessary_underfunded_repeat_days = Number(updates.necessary_underfunded_repeat_days || 1);
       updates.fx_used_currencies = selectedOptionValues(selectedCurrencies);
       updates.manual_fx_rates = Object.fromEntries(
         [...settingsForm.querySelectorAll("[data-manual-fx-rate]")].map(input => [
           input.getAttribute("data-manual-fx-rate"),
-          Number(input.value || 0)
+          Number(normalizeCashflowNumericInput(input.value || 0))
         ]).filter(([, rate]) => Number.isFinite(rate) && rate > 0)
       );
 

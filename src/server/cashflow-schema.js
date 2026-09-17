@@ -4,8 +4,28 @@ import {
   NOTIFICATION_DELIVERY_TIME
 } from "./cashflow-constants.js";
 
-export const PLANNING_SCHEMA_VERSION = 16;
+export const PLANNING_SCHEMA_VERSION = 19;
 export const LEDGER_SCHEMA_VERSION = 5;
+export const PLANNING_TABLE_NAMES = [
+  "settings",
+  "planned_transactions",
+  "recurring_expenses",
+  "recurring_incomes",
+  "one_off_transactions",
+  "flex_transactions",
+  "goals",
+  "future_transactions",
+  "pending_transactions",
+  "fx_rates_cache",
+  "ledger_currency_events",
+  "backup_metadata",
+  "event_log",
+  "notification_queue",
+  "projection_snapshots"
+];
+export const LEDGER_TABLE_NAMES = [
+  "confirmed_transactions"
+];
 
 export function initializePlanningSchema(db) {
   db.exec(`
@@ -38,6 +58,8 @@ export function initializePlanningSchema(db) {
       future_periods INTEGER NOT NULL DEFAULT ${DEFAULT_FUTURE_PERIODS},
       minimum_reserve_enabled INTEGER NOT NULL DEFAULT 0,
       minimum_reserve_amount REAL NOT NULL DEFAULT 0 CHECK (minimum_reserve_amount >= 0),
+      ledger_history_compaction_months INTEGER NOT NULL DEFAULT 0
+        CHECK (ledger_history_compaction_months BETWEEN 0 AND 600),
       budget_period_income_id TEXT,
       fx_buffer_percent REAL NOT NULL DEFAULT ${DEFAULT_FX_BUFFER_PERCENT},
       fx_provider TEXT NOT NULL DEFAULT 'nbp'
@@ -48,7 +70,11 @@ export function initializePlanningSchema(db) {
       backup_interval_minutes INTEGER NOT NULL DEFAULT 1440,
       backup_retention_count INTEGER NOT NULL DEFAULT 10,
       backup_location TEXT,
+      notification_channel TEXT NOT NULL DEFAULT 'ntfy'
+        CHECK (notification_channel IN ('ntfy', 'discord')),
       ntfy_url TEXT,
+      ntfy_auth_token TEXT,
+      discord_webhook_url TEXT,
       notification_delivery_time TEXT NOT NULL DEFAULT '${NOTIFICATION_DELIVERY_TIME}',
       notify_goal_impossible INTEGER NOT NULL DEFAULT 1,
       notify_necessary_underfunded INTEGER NOT NULL DEFAULT 1,

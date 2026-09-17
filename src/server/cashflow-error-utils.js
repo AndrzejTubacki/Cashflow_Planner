@@ -44,7 +44,8 @@ export async function sendApiError({
 
   const status = Number(error?.status) || 500;
   const message = cashflowErrorMessage(error) || fallback;
-  const localized = await translateLocale(resolveLocale(req), message || fallback);
+  const locale = await resolveLocale(req);
+  const localized = await translateLocale(locale, message || fallback);
   res.status(status).json({
     error: localized,
     ...(error?.conflicts ? { conflicts: error.conflicts } : {}),

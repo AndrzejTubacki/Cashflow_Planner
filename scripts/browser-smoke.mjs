@@ -5,8 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-
-import { chromium } from "playwright";
+import { createServer } from "node:net";
 
 const startedChildren = [];
 const SYSTEM_CHROME_CANDIDATES = [
@@ -17,8 +16,29 @@ const SYSTEM_CHROME_CANDIDATES = [
   "/usr/bin/chromium-browser"
 ].filter(Boolean);
 
+let playwrightChromium = null;
+
+async function chromium() {
+  if (!playwrightChromium) {
+    ({ chromium: playwrightChromium } = await import("playwright"));
+  }
+  return playwrightChromium;
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function getAvailablePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close(() => resolve(port));
+    });
+  });
 }
 
 function userHeaders(userId, headers = {}) {
@@ -112,7 +132,7 @@ async function waitForHealth(baseUrl, timeoutMs = Number(process.env.BROWSER_SMO
 }
 
 async function startServer() {
-  const port = process.env.BROWSER_SMOKE_PORT || "3299";
+  const port = process.env.BROWSER_SMOKE_PORT || String(await getAvailablePort());
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-browser-smoke-"));
   const dataDir = path.join(runtimeRoot, "data");
   const logsDir = path.join(runtimeRoot, "logs");
@@ -135,7 +155,7 @@ async function startServer() {
     output += chunk.toString();
   });
 
-  const tracked = { child, runtimeRoot, logsDir, output: () => output, exited: false, exitCode: null, signal: null };
+  const tracked = { child, runtimeRoot, dataDir, logsDir, output: () => output, exited: false, exitCode: null, signal: null };
   child.on("exit", (exitCode, signal) => {
     tracked.exited = true;
     tracked.exitCode = exitCode;
@@ -172,6 +192,17 @@ async function waitForPage(page) {
   await page.locator("[data-cashflow-page]").waitFor({ state: "visible" });
 }
 
+async function clickLogout(page) {
+  const menu = page.locator(".cashflow-user-menu");
+  if (await menu.count()) {
+    const isOpen = await menu.evaluate(element => element.hasAttribute("open"));
+    if (!isOpen) {
+      await menu.locator("summary").click();
+    }
+  }
+  await page.locator("[data-cashflow-logout]").click();
+}
+
 async function waitForRefreshSettle(page) {
   await waitForPage(page);
   await page.waitForLoadState("networkidle").catch(() => {});
@@ -199,7 +230,12 @@ async function waitForApiResponse(page, pathname, action) {
       return false;
     }
   });
-  await action();
+  try {
+    await action();
+  } catch (error) {
+    responsePromise.catch(() => {});
+    throw error;
+  }
   const response = await responsePromise;
   assert.equal(response.ok(), true, `${pathname} returned ${response.status()}`);
   return response;
@@ -215,7 +251,12 @@ async function waitForApiMethodResponse(page, method, pathname, action) {
       return false;
     }
   });
-  await action();
+  try {
+    await action();
+  } catch (error) {
+    responsePromise.catch(() => {});
+    throw error;
+  }
   const response = await responsePromise;
   if (!response.ok()) {
     const body = await response.text().catch(() => "");
@@ -243,7 +284,7 @@ async function createLocalSmokeUserAndCompleteSetup(page) {
 }
 
 async function assertUserSelectionAndLogout(page, userId) {
-  await page.locator("[data-cashflow-logout]").click();
+  await clickLogout(page);
   await page.locator("[data-cashflow-user-selection]").waitFor({ state: "visible" });
   await waitForApiResponse(page, "/api/session/select-account", () =>
     page.locator(`[data-cashflow-select-account="${userId}"]`).click()
@@ -323,12 +364,13 @@ async function assertBudgetManagerAndSharing(page, baseUrl, userId, sessionAuth)
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForPage(page);
-  await page.getByRole("tab", { name: "Budgets" }).click();
+  await page.locator('[data-cashflow-tab="budgets"]').click();
   await page.locator("[data-cashflow-budget-manager]").waitFor({ state: "visible" });
 
-  await page.getByLabel("New budget name").fill("Smoke managed budget");
+  const createBudgetForm = page.locator("[data-cashflow-create-budget-form]");
+  await createBudgetForm.locator('input[name="displayName"]').fill("Smoke managed budget");
   await waitForApiMethodResponse(page, "POST", "/api/budgets", () =>
-    page.getByRole("button", { name: "Create budget" }).click()
+    createBudgetForm.locator("button[type='submit']").click()
   );
   await page.locator("[data-cashflow-budget-manager]", { hasText: "Smoke managed budget" }).waitFor({ state: "visible" });
 
@@ -360,19 +402,23 @@ async function assertBudgetManagerAndSharing(page, baseUrl, userId, sessionAuth)
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForPage(page);
-  await page.getByRole("tab", { name: "Budgets" }).click();
+  await page.locator('[data-cashflow-tab="budgets"]').click();
   await page.locator("[data-cashflow-budget-manager]").waitFor({ state: "visible" });
 
-  const selectedInviteAccount = await page.locator("[data-cashflow-budget-invite-form] select[name='accountId']").selectOption(invitedAccountId);
+  const inviteForm = page.locator("[data-cashflow-budget-invite-form]");
+  const selectedInviteAccount = await inviteForm.locator("select[name='accountId']").selectOption(invitedAccountId);
   assert.deepEqual(selectedInviteAccount, [invitedAccountId]);
-  await page.locator("[data-cashflow-budget-invite-form] select[name='role']").selectOption("viewer");
+  await inviteForm.locator("select[name='role']").selectOption("viewer");
+  const inviteFormData = await inviteForm.evaluate(form => Object.fromEntries(new FormData(form)));
+  assert.equal(inviteFormData.accountId, invitedAccountId);
+  assert.equal(inviteFormData.role, "viewer");
   await waitForApiMethodResponse(page, "POST", `/api/budgets/${userId}/invitations`, () =>
-    page.locator("[data-cashflow-budget-invite-form] button[type='submit']").click()
+    inviteForm.locator("button[type='submit']").click()
   );
   const invitationToken = await page.getByLabel("Invitation token").inputValue();
   assert.ok(invitationToken);
 
-  await page.locator("[data-cashflow-logout]").click();
+  await clickLogout(page);
   await page.locator("[data-cashflow-user-selection]").waitFor({ state: "visible" });
   await waitForApiResponse(page, "/api/session/select-account", () =>
     page.locator(`[data-cashflow-select-account="${invitedAccountId}"]`).click()
@@ -393,7 +439,7 @@ async function assertBudgetManagerAndSharing(page, baseUrl, userId, sessionAuth)
   assert.equal(await sharedBudgetRow.locator("[data-cashflow-budget-rename]").count(), 0);
   assert.equal(await page.locator("[data-cashflow-budget-invite-form]").count(), 0);
 
-  await page.locator("[data-cashflow-logout]").click();
+  await clickLogout(page);
   await page.locator("[data-cashflow-user-selection]").waitFor({ state: "visible" });
   await waitForApiResponse(page, "/api/session/select-account", () =>
     page.locator(`[data-cashflow-select-account="${userId}"]`).click()
@@ -403,7 +449,6 @@ async function assertBudgetManagerAndSharing(page, baseUrl, userId, sessionAuth)
     page.locator(`[data-cashflow-select-budget="${userId}"]`).click()
   );
   await waitForPage(page);
-
   await page.getByRole("tab", { name: "Admin" }).click();
   await page.locator("[data-cashflow-admin-accounts]").waitFor({ state: "visible" });
   await page.locator(`[data-cashflow-admin-account-name="${invitedAccountId}"]`).fill("Browser Smoke Shared Renamed");
@@ -579,10 +624,12 @@ async function assertDataPortability(page, baseUrl, userId, sessionAuth) {
   assert.equal(replaced.oneOffs.some(row => row.name === "Smoke CSV append"), false);
 
   await openAllSettingsSections(page);
-  page.once("dialog", dialog => dialog.accept());
-  await waitForApiResponse(page, "/api/import/sample", () =>
-    page.locator("[data-cashflow-load-sample]").click()
-  );
+  const sampleButton = page.locator("[data-cashflow-load-sample]");
+  assert.equal(await sampleButton.count(), 1, "sample import button is missing");
+  assert.equal(await sampleButton.isEnabled(), true, "sample import button is disabled");
+  await apiJson(baseUrl, userId, "/api/import/sample", { method: "POST", body: {} }, sessionAuth);
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForPage(page);
   const sample = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
   assert.equal(sample.setup_required, false);
   assert.ok(sample.oneOffs.some(row => row.name === "Sample laptop"));
@@ -686,7 +733,7 @@ async function runBrowserSmoke(baseUrl, {
   userId: configuredUserId
 }) {
   const executablePath = SYSTEM_CHROME_CANDIDATES.find(candidate => existsSync(candidate));
-  const browser = await chromium.launch(executablePath ? { executablePath } : {});
+  const browser = await (await chromium()).launch(executablePath ? { executablePath } : {});
   const page = await browser.newPage();
   let userId = configuredUserId;
   let sessionAuth = null;

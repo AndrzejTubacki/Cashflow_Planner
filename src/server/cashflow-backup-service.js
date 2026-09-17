@@ -2,6 +2,11 @@
 import fs from "fs";
 import path from "path";
 import {
+  createBudgetStoreSnapshot,
+  normalizeBudgetStoreSnapshot,
+  restoreBudgetStoreSnapshot
+} from "./cashflow-budget-store-snapshot.js";
+import {
   replaceTableRowsFromBackup,
   tableExists
 } from "./cashflow-db-utils.js";
@@ -37,9 +42,11 @@ export function createCashflowBackupService({
   backupDir,
   backupHook = null,
   backupRootDir,
+  budgetStore = null,
   directorySizeBytes,
   generateId,
   getSettings,
+  getSettingsAsync = null,
   initReadOnlyPragmas,
   listLedgerYears,
   logError = () => {},
@@ -48,10 +55,26 @@ export function createCashflowBackupService({
   openLedgerDb,
   openPlanningDb,
   recalculateLedgerRunningBalance,
-  regenerateProjectionsAfterMutation
+  recalculateLedgerRunningBalanceAsync = null,
+  regenerateProjectionsAfterMutation,
+  regenerateProjectionsAfterMutationAsync = null
 }) {
   function runBackupHook(phase, details = {}) {
     if (typeof backupHook === "function") backupHook({ phase, ...details });
+  }
+
+  // Postgres has no VACUUM INTO / file-copy equivalent, so its backup path
+  // stores a JSON budget-store snapshot instead of a folder of .sqlite files,
+  // and tracks metadata as a backup_metadata planning row instead of a local
+  // SQL row. Both paths share the same backup root directory, retention
+  // count, and rollback-on-restore-failure contract.
+  function usesPostgresBudgetStoreForBackup() {
+    return budgetStore?.backend === "postgres"
+      && typeof budgetStore.listPlanningRows === "function"
+      && typeof budgetStore.insertPlanningRows === "function"
+      && typeof getSettingsAsync === "function"
+      && typeof recalculateLedgerRunningBalanceAsync === "function"
+      && typeof regenerateProjectionsAfterMutationAsync === "function";
   }
 
   function validateBackupFolderForRestore(backupPath) {
@@ -194,6 +217,21 @@ export function createCashflowBackupService({
     }
   }
 
+  function isHttpUrlOrEmpty(value) {
+    if (value === null || value === undefined || value === "") return true;
+    try {
+      const parsed = new URL(String(value).trim());
+      return ["http:", "https:"].includes(parsed.protocol);
+    } catch {
+      return false;
+    }
+  }
+
+  function isReasonableStringOrEmpty(value, maxLength) {
+    if (value === null || value === undefined || value === "") return true;
+    return typeof value === "string" && value.length <= maxLength;
+  }
+
   function parseJsonForValidation(value) {
     if (value === null || value === undefined || value === "") return null;
     if (typeof value === "object") return value;
@@ -231,8 +269,13 @@ export function createCashflowBackupService({
       ["holiday_country", () => isValidHolidayCountry(settings.holiday_country)],
       ["future_periods", () => Number.isInteger(Number(settings.future_periods)) && Number(settings.future_periods) >= 1 && Number(settings.future_periods) <= 60],
       ["minimum_reserve_amount", () => isFiniteNumber(settings.minimum_reserve_amount) && Number(settings.minimum_reserve_amount) >= 0],
+      ["ledger_history_compaction_months", () => Number.isInteger(Number(settings.ledger_history_compaction_months || 0)) && Number(settings.ledger_history_compaction_months || 0) >= 0 && Number(settings.ledger_history_compaction_months || 0) <= 600],
       ["fx_buffer_percent", () => isFiniteNumber(settings.fx_buffer_percent) && Number(settings.fx_buffer_percent) >= 0 && Number(settings.fx_buffer_percent) <= 100],
-      ["fx_provider", () => FX_PROVIDER_IDS.includes(String(settings.fx_provider || ""))]
+      ["fx_provider", () => FX_PROVIDER_IDS.includes(String(settings.fx_provider || ""))],
+      ["notification_channel", () => ["ntfy", "discord"].includes(String(settings.notification_channel || "ntfy"))],
+      ["ntfy_url", () => isHttpUrlOrEmpty(settings.ntfy_url)],
+      ["ntfy_auth_token", () => isReasonableStringOrEmpty(settings.ntfy_auth_token, 500)],
+      ["discord_webhook_url", () => isHttpUrlOrEmpty(settings.discord_webhook_url)]
     ];
 
     for (const [field, valid] of checks) {
@@ -816,6 +859,33 @@ export function createCashflowBackupService({
     return { backupPath, deleted };
   }
 
+  async function maybeRunAutomaticBackupAsync(userId) {
+    if (!usesPostgresBudgetStoreForBackup()) {
+      return maybeRunAutomaticBackup(userId);
+    }
+
+    const settings = await getSettingsAsync(userId);
+    if (!Number(settings?.auto_backup_enabled)) return null;
+
+    const intervalMinutes = Number(settings?.backup_interval_minutes || 1440);
+    const rows = await budgetStore.listPlanningRows(userId, "backup_metadata");
+    const lastBackup = rows
+      .filter(row => row.success)
+      .sort((a, b) => String(b.backup_timestamp || "").localeCompare(String(a.backup_timestamp || "")))[0];
+
+    if (lastBackup?.backup_timestamp) {
+      const ageMs = Date.now() - new Date(lastBackup.backup_timestamp).getTime();
+      const requiredMs = intervalMinutes * 60 * 1000;
+      if (ageMs < requiredMs) return null;
+    }
+
+    // Retention cleanup (backupsDeleted) is SQLite-only — see the note in
+    // runRecoverableUserMutation — so it's skipped here rather than
+    // best-effort, same as the rest of the Postgres backup path.
+    const backupPath = await createBackupAsync(userId, { deferCleanup: true });
+    return { backupPath, deleted: 0 };
+  }
+
   function createBackup(userId, options = {}) {
     const { deferCleanup = false } = options;
     const settings = getSettings(userId);
@@ -898,6 +968,82 @@ export function createCashflowBackupService({
       logError("cashflow_backup_creation_failed", {
         userId,
         backupPath: backupRoot,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  async function createBackupAsync(userId, options = {}) {
+    if (!usesPostgresBudgetStoreForBackup()) {
+      return createBackup(userId, options);
+    }
+
+    const settings = await getSettingsAsync(userId);
+    const dir = backupRootDir(userId, settings);
+    const createdAt = now().toISOString();
+    const timestamp = createdAt.replace(/[:.]/g, "-");
+    const backupId = generateId("backup");
+    const backupPath = path.join(dir, `backup_${timestamp}_${backupId}.json`);
+    const temporaryPath = `${backupPath}.tmp`;
+
+    async function recordMetadata(success, errorMessage = null, sizeBytes = null) {
+      await budgetStore.insertPlanningRows(userId, "backup_metadata", [{
+        id: backupId,
+        backup_timestamp: createdAt,
+        backup_path: backupPath,
+        size_bytes: sizeBytes,
+        success: Boolean(success),
+        error_message: errorMessage,
+        created_at: new Date().toISOString()
+      }]);
+    }
+
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      runBackupHook("before_planning_copy", { userId, backupPath, temporaryPath });
+      const snapshot = await createBudgetStoreSnapshot({
+        budgetIds: [userId],
+        budgetStore,
+        reason: options.reason || "manual"
+      });
+      const serialized = JSON.stringify(snapshot);
+
+      runBackupHook("before_backup_validation", { userId, backupPath, temporaryPath });
+      normalizeBudgetStoreSnapshot(snapshot);
+
+      fs.writeFileSync(temporaryPath, serialized, "utf8");
+      fs.renameSync(temporaryPath, backupPath);
+      runBackupHook("before_success_metadata", { userId, backupPath });
+      await recordMetadata(true, null, Buffer.byteLength(serialized, "utf8"));
+      return backupPath;
+    } catch (error) {
+      for (const partialPath of [temporaryPath, backupPath]) {
+        try {
+          fs.rmSync(partialPath, { force: true });
+        } catch (cleanupError) {
+          logError("cashflow_backup_partial_cleanup_failed", {
+            userId,
+            backupPath,
+            partialPath,
+            error: cleanupError.message
+          });
+        }
+      }
+
+      try {
+        await recordMetadata(false, error.message, null);
+      } catch (metadataError) {
+        logError("cashflow_backup_failure_metadata_failed", {
+          userId,
+          backupPath,
+          error: error.message,
+          metadataError: metadataError.message
+        });
+      }
+      logError("cashflow_backup_creation_failed", {
+        userId,
+        backupPath,
         error: error.message
       });
       throw error;
@@ -1129,13 +1275,121 @@ export function createCashflowBackupService({
     }
   }
 
+  async function restoreBackupFromPathAsync(userId, backupPath) {
+    const raw = fs.readFileSync(backupPath, "utf8");
+    const snapshot = normalizeBudgetStoreSnapshot(JSON.parse(raw));
+
+    await restoreBudgetStoreSnapshot({
+      budgetStore,
+      // A restore must end up exactly matching the backup, so ledger years
+      // present now but absent from the backup need to be cleared too, not
+      // just left alone.
+      includeExistingLedgerYears: true,
+      snapshot
+    });
+
+    await recalculateLedgerRunningBalanceAsync(userId);
+
+    const projection = await regenerateProjectionsAfterMutationAsync(userId);
+    if (projection?.projection_ok === false) {
+      throw new Error(`Projection regeneration failed after restore: ${projection.projection_error || "unknown error"}`);
+    }
+    return projection;
+  }
+
+  async function restoreBackupAsync(userId, backupId) {
+    if (!usesPostgresBudgetStoreForBackup()) {
+      return restoreBackup(userId, backupId);
+    }
+
+    const rows = await budgetStore.listPlanningRows(userId, "backup_metadata");
+    const row = rows.find(candidate => candidate.id === backupId);
+    if (!row?.backup_path || !row.success) {
+      throw notFound("Backup not found", [{ field: "backupId", reason: "not_found" }]);
+    }
+
+    const backupPath = row.backup_path;
+    if (!fs.existsSync(backupPath)) {
+      throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
+    }
+
+    try {
+      normalizeBudgetStoreSnapshot(JSON.parse(fs.readFileSync(backupPath, "utf8")));
+    } catch (error) {
+      throw badRequest("Backup is invalid and cannot be restored", {
+        phase: "backup_validation_failed",
+        backupPath,
+        error: error.message
+      });
+    }
+
+    const safetyBackup = await createBackupAsync(userId, { deferCleanup: true });
+
+    try {
+      runBackupHook("before_restore_apply", { userId, backupPath, safetyBackup });
+      const projection = await restoreBackupFromPathAsync(userId, backupPath);
+
+      return {
+        ok: true,
+        restoredFrom: backupPath,
+        safetyBackup,
+        mode: "budget_store_snapshot",
+        _projection: projection
+      };
+    } catch (error) {
+      logError("cashflow_restore_failed_before_rollback", {
+        userId,
+        restoredFrom: backupPath,
+        safetyBackup,
+        error: error.message
+      });
+      try {
+        runBackupHook("before_restore_rollback", { userId, backupPath, safetyBackup, error });
+        await restoreBackupFromPathAsync(userId, safetyBackup);
+        logServerEvent("cashflow_restore_rolled_back", {
+          userId,
+          restoredFrom: backupPath,
+          safetyBackup,
+          error: error.message
+        });
+      } catch (rollbackError) {
+        logError("cashflow_restore_rollback_failed", {
+          userId,
+          restoredFrom: backupPath,
+          safetyBackup,
+          error: error.message,
+          rollbackError: rollbackError.message
+        });
+        const combined = new Error("Restore failed and rollback also failed");
+        combined.status = 500;
+        combined.details = {
+          phase: "rollback_failed",
+          safetyBackup,
+          originalError: error.message,
+          originalStatus: Number(error?.status) || 500,
+          rollbackError: rollbackError.message
+        };
+        throw combined;
+      }
+
+      const rolledBack = new Error(`Restore failed and was rolled back: ${error.message}`);
+      rolledBack.status = Number(error?.status) || 500;
+      if (error?.details) rolledBack.details = error.details;
+      throw rolledBack;
+    }
+  }
+
   return {
     cleanupOperationalData,
     cleanupOperationalDataBestEffort,
     createBackup,
+    createBackupAsync,
     maybeRunAutomaticBackup,
+    maybeRunAutomaticBackupAsync,
     restoreBackup,
+    restoreBackupAsync,
     restoreBackupFromPath,
+    restoreBackupFromPathAsync,
     validateBackupFolderForRestore,
     validateCashflowData
   };

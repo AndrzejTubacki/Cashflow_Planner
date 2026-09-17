@@ -115,10 +115,25 @@ function formatMoney(amount, currency, locale) {
   return `${formatted} ${currency}`;
 }
 
-function renderStatCard(label, value, note = "") {
+function renderHelpPopover(locale, title, body) {
+  if (!body) return "";
+
+  return `
+    <details class="cashflow-help-popover">
+      <summary aria-label="${escapeHtml(`${t(locale, "Help")}: ${title}`)}">?</summary>
+      <div class="cashflow-help-popover__body" role="dialog" aria-label="${escapeHtml(title)}">
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(body)}</p>
+      </div>
+    </details>
+  `;
+}
+
+function renderStatCard(label, value, note = "", options = {}) {
+  const help = options.help ? renderHelpPopover(options.locale || DEFAULT_LOCALE, label, options.help) : "";
   return `
     <div class="metric-tile">
-      <span>${escapeHtml(label)}</span>
+      <span class="metric-tile__label">${escapeHtml(label)}${help}</span>
       <strong>${escapeHtml(value)}</strong>
       ${note ? `<small>${escapeHtml(note)}</small>` : ""}
     </div>
@@ -253,6 +268,7 @@ export {
   localeOf,
   loadLocale,
   renderDetailsPanel,
+  renderHelpPopover,
   renderProjectionWarnings,
   renderStatCard,
   renderStatusBadge,

@@ -27,12 +27,30 @@ export function renderBudgetPeriodStats(locale, cashflow) {
 
   return `
     <div class="metric-grid cashflow-budget-period">
-      ${renderStatCard(t(locale, "Period start"), periodStartDate)}
-      ${renderStatCard(t(locale, "Period end"), periodEndDate)}
-      ${renderStatCard(t(locale, "Next reset"), nextResetDate)}
-      ${renderStatCard(t(locale, "Defined by"), periodIncomeName)}
-      ${currentPeriod ? renderStatCard(t(locale, "Period income"), formatMoney(currentPeriod.income, ledgerCurrency, locale)) : ""}
-      ${currentPeriod ? renderStatCard(t(locale, "Period expenses"), formatMoney(currentPeriod.expenses, ledgerCurrency, locale)) : ""}
+      ${renderStatCard(t(locale, "Period start"), periodStartDate, "", {
+        locale,
+        help: t(locale, "The first date in the currently displayed budget period.")
+      })}
+      ${renderStatCard(t(locale, "Period end"), periodEndDate, "", {
+        locale,
+        help: t(locale, "The last date in the currently displayed budget period.")
+      })}
+      ${renderStatCard(t(locale, "Next reset"), nextResetDate, "", {
+        locale,
+        help: t(locale, "The first date after this period. Future allocations after this date belong to the next period.")
+      })}
+      ${renderStatCard(t(locale, "Defined by"), periodIncomeName, "", {
+        locale,
+        help: t(locale, "Calendar month means normal months. An income name means that income defines payday-style periods.")
+      })}
+      ${currentPeriod ? renderStatCard(t(locale, "Period income"), formatMoney(currentPeriod.income, ledgerCurrency, locale), "", {
+        locale,
+        help: t(locale, "Income projected or confirmed inside this budget period in the active ledger currency.")
+      }) : ""}
+      ${currentPeriod ? renderStatCard(t(locale, "Period expenses"), formatMoney(currentPeriod.expenses, ledgerCurrency, locale), "", {
+        locale,
+        help: t(locale, "Expenses, goal allocations, and flex allocations projected or confirmed inside this budget period.")
+      }) : ""}
     </div>
   `;
 }

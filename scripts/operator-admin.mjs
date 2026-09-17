@@ -12,6 +12,11 @@ function argument(name) {
 const dataDir = path.resolve(argument("--data-dir") || process.env.DATA_DIR || "data");
 const accountId = String(argument("--account-id") || "").trim();
 const dbPath = path.join(dataDir, "cashflow-global.sqlite");
+const backend = String(process.env.CASHFLOW_DB_BACKEND || "sqlite").trim().toLowerCase();
+
+if (!["", "sqlite"].includes(backend)) {
+  throw new Error("operator-admin currently supports only the SQLite runtime backend");
+}
 
 if (!accountId) {
   throw new Error("Usage: node scripts/operator-admin.mjs --data-dir <path> --account-id <existing-account-id>");

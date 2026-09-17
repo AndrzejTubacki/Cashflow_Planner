@@ -1,11 +1,20 @@
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
-import { requireIsoMonth, todayInTimezone } from "./cashflow-date-utils.js";
-import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { requireIsoMonth } from "./cashflow-date-utils.js";
 import { requireNumber } from "./cashflow-input-validation.js";
+import {
+  latestBalanceFromConfirmedRows,
+  sortConfirmedRowsForBalance,
+  storedOrComputedConfirmedLedgerAmount
+} from "./cashflow-ledger-balance-utils.js";
 import { addMoneyAmounts, multiplyMoney, roundMoneyAmount, subtractMoneyAmounts } from "./cashflow-money-utils.js";
+import {
+  applyPlanningRunningBalancePlan,
+  createPlanningRunningBalancePlan
+} from "./cashflow-planning-balance-plan.js";
 import { badRequest } from "./cashflow-user-utils.js";
 
 export function createCashflowProjectionStateService({
+  budgetStore = null,
   latestConfirmedBalance,
   listLedgerYears,
   loadAllConfirmedTransactions,
@@ -77,11 +86,23 @@ export function createCashflowProjectionStateService({
     );
   }
 
-  function confirmedOneOffProgress(userId) {
+  async function confirmedOccurrenceKeysAsync(userId) {
+    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+      return confirmedOccurrenceKeys(userId);
+    }
+
+    return new Set(
+      (await confirmedRowsForBudgetStore(userId))
+        .map(row => row.occurrence_key || occurrenceKeyFromRow(row))
+        .filter(Boolean)
+    );
+  }
+
+  function confirmedOneOffProgressFromRows(rows = []) {
     // Track installments in original transaction units so projection can generate only the unconfirmed remainder.
     const progress = new Map();
 
-    for (const row of loadAllConfirmedTransactions(userId)) {
+    for (const row of rows) {
       const sourceId = row.source_one_off_id;
       if (!sourceId) continue;
 
@@ -102,6 +123,18 @@ export function createCashflowProjectionStateService({
     }
 
     return progress;
+  }
+
+  function confirmedOneOffProgress(userId) {
+    return confirmedOneOffProgressFromRows(loadAllConfirmedTransactions(userId));
+  }
+
+  async function confirmedOneOffProgressAsync(userId) {
+    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+      return confirmedOneOffProgress(userId);
+    }
+
+    return confirmedOneOffProgressFromRows(await confirmedRowsForBudgetStore(userId));
   }
 
   function findConfirmedOccurrence(userId, occurrenceKey) {
@@ -134,6 +167,19 @@ export function createCashflowProjectionStateService({
     }
 
     return null;
+  }
+
+  async function findConfirmedOccurrenceAsync(userId, occurrenceKey) {
+    if (!occurrenceKey) return null;
+    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+      return findConfirmedOccurrence(userId, occurrenceKey);
+    }
+
+    const rows = await confirmedRowsForBudgetStore(userId);
+    const byKey = rows.find(row => row.occurrence_key === occurrenceKey);
+    if (byKey) return byKey;
+
+    return rows.find(row => !row.occurrence_key && occurrenceKeyFromRow(row) === occurrenceKey) || null;
   }
 
   function deletePendingOccurrence(db, occurrenceKey) {
@@ -170,11 +216,45 @@ export function createCashflowProjectionStateService({
     return multiplyMoney(row.amount, row.buffered_fx_rate || row.fx_rate || 1);
   }
 
+  async function settingsForBudgetStore(userId, store = budgetStore) {
+    if (!store || typeof store.listPlanningRows !== "function") {
+      return {};
+    }
+
+    const rows = await store.listPlanningRows(userId, "settings");
+    return rows?.[0] || {};
+  }
+
+  async function confirmedRowsForBudgetStore(userId, store = budgetStore) {
+    if (!store || typeof store.listConfirmedTransactions !== "function") {
+      return sortConfirmedRowsForBalance(loadAllConfirmedTransactions(userId));
+    }
+
+    if (typeof store.listLedgerYears !== "function") {
+      return sortConfirmedRowsForBalance(await store.listConfirmedTransactions(userId));
+    }
+
+    const rows = [];
+    for (const year of await store.listLedgerYears(userId)) {
+      rows.push(...(await store.listConfirmedTransactions(userId, { ledgerYear: Number(year) })));
+    }
+    return sortConfirmedRowsForBalance(rows);
+  }
+
   function confirmedRowsForCurrentLedger(db, userId) {
     if (!userId) return [];
 
     const ledgerCurrency = currentLedgerCurrency(db);
     return loadAllConfirmedTransactions(userId)
+      .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
+  }
+
+  async function confirmedRowsForCurrentLedgerAsync(userId, settings = null, store = budgetStore) {
+    if (!userId) return [];
+
+    const effectiveSettings = settings || await settingsForBudgetStore(userId, store);
+    const ledgerCurrency = effectiveSettings?.ledger_currency || "PLN";
+    return (await confirmedRowsForBudgetStore(userId, store))
       .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
   }
 
@@ -206,61 +286,46 @@ export function createCashflowProjectionStateService({
       }));
   }
 
+  async function confirmedBalanceAsOfAsync(userId, cutoffDate = null, settings = null, store = budgetStore) {
+    if (!store || typeof store.listConfirmedTransactions !== "function") {
+      const rows = loadAllConfirmedTransactions(userId)
+        .filter(row => String(row.ledger_currency || "PLN") === (settings?.ledger_currency || "PLN"))
+        .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
+      return latestBalanceFromConfirmedRows(rows, { openingBalance: 0 });
+    }
+
+    const rows = (await confirmedRowsForCurrentLedgerAsync(userId, settings, store))
+      .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
+    return latestBalanceFromConfirmedRows(rows, { openingBalance: 0 });
+  }
+
+  async function confirmedRowsAfterDateAsync(userId, date, settings = null) {
+    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+      return loadAllConfirmedTransactions(userId)
+        .filter(row => String(row.ledger_currency || "PLN") === (settings?.ledger_currency || "PLN"))
+        .filter(row => String(row.date || "") > date)
+        .map(row => ({
+          ...row,
+          ledger_amount: confirmedLedgerAmount(row)
+        }));
+    }
+
+    return (await confirmedRowsForCurrentLedgerAsync(userId, settings))
+      .filter(row => String(row.date || "") > date)
+      .map(row => ({
+        ...row,
+        ledger_amount: storedOrComputedConfirmedLedgerAmount(row)
+      }));
+  }
+
   function recalculatePlanningRunningBalances(db, userId = null) {
     const settings = db.prepare("SELECT ledger_currency, timezone FROM settings WHERE id = 1").get() || {};
-    const ledgerCurrency = settings.ledger_currency || "PLN";
-    const today = todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
-    const rows = [
-      ...confirmedRowsAfterDate(db, userId, today).map(row => ({
-        id: row.id,
-        type: row.type,
-        ledger_amount: row.ledger_amount,
-        date: row.date,
-        created_at: row.created_at,
-        bucket: "confirmed"
-      })),
-      ...db.prepare(`
-        SELECT id, type, ledger_amount, date, created_at, 'pending' AS bucket
-        FROM pending_transactions
-        WHERE COALESCE(ledger_currency, 'PLN') = ?
-      `).all(ledgerCurrency),
-      ...db.prepare(`
-        SELECT id, type, ledger_amount, date, created_at, 'future' AS bucket
-        FROM future_transactions
-        WHERE COALESCE(ledger_currency, 'PLN') = ?
-      `).all(ledgerCurrency)
-    ].sort((a, b) => {
-      const dateCompare = String(a.date).localeCompare(String(b.date));
-      if (dateCompare !== 0) return dateCompare;
-
-      const bucketRanks = {
-        confirmed: 0,
-        pending: 1,
-        future: 2
-      };
-      const bucketOrder = (bucketRanks[a.bucket] ?? 99) - (bucketRanks[b.bucket] ?? 99);
-      if (bucketOrder !== 0) return bucketOrder;
-
-      const createdCompare = String(a.created_at).localeCompare(String(b.created_at));
-      if (createdCompare !== 0) return createdCompare;
-
-      return String(a.id).localeCompare(String(b.id));
+    const plan = createPlanningRunningBalancePlan({
+      confirmedRows: userId ? loadAllConfirmedTransactions(userId) : [],
+      futureRows: db.prepare("SELECT * FROM future_transactions").all(),
+      pendingRows: db.prepare("SELECT * FROM pending_transactions").all(),
+      settings
     });
-
-    const staleRows = [
-      ...db.prepare(`
-        SELECT id, 'pending' AS bucket
-        FROM pending_transactions
-        WHERE COALESCE(ledger_currency, 'PLN') != ?
-      `).all(ledgerCurrency),
-      ...db.prepare(`
-        SELECT id, 'future' AS bucket
-        FROM future_transactions
-        WHERE COALESCE(ledger_currency, 'PLN') != ?
-      `).all(ledgerCurrency)
-    ];
-
-    let balance = userId ? confirmedBalanceAsOf(db, userId, today) : 0;
 
     const updatePending = db.prepare(`
       UPDATE pending_transactions
@@ -274,33 +339,39 @@ export function createCashflowProjectionStateService({
       WHERE id = ?
     `);
 
-    for (const row of staleRows) {
+    for (const row of plan.updates) {
       if (row.bucket === "pending") {
-        updatePending.run(null, row.id);
+        updatePending.run(row.running_balance, row.id);
       } else {
-        updateFuture.run(null, row.id);
+        updateFuture.run(row.running_balance, row.id);
       }
     }
+  }
 
-    for (const row of rows) {
-      const ledgerAmount = roundMoneyAmount(row.ledger_amount);
-
-      if (row.type === "income") {
-        balance = addMoneyAmounts(balance, ledgerAmount);
-      } else {
-        balance = subtractMoneyAmounts(balance, ledgerAmount);
-      }
-
-      if (row.bucket === "confirmed") {
-        continue;
-      }
-
-      if (row.bucket === "pending") {
-        updatePending.run(roundMoneyAmount(balance), row.id);
-      } else {
-        updateFuture.run(roundMoneyAmount(balance), row.id);
-      }
+  async function recalculatePlanningRunningBalancesAsync(userId, store = budgetStore) {
+    if (!store || typeof store.listPlanningRows !== "function" || typeof store.updatePlanningRowsById !== "function") {
+      throw new Error("A budget store with planning read/write support is required");
     }
+
+    const settingsRows = await store.listPlanningRows(userId, "settings");
+    const pendingRows = await store.listPlanningRows(userId, "pending_transactions");
+    const futureRows = await store.listPlanningRows(userId, "future_transactions");
+    const confirmedRows = await confirmedRowsForBudgetStore(userId, store);
+    const plan = createPlanningRunningBalancePlan({
+      confirmedRows,
+      futureRows,
+      pendingRows,
+      settings: settingsRows?.[0] || {}
+    });
+    const result = await applyPlanningRunningBalancePlan({
+      budgetId: userId,
+      budgetStore: store,
+      plan
+    });
+    return {
+      ...result,
+      plan
+    };
   }
 
   function pendingNetBalance(db) {
@@ -319,24 +390,61 @@ export function createCashflowProjectionStateService({
     `).get(ledgerCurrency).value);
   }
 
+  async function pendingNetBalanceAsync(userId, settings = null, store = budgetStore) {
+    if (!store || typeof store.listPlanningRows !== "function") {
+      throw new Error("A budget store with planning read support is required");
+    }
+
+    const effectiveSettings = settings || await settingsForBudgetStore(userId, store);
+    const ledgerCurrency = effectiveSettings?.ledger_currency || "PLN";
+    const rows = await store.listPlanningRows(userId, "pending_transactions");
+    return roundMoneyAmount(rows.reduce((total, row) => {
+      if (String(row.ledger_currency || "PLN") !== ledgerCurrency) return total;
+      const amount = roundMoneyAmount(row.ledger_amount);
+      return row.type === "income"
+        ? addMoneyAmounts(total, amount)
+        : subtractMoneyAmounts(total, amount);
+    }, 0));
+  }
+
   function planningOpeningBalance(db, userId, { includePending = true } = {}) {
     return addMoneyAmounts(latestConfirmedBalance(userId), includePending ? pendingNetBalance(db) : 0);
   }
 
+  async function planningOpeningBalanceAsync(userId, {
+    includePending = true,
+    settings = null,
+    store = budgetStore
+  } = {}) {
+    const effectiveSettings = settings || await settingsForBudgetStore(userId, store);
+    return addMoneyAmounts(
+      await confirmedBalanceAsOfAsync(userId, null, effectiveSettings, store),
+      includePending ? await pendingNetBalanceAsync(userId, effectiveSettings, store) : 0
+    );
+  }
+
   return {
     confirmedBalanceAsOf,
+    confirmedBalanceAsOfAsync,
     confirmedOccurrenceKeys,
+    confirmedOccurrenceKeysAsync,
     confirmedRowsAfterDate,
+    confirmedRowsAfterDateAsync,
     confirmedOneOffProgress,
+    confirmedOneOffProgressAsync,
     deletePendingOccurrence,
     findConfirmedOccurrence,
+    findConfirmedOccurrenceAsync,
     normalizePendingStatus,
     normalizeRecurringInput,
     pendingOccurrenceExists,
     pendingOccurrenceRow,
     pendingNetBalance,
+    pendingNetBalanceAsync,
     planningOpeningBalance,
+    planningOpeningBalanceAsync,
     recalculatePlanningRunningBalances,
+    recalculatePlanningRunningBalancesAsync,
     refreshPendingOccurrence,
     requireStartMonthYearIfNeeded
   };

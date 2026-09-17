@@ -42,9 +42,12 @@ The core workflow is:
 - admin tab for global defaults applied to newly created users
 - admin-managed internal email/password login with one-time setup/reset tokens
 - trusted reverse-proxy/SSO login using stable subject headers
+- browser-local display preferences for theme, density, and default landing tab
 - FX conversion with disabled, manual, NBP, and Frankfurter provider options
+- ntfy and Discord webhook notifications scheduled with the daily ledger check
 - Docker support
 - backup and restore support for self-hosted installs
+- optional confirmed-ledger history compaction, disabled by default
 - full JSON export/import for current user data
 - CSV import for one-off transactions
 - CSV export for confirmed ledger rows
@@ -66,6 +69,11 @@ allocated money and what still needs to be confirmed.
 | One-off expense | Single planned expense | Requires full funding in its period; if it cannot be fully funded, it is marked underfunded and later allocations in that period are blocked |
 | Goal | A target amount due by a date | Creates goal allocation rows from eligible periods before the due date; partial funding is allowed |
 | Flex transaction | Optional or adjustable spending | Funded after goals and non-necessary recurring expenses according to priority; split behavior controls whether partial funding is allowed |
+
+Deleting a fully funded goal removes it from the planning list and detaches its
+confirmed ledger rows from the deleted goal. The historical ledger rows remain
+in place. Goals with confirmed history that has not reached the target stay
+protected from deletion.
 
 ### Generated Rows
 

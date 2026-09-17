@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createCashflowErrorLogger } from "./server/cashflow-error-utils.js";
+import {
+  resolveCashflowDbConfig
+} from "./server/cashflow-db-config.js";
 import { normalizeCurrency } from "./server/cashflow-money-utils.js";
 import { createCashflowStoragePaths } from "./server/cashflow-storage-utils.js";
 import { registerCashflowRoutes } from "./server/cashflow-routes.js";
@@ -9,6 +12,7 @@ import { createCashflowBackupService } from "./server/cashflow-backup-service.js
 import { createCashflowBudgetService } from "./server/cashflow-budget-service.js";
 import { createCashflowDataPortabilityService } from "./server/cashflow-data-portability-service.js";
 import { createCashflowGlobalService } from "./server/cashflow-global-service.js";
+import { createCashflowStorageBackend } from "./server/cashflow-storage-backend.js";
 import {
   createCashflowSessionService,
   sessionTokenFromRequest
@@ -90,13 +94,15 @@ function cleanupDeletedBudgetRecoveries(recoveryDir, {
   };
 }
 
-function createCashflowModule({
+async function createCashflowModule({
   appVersion = "0.0.0",
   authProviderHook = null,
   backupServiceHook = null,
   dataDir,
+  databaseConfig = resolveCashflowDbConfig(),
   globalMigrationHook = null,
   localeDir,
+  lockService = null,
   getCurrentFxSnapshot,
   getFxSnapshotForDate = null,
   fetchImpl = fetch,
@@ -120,6 +126,7 @@ function createCashflowModule({
   } = createCashflowStoragePaths(dataDir);
   let budgetStorageKeyFor = budgetId => budgetId;
   let listBudgetIds = () => listCashflowUserIds();
+  let listBudgetIdsAsync = async () => listBudgetIds();
   const backupDir = (budgetId, options) => storageBackupDir(budgetStorageKeyFor(budgetId), options);
   const backupRootDir = (budgetId, settings) => storageBackupRootDir(budgetStorageKeyFor(budgetId), settings);
   const ledgerDbPath = (budgetId, year, options) => storageLedgerDbPath(budgetStorageKeyFor(budgetId), year, options);
@@ -135,6 +142,9 @@ function createCashflowModule({
 
   let cleanupAfterMigrationRecovery = null;
   let exportBudgetForPurge = () => {
+    throw new Error("Budget purge recovery export is not initialized");
+  };
+  let exportBudgetForPurgeAsync = async () => {
     throw new Error("Budget purge recovery export is not initialized");
   };
 
@@ -159,33 +169,56 @@ function createCashflowModule({
     userDataDir
   });
 
+  const storageBackend = await createCashflowStorageBackend({
+    beforeGlobalMigrationStep: globalMigrationHook || (() => {}),
+    databaseConfig,
+    dataDir,
+    listCashflowUserIds,
+    listLedgerYears,
+    logError,
+    logServerEvent,
+    openLedgerDb,
+    openPlanningDb
+  });
+  const { budgetStore, globalStore } = storageBackend;
+  const resolvedDatabaseConfig = storageBackend.config;
+
   // Wrap host logging with Cashflow-specific error metadata.
   const logCashflowError = createCashflowErrorLogger(logError);
 
   // Manage FX cache reads, NBP fetches, and projection refreshes after FX changes.
   const {
     collectCurrenciesForFxSnapshot,
+    collectCurrenciesForFxSnapshotAsync,
     ensureFxCacheForMutation,
     fetchProviderRate,
     fetchNbpFxSnapshot,
     fetchNbpRate,
     getCachedFxRate,
+    getCachedFxRateAsync,
     getCachedFxSnapshot,
+    getCachedFxSnapshotAsync,
     getFxProviderSettings,
+    getFxProviderSettingsAsync,
     getProviderPairRate,
     refreshNbpFxCacheForAllUsers,
     refreshNbpFxCacheForUser,
     safeGetCurrentFxSnapshot,
-    upsertFxCacheRate
+    safeGetCurrentFxSnapshotAsync,
+    upsertFxCacheRate,
+    upsertFxCacheRateAsync
   } = createCashflowFxCacheService({
+    budgetStore,
     getCurrentFxSnapshot,
     listCashflowUserIds: () => listBudgetIds(),
+    listCashflowUserIdsAsync: () => listBudgetIdsAsync(),
     logCashflowError,
     logError,
     logServerEvent,
     normalizeCurrency,
     openPlanningDb,
     regenerateProjectionsAfterMutation,
+    regenerateProjectionsAfterMutationAsync,
     fetchImpl
   });
 
@@ -196,24 +229,43 @@ function createCashflowModule({
     fetchProviderRate,
     fetchNbpRate,
     getCachedFxRate,
+    getCachedFxRateAsync,
     getFxProviderSettings,
+    getFxProviderSettingsAsync,
     getFxSnapshotForDate,
-    upsertFxCacheRate
+    upsertFxCacheRate,
+    upsertFxCacheRateAsync
   });
 
   // Read/write confirmed ledger rows and calculate confirmed/pending funding totals.
   const {
     hasAnyConfirmedTransactions,
+    hasAnyConfirmedTransactionsAsync,
+    compactHistoricalLedger: compactHistoricalLedgerRows,
+    compactHistoricalLedgerAsync: compactHistoricalLedgerRowsAsync,
+    historicalLedgerCompactionPlan,
+    historicalLedgerCompactionPlanAsync,
     latestConfirmedBalance,
+    latestConfirmedBalanceAsync,
     listConfirmedTransactionsPage,
+    listConfirmedTransactionsPageAsync,
     loadAllConfirmedTransactions,
+    loadAllConfirmedTransactionsAsync,
     newestConfirmedTransactionDate,
+    newestConfirmedTransactionDateAsync,
     recalculateLedgerRunningBalance,
+    recalculateLedgerRunningBalanceAsync,
     confirmedFundingTotals,
+    confirmedFundingTotalsAsync,
     sumConfirmedFunding,
+    sumConfirmedFundingAsync,
     sumPendingFunding,
-    wouldLedgerGoNegativeAfterInsert
+    sumPendingFundingAsync,
+    wouldLedgerGoNegativeAfterInsert,
+    wouldLedgerGoNegativeAfterInsertAsync
   } = createCashflowLedgerService({
+    budgetStore,
+    generateId,
     listLedgerYears,
     openLedgerDb,
     openPlanningDb
@@ -222,21 +274,30 @@ function createCashflowModule({
   // Keep planning-table state coherent: pending rows, running balances, and occurrence keys.
   const {
     confirmedBalanceAsOf,
+    confirmedBalanceAsOfAsync,
     confirmedOccurrenceKeys,
+    confirmedOccurrenceKeysAsync,
     confirmedRowsAfterDate,
+    confirmedRowsAfterDateAsync,
     confirmedOneOffProgress,
+    confirmedOneOffProgressAsync,
     deletePendingOccurrence,
     findConfirmedOccurrence,
+    findConfirmedOccurrenceAsync,
     normalizePendingStatus,
     normalizeRecurringInput,
     pendingOccurrenceExists,
     pendingOccurrenceRow,
     pendingNetBalance,
+    pendingNetBalanceAsync,
     planningOpeningBalance,
+    planningOpeningBalanceAsync,
     recalculatePlanningRunningBalances,
+    recalculatePlanningRunningBalancesAsync,
     refreshPendingOccurrence,
     requireStartMonthYearIfNeeded
   } = createCashflowProjectionStateService({
+    budgetStore,
     latestConfirmedBalance,
     listLedgerYears,
     loadAllConfirmedTransactions,
@@ -257,6 +318,7 @@ function createCashflowModule({
     moveDueFutureTransactionsToPending,
     moveFutureTransactionToPending
   } = createCashflowPendingTransitionService({
+    budgetStore,
     normalizePendingStatus,
     openPlanningDb,
     recalculatePlanningRunningBalances,
@@ -266,57 +328,88 @@ function createCashflowModule({
   // Read and update global Cashflow settings.
   const {
     getSettings,
+    getSettingsAsync,
     updateSettings
   } = createCashflowSettingsService({
+    budgetStore,
     fetchProviderRate,
     getCachedFxRate,
+    getCachedFxRateAsync,
     latestConfirmedBalance,
+    latestConfirmedBalanceAsync,
     normalizeLocale,
     openPlanningDb,
-    recalculatePlanningRunningBalances
+    recalculatePlanningRunningBalances,
+    recalculatePlanningRunningBalancesAsync
   });
 
   const {
     activateAdminAuthDraft,
+    activateAdminAuthDraftAsync,
     authenticateExternalLogin,
     authenticateInternalLogin,
     completeAuthProviderCallback,
     completeInternalPasswordSetup,
     createAdminPasswordResetToken,
     createUser,
+    createUserAsync,
     deleteAdminAccount,
+    deleteAdminAccountAsync,
     deleteAdminAuthProvider,
+    deleteAdminAuthProviderAsync,
     getAdminAuthConfig,
+    getAdminAuthConfigAsync,
     getGlobalOptions,
+    getGlobalOptionsAsync,
     initializeBudgetStorage,
+    initializeBudgetStorageAsync,
     listAdminAccounts,
+    listAdminAccountsAsync,
     listActiveBudgetIds,
+    listActiveBudgetIdsAsync,
     listAuthProviders,
+    listAuthProvidersAsync,
     listUsers,
+    listUsersAsync,
     openGlobalDb,
     registerInternalAccountWithInvitation,
     resolveAccountContext,
+    resolveAccountContextAsync,
     resolveBudgetContext,
+    resolveBudgetContextAsync,
     resolveBudgetStorageKey,
     resolveSession,
+    resolveSessionAsync,
     setAdminProviderIdentity,
+    setAdminProviderIdentityAsync,
     setAdminExternalIdentity,
+    setAdminExternalIdentityAsync,
     revokeAdminAccountSession,
+    revokeAdminAccountSessionAsync,
     selectUser,
+    selectUserAsync,
     setAccountSystemAdmin,
+    setAccountSystemAdminAsync,
     startAuthProviderLink,
     startAuthProviderLogin,
     testAdminAuthDraft,
+    testAdminAuthDraftAsync,
     upsertAdminAuthProvider,
+    upsertAdminAuthProviderAsync,
     updateAdminAuthDraft,
+    updateAdminAuthDraftAsync,
     updateAdminAccount,
-    updateGlobalOptions
+    updateAdminAccountAsync,
+    updateGlobalOptions,
+    updateGlobalOptionsAsync
   } = createCashflowGlobalService({
     authProviderHook,
     beforeGlobalMigrationStep: globalMigrationHook || (() => {}),
+    budgetStore,
     cashflowUserStorageExists,
     dataDir,
     deleteCashflowUserStorage,
+    globalStore,
     listCashflowUserIds,
     logError,
     logServerEvent,
@@ -325,6 +418,9 @@ function createCashflowModule({
   });
   budgetStorageKeyFor = resolveBudgetStorageKey;
   listBudgetIds = listActiveBudgetIds;
+  listBudgetIdsAsync = typeof listActiveBudgetIdsAsync === "function"
+    ? listActiveBudgetIdsAsync
+    : async () => listBudgetIds();
 
   const {
     createExternalAccountSession,
@@ -338,9 +434,10 @@ function createCashflowModule({
     selectBudget,
     validateCsrfToken
   } = createCashflowSessionService({
+    globalStore,
     openGlobalDb,
-    resolveAccountContext,
-    resolveBudgetContext
+    resolveAccountContext: resolveAccountContextAsync,
+    resolveBudgetContext: resolveBudgetContextAsync
   });
 
   // Create, update, delete planned entities, then recalculate affected projection state.
@@ -363,6 +460,7 @@ function createCashflowModule({
     updateRecurringExpense,
     updateRecurringIncome
   } = createCashflowPlanMutationService({
+    budgetStore,
     listLedgerYears,
     loadAllConfirmedTransactions,
     newestConfirmedTransactionDate,
@@ -379,16 +477,19 @@ function createCashflowModule({
   const {
     confirmPendingTransaction
   } = createCashflowPendingConfirmationService({
+    budgetStore,
     deletePendingOccurrence,
     findConfirmedOccurrence,
     getConfirmedFxForDate,
     newestConfirmedTransactionDate,
+    newestConfirmedTransactionDateAsync,
     openLedgerDb,
     openPlanningDb,
     recalculateLedgerRunningBalance,
     runRecoverableUserMutation,
     withProjectionStatus,
-    wouldLedgerGoNegativeAfterInsert
+    wouldLedgerGoNegativeAfterInsert,
+    wouldLedgerGoNegativeAfterInsertAsync
   });
 
   let projectionCoordinator = null;
@@ -407,6 +508,10 @@ function createCashflowModule({
     return requireProjectionCoordinator().regenerateAllUsersAfterFxChange();
   }
 
+  async function regenerateAllUsersAfterFxChangeAsync() {
+    return await requireProjectionCoordinator().regenerateAllUsersAfterFxChangeAsync();
+  }
+
   function withProjectionStatus(userId, result) {
     // Attach projection success/failure metadata to mutation responses.
     return requireProjectionCoordinator().withProjectionStatus(userId, result);
@@ -422,9 +527,19 @@ function createCashflowModule({
     return requireProjectionCoordinator().regenerateProjectionsAfterMutation(userId);
   }
 
+  async function regenerateProjectionsAfterMutationAsync(userId) {
+    // Async status wrapper can use budget-store helpers and optional runtime locks.
+    return await requireProjectionCoordinator().regenerateProjectionsAfterMutationAsync(userId);
+  }
+
   function recordProjectionFailure(db, userId, error, fxSnapshot = null) {
     // Persist projection failure details for diagnostics in the snapshot/API.
     return requireProjectionCoordinator().recordProjectionFailure(db, userId, error, fxSnapshot);
+  }
+
+  async function recordProjectionFailureAsync(userId, error, fxSnapshot = null) {
+    // Async variant uses the configured budget store when available.
+    return await requireProjectionCoordinator().recordProjectionFailureAsync(userId, error, fxSnapshot);
   }
 
   let projectionEngine = null;
@@ -443,18 +558,24 @@ function createCashflowModule({
     cleanupOperationalData,
     cleanupOperationalDataBestEffort,
     createBackup,
+    createBackupAsync,
     maybeRunAutomaticBackup,
+    maybeRunAutomaticBackupAsync,
     restoreBackup,
+    restoreBackupAsync,
     restoreBackupFromPath,
+    restoreBackupFromPathAsync,
     validateBackupFolderForRestore,
     validateCashflowData
   } = createCashflowBackupService({
     backupDir,
     backupHook: backupServiceHook,
     backupRootDir,
+    budgetStore,
     directorySizeBytes,
     generateId,
     getSettings,
+    getSettingsAsync,
     initReadOnlyPragmas,
     listLedgerYears,
     logError,
@@ -462,51 +583,99 @@ function createCashflowModule({
     openLedgerDb,
     openPlanningDb,
     recalculateLedgerRunningBalance,
-    regenerateProjectionsAfterMutation
+    recalculateLedgerRunningBalanceAsync,
+    regenerateProjectionsAfterMutation,
+    regenerateProjectionsAfterMutationAsync
   });
   cleanupAfterMigrationRecovery = cleanupOperationalDataBestEffort;
 
   recoveryService = createCashflowRecoveryService({
     afterWork: recoverableMutationHook,
+    budgetStore,
     cleanupOperationalData: cleanupOperationalDataBestEffort,
     createBackup,
+    createBackupAsync,
     logError,
     logServerEvent,
-    restoreBackupFromPath
+    restoreBackupFromPath,
+    restoreBackupFromPathAsync
   });
+
+  async function compactLedgerHistory(userId, options = {}) {
+    const plan = await historicalLedgerCompactionPlanAsync(userId, options);
+    if (!plan.enabled || !plan.eligibleRows || !plan.needsCompaction) {
+      return {
+        ...plan,
+        compactedRows: 0,
+        createdRows: 0
+      };
+    }
+
+    return runRecoverableUserMutation(userId, "compact_ledger_history", async () =>
+      withProjectionStatus(userId, await compactHistoricalLedgerRowsAsync(userId, {
+        ...options,
+        plan
+      }))
+    );
+  }
 
   const {
     acceptInvitation,
+    acceptInvitationAsync,
     archiveBudget,
+    archiveBudgetAsync,
     createBudget,
+    createBudgetAsync,
     createInvitation,
+    createInvitationAsync,
     leaveBudget,
+    leaveBudgetAsync,
     listAccounts,
+    listAccountsAsync,
     listBudgetsForAccount,
+    listBudgetsForAccountAsync,
     listInvitations,
+    listInvitationsAsync,
     listMembers,
+    listMembersAsync,
     purgeBudget,
+    purgeBudgetAsync,
     removeMember,
+    removeMemberAsync,
     renameBudget,
+    renameBudgetAsync,
     restoreBudget: restoreBudgetMetadata,
+    restoreBudgetAsync: restoreBudgetMetadataAsync,
     revokeInvitation,
+    revokeInvitationAsync,
     transferOwnership,
-    updateMemberRole
+    transferOwnershipAsync,
+    updateMemberRole,
+    updateMemberRoleAsync
   } = createCashflowBudgetService({
     createBudgetBackup: budgetId => exportBudgetForPurge(budgetId),
+    createBudgetBackupAsync: budgetId => exportBudgetForPurgeAsync(budgetId),
     deleteBudgetStorage,
+    globalStore,
     initializeBudgetStorage,
+    initializeBudgetStorageAsync,
     openGlobalDb
   });
 
   const {
     exportConfirmedLedgerCsv,
+    exportConfirmedLedgerCsvAsync,
     exportFullData,
+    exportFullDataAsync,
     exportSampleData,
     importFullData,
+    importFullDataAsync,
     importOneOffCsv,
-    importSampleData
+    importOneOffCsvAsync,
+    importSampleData,
+    importSampleDataAsync
   } = createCashflowDataPortabilityService({
+    budgetStore,
     cleanupOperationalData: cleanupOperationalDataBestEffort,
     createBackup,
     generateId,
@@ -519,7 +688,9 @@ function createCashflowModule({
     openLedgerDb,
     openPlanningDb,
     recalculateLedgerRunningBalance,
+    recalculateLedgerRunningBalanceAsync,
     regenerateProjectionsAfterMutation,
+    regenerateProjectionsAfterMutationAsync,
     restoreBackupFromPath
   });
   exportBudgetForPurge = budgetId => {
@@ -548,22 +719,57 @@ function createCashflowModule({
     return recoveryPath;
   };
 
+  exportBudgetForPurgeAsync = async budgetId => {
+    const recoveryDir = path.join(dataDir, "deleted-budget-recoveries");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const recoveryPath = path.join(recoveryDir, `budget_${budgetId}_${timestamp}.json`);
+    fs.mkdirSync(recoveryDir, { recursive: true });
+    const exported = await exportFullDataAsync(budgetId, appVersion);
+    fs.writeFileSync(
+      recoveryPath,
+      `${JSON.stringify(exported, null, 2)}\n`,
+      "utf8"
+    );
+    try {
+      const cleanup = cleanupDeletedBudgetRecoveries(recoveryDir, {
+        protectedPaths: [recoveryPath]
+      });
+      if (cleanup.deleted > 0) {
+        logServerEvent("cashflow_deleted_budget_recovery_retention_completed", cleanup);
+      }
+    } catch (cleanupError) {
+      logError("cashflow_deleted_budget_recovery_retention_failed", {
+        budgetId,
+        error: cleanupError.message
+      });
+    }
+    return recoveryPath;
+  };
+
   const {
     completeSetup,
-    setupRequired
+    setupRequired,
+    setupRequiredAsync
   } = createCashflowSetupService({
+    budgetStore,
     hasAnyConfirmedTransactions,
+    hasAnyConfirmedTransactionsAsync,
     normalizeLocale,
     openPlanningDb,
-    regenerateProjectionsAfterMutation
+    regenerateProjectionsAfterMutation,
+    regenerateProjectionsAfterMutationAsync
   });
 
   // Predict recurring amounts from historical ledger rows when a rule uses prediction.
   const {
     confirmedRowsForPrediction,
+    confirmedRowsForPredictionAsync,
     predictedAmountForRecurringExpense,
-    predictedAmountForRecurringIncome
+    predictedAmountForRecurringExpenseAsync,
+    predictedAmountForRecurringIncome,
+    predictedAmountForRecurringIncomeAsync
   } = createCashflowPredictionService({
+    budgetStore,
     listLedgerYears,
     openLedgerDb
   });
@@ -572,23 +778,35 @@ function createCashflowModule({
     // Bind all HTTP routes to the functions assembled above.
     registerCashflowRoutes(app, {
       collectCurrenciesForFxSnapshot,
+      collectCurrenciesForFxSnapshotAsync,
       acceptInvitation,
+      acceptInvitationAsync,
       activateAdminAuthDraft,
+      activateAdminAuthDraftAsync,
       authenticateExternalLogin,
       authenticateInternalLogin,
       completeAuthProviderCallback,
       archiveBudget,
+      archiveBudgetAsync,
+      compactLedgerHistory,
       confirmPendingTransaction,
+      countPendingTransactions,
+      clearPendingTransactions,
       createBackup,
+      createBackupAsync,
       appVersion,
       createFlexTransaction,
       createGoal,
       createBudget,
+      createBudgetAsync,
       completeInternalPasswordSetup,
       createInvitation,
+      createInvitationAsync,
       createAdminPasswordResetToken,
       deleteAdminAuthProvider,
+      deleteAdminAuthProviderAsync,
       createUser,
+      createUserAsync,
       createExternalAccountSession,
       createInternalAccountSession,
       createInternalSession,
@@ -605,61 +823,99 @@ function createCashflowModule({
       dismissPendingOneOffRemainder,
       ensureFxCacheForMutation,
       exportConfirmedLedgerCsv,
+      exportConfirmedLedgerCsvAsync,
       exportFullData,
+      exportFullDataAsync,
       exportSampleData,
       fetchNbpFxSnapshot,
       fetchNbpRate,
       getCachedFxSnapshot,
+      getCachedFxSnapshotAsync,
       getAdminAuthConfig,
+      getAdminAuthConfigAsync,
       getGlobalOptions,
+      getGlobalOptionsAsync,
+      getSettingsAsync,
       getProviderPairRate,
       getSnapshot,
+      getSnapshotAsync,
       listAdminAccounts,
+      listAdminAccountsAsync,
       listAuthProviders,
+      listAuthProvidersAsync,
       listUsers,
+      listUsersAsync,
       listAccounts,
+      listAccountsAsync,
       listBudgetsForAccount,
+      listBudgetsForAccountAsync,
       listConfirmedTransactionsPage,
+      listConfirmedTransactionsPageAsync,
       listInvitations,
+      listInvitationsAsync,
       listMembers,
+      listMembersAsync,
       listAvailableLocales,
+      lockService,
       logCashflowError,
       logError,
       moveFutureTransactionToPending,
       openPlanningDb,
       recordProjectionFailure,
+      recordProjectionFailureAsync,
       refreshNbpFxCacheForAllUsers,
       regenerateProjectionsWithFxRefresh,
       resolveRequestContext,
       resolveRequestActor,
       resolveBudgetContext,
+      resolveBudgetContextAsync,
       resolveRequestUser,
       resolveSession,
+      resolveSessionAsync,
       registerInternalAccountWithInvitation,
       revokeAdminAccountSession,
+      revokeAdminAccountSessionAsync,
       revokeSession,
       rotateCsrfToken,
       selectBudget,
       selectUser,
+      selectUserAsync,
       setAdminProviderIdentity,
+      setAdminProviderIdentityAsync,
       setAdminExternalIdentity,
+      setAdminExternalIdentityAsync,
       startAuthProviderLink,
       startAuthProviderLogin,
       restoreBackup,
+      restoreBackupAsync,
       restoreBudgetMetadata,
+      restoreBudgetMetadataAsync,
       removeMember,
+      removeMemberAsync,
       renameBudget,
+      renameBudgetAsync,
       revokeInvitation,
+      revokeInvitationAsync,
       purgeBudget,
+      purgeBudgetAsync,
       leaveBudget,
+      leaveBudgetAsync,
       transferOwnership,
+      transferOwnershipAsync,
       testAdminAuthDraft,
+      testAdminAuthDraftAsync,
       upsertAdminAuthProvider,
+      upsertAdminAuthProviderAsync,
       updateMemberRole,
+      updateMemberRoleAsync,
       importFullData,
+      importFullDataAsync,
       importOneOffCsv,
+      importOneOffCsvAsync,
       importSampleData,
+      importSampleDataAsync,
       safeGetCurrentFxSnapshot,
+      safeGetCurrentFxSnapshotAsync,
       updateFlexTransaction,
       updateGoal,
       updateOneOffTransaction,
@@ -667,14 +923,20 @@ function createCashflowModule({
       updateRecurringExpense,
       updateRecurringIncome,
       updateAdminAccount,
+      updateAdminAccountAsync,
       updateAdminAuthDraft,
+      updateAdminAuthDraftAsync,
       updateSettings,
       setAccountSystemAdmin,
+      setAccountSystemAdminAsync,
       deleteAdminAccount,
+      deleteAdminAccountAsync,
       updateGlobalOptions,
+      updateGlobalOptionsAsync,
       validatePlanMutationInput,
       completeSetup,
       setupRequired,
+      setupRequiredAsync,
       translateLocale,
       validateCashflowData,
       validateCsrfToken,
@@ -682,41 +944,35 @@ function createCashflowModule({
     });
   }
 
-  function readinessCheck({
+  async function readinessCheck({
     checkDefaultBudget = false
   } = {}) {
     const result = {
+      databaseBackend: resolvedDatabaseConfig.backend,
       globalSchemaVersion: null,
       defaultBudgetChecked: false,
       defaultBudgetPresent: false,
       defaultBudgetSchemaVersion: null
     };
 
-    const globalDb = openGlobalDb();
-    try {
-      result.globalSchemaVersion = globalDb.pragma("user_version", { simple: true });
-      if (!globalDb.prepare("SELECT id FROM global_options WHERE id = 1").get()) {
+    const globalReady = await globalStore.checkReadiness();
+    result.globalSchemaVersion = globalReady.globalSchemaVersion;
+    await globalStore.withRepository(repo => {
+      if (!repo.globalOptions.get()) {
         throw new Error("global_options row is missing");
       }
-      if (!globalDb.prepare("SELECT id FROM auth_config WHERE id = 1").get()) {
+      if (!repo.authConfig.get()) {
         throw new Error("auth_config row is missing");
       }
-    } finally {
-      globalDb.close();
-    }
+    });
 
     if (checkDefaultBudget) {
       result.defaultBudgetChecked = true;
       const defaultPlanningDbPath = planningDbPath("local", { create: false });
       result.defaultBudgetPresent = fs.existsSync(defaultPlanningDbPath);
       if (result.defaultBudgetPresent) {
-        const planningDb = openPlanningDb("local", { create: false });
-        try {
-          result.defaultBudgetSchemaVersion = planningDb.pragma("user_version", { simple: true });
-          planningDb.prepare("SELECT id FROM settings WHERE id = 1").get();
-        } finally {
-          planningDb.close();
-        }
+        const budgetReady = await budgetStore.checkReadiness("local");
+        result.defaultBudgetSchemaVersion = budgetReady.planningSchemaVersion;
       }
     }
 
@@ -724,17 +980,23 @@ function createCashflowModule({
   }
 
   // Build the full API snapshot consumed by the browser app.
-  const { getSnapshot } = createCashflowSnapshotService({
+  const { getSnapshot, getSnapshotAsync } = createCashflowSnapshotService({
+    budgetStore,
     buildBudgetPeriods,
     buildPeriodSummariesFromDefinitions,
     confirmedFundingTotals,
+    confirmedFundingTotalsAsync,
     getCachedFxSnapshot,
+    getCachedFxSnapshotAsync,
     confirmedRowsForPrediction,
     loadAllConfirmedTransactions,
+    loadAllConfirmedTransactionsAsync,
     openPlanningDb,
     listAvailableLocales,
     predictedAmountForRecurringExpense,
+    predictedAmountForRecurringExpenseAsync,
     safeGetCurrentFxSnapshot,
+    safeGetCurrentFxSnapshotAsync,
     sumConfirmedFunding
   });
 
@@ -747,6 +1009,8 @@ function createCashflowModule({
     queueNotification,
     sendQueuedNotifications
   } = createCashflowNotificationService({
+    budgetStore,
+    fetchImpl,
     generateId,
     listLedgerYears,
     openLedgerDb,
@@ -755,14 +1019,21 @@ function createCashflowModule({
 
   // Generate future transactions and allocation projections for one user.
   projectionEngine = createCashflowProjectionEngineService({
+    budgetStore,
     confirmedBalanceAsOf,
+    confirmedBalanceAsOfAsync,
     confirmedFundingTotals,
     confirmedOccurrenceKeys,
+    confirmedOccurrenceKeysAsync,
     confirmedRowsAfterDate,
+    confirmedRowsAfterDateAsync,
     confirmedOneOffProgress,
+    confirmedOneOffProgressAsync,
     confirmedRowsForPrediction,
+    confirmedRowsForPredictionAsync,
     deletePendingOccurrence,
     getCachedFxSnapshot,
+    getCachedFxSnapshotAsync,
     logServerEvent,
     notificationEnabled,
     notificationPriority,
@@ -772,31 +1043,46 @@ function createCashflowModule({
     predictedAmountForRecurringIncome,
     queueNotification,
     recalculatePlanningRunningBalances,
+    recalculatePlanningRunningBalancesAsync,
     refreshPendingOccurrence,
     safeGetCurrentFxSnapshot,
+    safeGetCurrentFxSnapshotAsync,
     sumConfirmedFunding,
     sumPendingFunding
   });
 
   // Coordinate projection runs, FX refreshes, status capture, and all-user rebuilds.
   projectionCoordinator = createCashflowProjectionCoordinatorService({
+    budgetStore,
     collectCurrenciesForFxSnapshot,
     confirmedBalanceAsOf,
+    confirmedBalanceAsOfAsync,
     ensureFxCacheForMutation,
     getCachedFxSnapshot,
+    getCachedFxSnapshotAsync,
     latestConfirmedBalance,
     listCashflowUserIds: () => listBudgetIds(),
+    listCashflowUserIdsAsync: () => listBudgetIdsAsync(),
+    lockService,
     logCashflowError,
     logError,
     logServerEvent,
     openPlanningDb,
     pendingNetBalance,
+    pendingNetBalanceAsync,
     refreshNbpFxCacheForUser,
     regenerateProjections,
-    safeGetCurrentFxSnapshot
+    regenerateProjectionsAsync: projectionEngine.regenerateProjectionsAsync,
+    safeGetCurrentFxSnapshot,
+    safeGetCurrentFxSnapshotAsync
   });
 
-  function resolveRequestContext(req) {
+  const {
+    clearPendingTransactions,
+    countPendingTransactions
+  } = projectionCoordinator;
+
+  async function resolveRequestContext(req) {
     if (req.cashflowContext) return req.cashflowContext;
 
     const hasBudgetHeader = Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-budget-id");
@@ -807,7 +1093,7 @@ function createCashflowModule({
       throw badRequest("Conflicting budget selectors");
     }
 
-    const tokenContext = resolveRequestActor(req);
+    const tokenContext = await resolveRequestActor(req);
 
     const budgetId = hasBudgetHeader
       ? budgetHeader
@@ -819,12 +1105,12 @@ function createCashflowModule({
     }
     const selectedContext = tokenContext && budgetId !== tokenContext.budget?.id
       ? {
-          ...resolveBudgetContext(budgetId, {
+          ...(await resolveBudgetContext(budgetId, {
             accountId: tokenContext.account.id
-          }),
+          })),
           authSession: tokenContext.authSession
         }
-      : tokenContext || resolveBudgetContext(budgetId);
+      : tokenContext || await resolveBudgetContext(budgetId);
     req.cashflowContext = {
       ...selectedContext,
       legacyBudgetHeader: hasLegacyHeader && !hasBudgetHeader
@@ -832,10 +1118,10 @@ function createCashflowModule({
     return req.cashflowContext;
   }
 
-  function resolveRequestActor(req) {
+  async function resolveRequestActor(req) {
     if (req.cashflowActorContext) return req.cashflowActorContext;
     const token = sessionTokenFromRequest(req);
-    const tokenContext = token ? resolveTokenContext(token) : null;
+    const tokenContext = token ? await resolveTokenContext(token) : null;
     if (token && !tokenContext) {
       const error = new Error("Authentication required");
       error.status = 401;
@@ -845,19 +1131,25 @@ function createCashflowModule({
     return tokenContext;
   }
 
-  function resolveRequestUser(req) {
-    return resolveRequestContext(req).budget.id;
+  async function resolveRequestUser(req) {
+    return (await resolveRequestContext(req)).budget.id;
   }
 
   // Schedule recurring maintenance: midnight transitions, FX refresh, notifications, backups.
   const { startBackgroundJobs } = createCashflowBackgroundJobs({
+    budgetStore,
     cleanupOperationalData: cleanupOperationalDataBestEffort,
+    compactLedgerHistory,
     getSettings,
+    getSettingsAsync,
     listCashflowUserIds: () => listBudgetIds(),
+    listCashflowUserIdsAsync: () => listBudgetIdsAsync(),
+    lockService,
     logCashflowError,
     logError,
     logServerEvent,
     maybeRunAutomaticBackup,
+    maybeRunAutomaticBackupAsync,
     moveDueFutureTransactionsToPending,
     queueDailyPendingSummary,
     queueMissingIncomeNotifications,
@@ -870,13 +1162,16 @@ function createCashflowModule({
   // Public module surface consumed by server.mjs and tests.
   return {
     cleanupOperationalData,
+    compactLedgerHistory,
     readinessCheck,
     registerRoutes,
     startBackgroundJobs,
     getSnapshot,
+    getSnapshotAsync,
     getSettings,
     updateSettings,
     regenerateAllUsersAfterFxChange,
+    regenerateAllUsersAfterFxChangeAsync,
     refreshNbpFxCacheForUser,
     refreshNbpFxCacheForAllUsers
   };

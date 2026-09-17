@@ -7,7 +7,7 @@ import {
   SUPPORTED_FX_CURRENCIES,
   TIMEZONE_OPTIONS
 } from "./constants.js";
-import { hasCapability, t } from "./shared.js";
+import { hasCapability, renderHelpPopover, t } from "./shared.js";
 
 function parseArraySetting(value) {
   if (Array.isArray(value)) return value;
@@ -122,6 +122,16 @@ function renderDetailsSection(locale, titleKey, body) {
   `;
 }
 
+function fieldLabel(locale, labelKey, helpKey = "") {
+  const label = t(locale, labelKey);
+  return `
+    <span class="cashflow-field-label">
+      ${escapeHtml(label)}
+      ${helpKey ? renderHelpPopover(locale, label, t(locale, helpKey)) : ""}
+    </span>
+  `;
+}
+
 export function renderSettingsTab(locale, cashflow) {
   const settings = cashflow?.settings || {};
   const availableLocales = Array.isArray(cashflow?.availableLocales) && cashflow.availableLocales.length
@@ -176,7 +186,7 @@ export function renderSettingsTab(locale, cashflow) {
 
   const general = `
     <label>
-      <span>${escapeHtml(t(locale, "Language"))}</span>
+      ${fieldLabel(locale, "Language", "Language controls labels and formatting in the app.")}
       <select name="locale">
         ${availableLocales.map(option => `
           <option value="${escapeHtml(option.id)}"${option.id === selectedLocale ? " selected" : ""}>
@@ -189,7 +199,7 @@ export function renderSettingsTab(locale, cashflow) {
 
   const currencyExchange = `
     <label>
-      <span>${escapeHtml(t(locale, "Ledger currency"))}</span>
+      ${fieldLabel(locale, "Ledger currency", "Ledger currency is used for balances, summaries, and projections. Changing it creates a pending conversion row.")}
       <select name="ledger_currency" data-ledger-currency>
         ${SUPPORTED_FX_CURRENCIES.map(currency => `
           <option value="${escapeHtml(currency)}"${currency === ledgerCurrency ? " selected" : ""}>
@@ -200,7 +210,7 @@ export function renderSettingsTab(locale, cashflow) {
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Timezone"))}</span>
+      ${fieldLabel(locale, "Timezone", "Timezone controls the app's idea of today and background schedule dates.")}
       <input name="timezone" value="${escapeHtml(settings.timezone || DEFAULT_TIMEZONE)}" list="cashflow-timezones">
       <datalist id="cashflow-timezones">
         ${TIMEZONE_OPTIONS.map(timezone => `
@@ -210,7 +220,7 @@ export function renderSettingsTab(locale, cashflow) {
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Default holiday country"))}</span>
+      ${fieldLabel(locale, "Default holiday country", "Holiday country is the default calendar used when recurring dates move around weekends or holidays.")}
       <select name="holiday_country">
         ${HOLIDAY_COUNTRIES.map(country => `
           <option value="${escapeHtml(country.code)}"${country.code === holidayCountry ? " selected" : ""}>
@@ -221,12 +231,12 @@ export function renderSettingsTab(locale, cashflow) {
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "FX buffer (%)"))}</span>
+      ${fieldLabel(locale, "FX buffer (%)", "FX buffer adds a percentage cushion to foreign-currency expenses only.")}
       <input type="number" name="fx_buffer_percent" value="${escapeHtml(String(settings.fx_buffer_percent ?? 0))}" min="0" max="100" step="0.5">
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "FX provider"))}</span>
+      ${fieldLabel(locale, "FX provider", "FX provider controls where exchange rates come from.")}
       <select name="fx_provider" data-fx-provider>
         ${FX_PROVIDER_OPTIONS.map(provider => `
           <option value="${escapeHtml(provider.id)}"${provider.id === fxProvider ? " selected" : ""}>
@@ -251,7 +261,7 @@ export function renderSettingsTab(locale, cashflow) {
 
   const budgetPeriod = `
     <label>
-      <span>${escapeHtml(t(locale, "Budget period income"))}</span>
+      ${fieldLabel(locale, "Budget period income", "Budget period income chooses the recurring income that starts each budget period. Calendar month uses normal months.")}
       <select name="budget_period_income_id">
         <option value="">${escapeHtml(t(locale, "Calendar month"))}</option>
         ${recurringIncomes.map(r => `
@@ -263,31 +273,63 @@ export function renderSettingsTab(locale, cashflow) {
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Periods to generate"))}</span>
+      ${fieldLabel(locale, "Periods to generate", "Periods to generate controls how many future budget periods Cashflow plans.")}
       <input type="number" name="future_periods" value="${escapeHtml(String(settings.future_periods ?? 11))}" min="1" max="60" step="1">
     </label>
 
     ${checkbox("minimum_reserve_enabled", t(locale, "Protect minimum reserve"), settings.minimum_reserve_enabled)}
 
     <label>
-      <span>${escapeHtml(t(locale, "Minimum reserve"))}</span>
+      ${fieldLabel(locale, "Minimum reserve", "Minimum reserve is money Cashflow keeps unavailable for projected spending.")}
       <input type="text" inputmode="decimal" pattern="[0-9]+([.,][0-9]+)?" name="minimum_reserve_amount" value="${escapeHtml(String(settings.minimum_reserve_amount ?? 0))}">
     </label>
+
+    <label>
+      ${fieldLabel(locale, "Ledger history compaction", "Ledger history compaction replaces old detailed confirmed rows with one balance row after a safety backup.")}
+      <input type="number" name="ledger_history_compaction_months" value="${escapeHtml(String(settings.ledger_history_compaction_months ?? 0))}" min="0" max="600" step="1">
+      <small>${escapeHtml(t(locale, "Use 0 to keep detailed ledger history forever."))}</small>
+    </label>
+
+    ${canMaintain ? `<div class="cashflow-tab-actions">
+      <button type="button" class="btn-small" data-cashflow-compact-ledger-history>
+        ${escapeHtml(t(locale, "Compact ledger history now"))}
+      </button>
+    </div>` : ""}
   `;
 
   const notifications = `
+    <p class="cashflow-field-help">${escapeHtml(t(locale, "Cashflow checks the ledger and sends queued notifications at the same profile-local time."))}</p>
+
     <label>
-      <span>${escapeHtml(t(locale, "Full ntfy URL"))}</span>
+      ${fieldLabel(locale, "Notification service", "Notification service chooses where Cashflow sends queued alerts.")}
+      <select name="notification_channel">
+        <option value="ntfy" ${(settings.notification_channel || "ntfy") === "ntfy" ? "selected" : ""}>ntfy</option>
+        <option value="discord" ${settings.notification_channel === "discord" ? "selected" : ""}>Discord</option>
+      </select>
+    </label>
+
+    <label>
+      ${fieldLabel(locale, "Full ntfy URL", "Full ntfy URL is the complete ntfy topic address.")}
       <input type="url" name="ntfy_url" value="${escapeHtml(settings.ntfy_url || "")}" placeholder="https://ntfy.example.com/topic">
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Delivery time"))}</span>
+      ${fieldLabel(locale, "ntfy access token", "ntfy access token authenticates protected ntfy topics. Treat it as a secret; leave it blank for public topics.")}
+      <input type="text" name="ntfy_auth_token" value="${escapeHtml(settings.ntfy_auth_token || "")}" autocomplete="off" placeholder="tk_...">
+    </label>
+
+    <label>
+      ${fieldLabel(locale, "Discord webhook URL", "Discord webhook URL is the Discord endpoint for queued alerts. Treat it as a secret.")}
+      <input type="url" name="discord_webhook_url" value="${escapeHtml(settings.discord_webhook_url || "")}" placeholder="https://discord.com/api/webhooks/...">
+    </label>
+
+    <label>
+      ${fieldLabel(locale, "Ledger check and notification time", "Ledger check and notification time is when due rows move to pending and queued alerts are sent.")}
       <input type="time" name="notification_delivery_time" value="${escapeHtml(settings.notification_delivery_time || "08:00")}">
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Repeat necessary-underfunded every X days"))}</span>
+      ${fieldLabel(locale, "Repeat necessary-underfunded every X days", "Repeat necessary-underfunded every X days limits repeat alerts for the same shortfall.")}
       <input type="number" name="necessary_underfunded_repeat_days" value="${escapeHtml(String(settings.necessary_underfunded_repeat_days ?? 1))}" min="1" step="1">
     </label>
 
@@ -319,12 +361,12 @@ export function renderSettingsTab(locale, cashflow) {
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Full import file"))}</span>
+      ${fieldLabel(locale, "Full import file", "Full import reads a Cashflow JSON export from your computer.")}
       <input type="file" accept="application/json,.json" data-cashflow-full-import-file>
     </label>
 
     <label>
-      <span>${escapeHtml(t(locale, "Full import mode"))}</span>
+      ${fieldLabel(locale, "Full import mode", "Full import mode controls whether imported JSON replaces this budget or merges compatible rows.")}
       <select data-cashflow-full-import-mode>
         <option value="replace">${escapeHtml(t(locale, "Replace after backup"))}</option>
         <option value="merge">${escapeHtml(t(locale, "Merge"))}</option>
@@ -343,7 +385,7 @@ export function renderSettingsTab(locale, cashflow) {
     </div>
 
     <label>
-      <span>${escapeHtml(t(locale, "One-off CSV file"))}</span>
+      ${fieldLabel(locale, "One-off CSV file", "One-off CSV import accepts exact columns only: name,type,amount,currency,date.")}
       <input type="file" accept="text/csv,.csv" data-cashflow-oneoff-csv-file>
       <small>${escapeHtml(t(locale, "CSV columns: name,type,amount,currency,date"))}</small>
     </label>
@@ -369,7 +411,7 @@ export function renderSettingsTab(locale, cashflow) {
         ${renderDetailsSection(locale, "General", general)}
         ${renderDetailsSection(locale, "Currency & Exchange", currencyExchange)}
         ${renderDetailsSection(locale, "Budget period", budgetPeriod)}
-        ${renderDetailsSection(locale, "ntfy notifications", notifications)}
+        ${renderDetailsSection(locale, "Notifications", notifications)}
         ${renderDetailsSection(locale, "Data portability", dataPortability)}
       </form>
     </div>

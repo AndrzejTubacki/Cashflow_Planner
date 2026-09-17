@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
+import { createCashflowStoragePaths } from "../../src/server/cashflow-storage-utils.js";
+import { createCashflowDbService } from "../../src/server/cashflow-db-service.js";
+import { createSqliteBudgetStore } from "../../src/server/cashflow-budget-store.js";
+import { createCashflowProjectionStateService } from "../../src/server/cashflow-projection-state-service.js";
+import { createCashflowPredictionService } from "../../src/server/cashflow-prediction-service.js";
+import { createCashflowProjectionEngineService } from "../../src/server/cashflow-projection-engine-service.js";
+import { notificationEnabled, notificationPriority } from "../../src/server/cashflow-notification-service.js";
 
 async function withHarness(fn, options = {}) {
   const harness = await createCashflowTestHarness(options);
@@ -1488,4 +1495,190 @@ test("projection allocates goals before same-priority discretionary operating it
   });
 
   assert.deepEqual(sourceOrder, ["income", "necessary", "goal", "flexA", "flexB"]);
+}));
+
+function unexpectedSyncCall(name) {
+  return (...args) => {
+    throw new Error(`regenerateProjectionsAsync unexpectedly used a synchronous/SQLite-opening dependency: ${name}(${args.map(a => JSON.stringify(a)).join(", ")})`);
+  };
+}
+
+function buildRealSqliteAsyncProjectionEngine(harness) {
+  const paths = createCashflowStoragePaths(harness.dataDir);
+  const dbService = createCashflowDbService({
+    ledgerDbPath: paths.ledgerDbPath,
+    logError: () => {},
+    logServerEvent: () => {},
+    planningDbPath: paths.planningDbPath,
+    userDataDir: paths.userDataDir
+  });
+  const budgetStore = createSqliteBudgetStore({
+    listLedgerYears: dbService.listLedgerYears,
+    openLedgerDb: dbService.openLedgerDb,
+    openPlanningDb: dbService.openPlanningDb
+  });
+  const projectionState = createCashflowProjectionStateService({
+    budgetStore,
+    latestConfirmedBalance: unexpectedSyncCall("latestConfirmedBalance"),
+    listLedgerYears: unexpectedSyncCall("listLedgerYears"),
+    loadAllConfirmedTransactions: unexpectedSyncCall("loadAllConfirmedTransactions"),
+    openLedgerDb: unexpectedSyncCall("openLedgerDb")
+  });
+  const prediction = createCashflowPredictionService({
+    budgetStore,
+    listLedgerYears: unexpectedSyncCall("listLedgerYears"),
+    openLedgerDb: unexpectedSyncCall("openLedgerDb")
+  });
+
+  return createCashflowProjectionEngineService({
+    budgetStore,
+    confirmedBalanceAsOfAsync: projectionState.confirmedBalanceAsOfAsync,
+    confirmedOccurrenceKeys: unexpectedSyncCall("confirmedOccurrenceKeys"),
+    confirmedOccurrenceKeysAsync: projectionState.confirmedOccurrenceKeysAsync,
+    confirmedOneOffProgress: unexpectedSyncCall("confirmedOneOffProgress"),
+    confirmedOneOffProgressAsync: projectionState.confirmedOneOffProgressAsync,
+    confirmedRowsAfterDate: unexpectedSyncCall("confirmedRowsAfterDate"),
+    confirmedRowsAfterDateAsync: projectionState.confirmedRowsAfterDateAsync,
+    confirmedRowsForPrediction: unexpectedSyncCall("confirmedRowsForPrediction"),
+    confirmedRowsForPredictionAsync: prediction.confirmedRowsForPredictionAsync,
+    deletePendingOccurrence: unexpectedSyncCall("deletePendingOccurrence"),
+    getCachedFxSnapshot: unexpectedSyncCall("getCachedFxSnapshot"),
+    getCachedFxSnapshotAsync: async () => null,
+    logServerEvent: () => {},
+    notificationEnabled,
+    notificationPriority,
+    openPlanningDb: unexpectedSyncCall("openPlanningDb"),
+    planningOpeningBalance: unexpectedSyncCall("planningOpeningBalance"),
+    predictedAmountForRecurringExpense: unexpectedSyncCall("predictedAmountForRecurringExpense"),
+    predictedAmountForRecurringIncome: unexpectedSyncCall("predictedAmountForRecurringIncome"),
+    queueNotification: unexpectedSyncCall("queueNotification"),
+    recalculatePlanningRunningBalances: unexpectedSyncCall("recalculatePlanningRunningBalances"),
+    recalculatePlanningRunningBalancesAsync: projectionState.recalculatePlanningRunningBalancesAsync,
+    refreshPendingOccurrence: unexpectedSyncCall("refreshPendingOccurrence"),
+    safeGetCurrentFxSnapshot: unexpectedSyncCall("safeGetCurrentFxSnapshot"),
+    safeGetCurrentFxSnapshotAsync: async () => null,
+    sumConfirmedFunding: unexpectedSyncCall("sumConfirmedFunding"),
+    sumPendingFunding: unexpectedSyncCall("sumPendingFunding")
+  });
+}
+
+function normalizeFutureRowForComparison(row) {
+  return {
+    amount: row.amount,
+    date: row.date,
+    funded_amount: row.funded_amount,
+    ledger_amount: row.ledger_amount,
+    note: row.note,
+    requested_amount: row.requested_amount,
+    source_flex_id: row.source_flex_id,
+    source_goal_id: row.source_goal_id,
+    source_one_off_id: row.source_one_off_id,
+    source_recurring_expense_id: row.source_recurring_expense_id,
+    source_recurring_income_id: row.source_recurring_income_id,
+    status: row.status,
+    type: row.type
+  };
+}
+
+function sortByOccurrenceKey(rows) {
+  return [...rows].sort((a, b) => String(a.occurrence_key || "").localeCompare(String(b.occurrence_key || "")));
+}
+
+test("regenerateProjectionsAsync produces the same funding outcome as the SQLite sync engine on real data", async () => withHarness(async harness => {
+  await configureManualFx(harness, { future_periods: 3, fx_buffer_percent: 0 });
+
+  await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Monthly salary",
+      currency: "PLN",
+      amount: 1000,
+      active: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 1,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Monthly rent",
+      currency: "PLN",
+      amount: 400,
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 2,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Vacation",
+      currency: "PLN",
+      amount: 900,
+      due_date: "2026-08-01",
+      priority: 1,
+      active: 1
+    }
+  });
+
+  await harness.api("/api/flex", {
+    method: "POST",
+    body: {
+      name: "Hobby",
+      currency: "PLN",
+      amount: 300,
+      priority: 1,
+      active: 1,
+      allow_split: 1,
+      min_amount: 0
+    }
+  });
+
+  // At this point every planner mutation above has already triggered the
+  // synchronous SQLite engine at least once through the normal route
+  // handlers. Snapshot that sync-produced state before overwriting it.
+  let db = harness.openPlanningDb();
+  const syncFutureRows = db.prepare("SELECT * FROM future_transactions").all();
+  const syncSnapshot = db.prepare(`
+    SELECT *
+    FROM projection_snapshots
+    ORDER BY snapshot_timestamp DESC
+    LIMIT 1
+  `).get();
+  db.close();
+
+  assert.ok(syncFutureRows.length > 0, "sync engine should have generated future rows to compare against");
+
+  const asyncEngine = buildRealSqliteAsyncProjectionEngine(harness);
+  const applyResult = await asyncEngine.regenerateProjectionsAsync(harness.userId);
+  assert.equal(applyResult.ok, true);
+
+  db = harness.openPlanningDb();
+  const asyncFutureRows = db.prepare("SELECT * FROM future_transactions").all();
+  const asyncSnapshot = db.prepare(`
+    SELECT *
+    FROM projection_snapshots
+    ORDER BY snapshot_timestamp DESC
+    LIMIT 1
+  `).get();
+  db.close();
+
+  assert.deepEqual(
+    sortByOccurrenceKey(asyncFutureRows).map(normalizeFutureRowForComparison),
+    sortByOccurrenceKey(syncFutureRows).map(normalizeFutureRowForComparison),
+    "async (budget-store) engine should generate the same future rows as the sync SQLite engine"
+  );
+
+  assert.equal(asyncSnapshot.total_projected_income, syncSnapshot.total_projected_income);
+  assert.equal(asyncSnapshot.total_projected_expenses, syncSnapshot.total_projected_expenses);
+  assert.equal(asyncSnapshot.available_balance, syncSnapshot.available_balance);
+  assert.equal(asyncSnapshot.warning_count, syncSnapshot.warning_count);
 }));

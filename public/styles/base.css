@@ -17,6 +17,69 @@
   --warn: #f4b267;
   --bad: #ef6f86;
   --shadow: 0 22px 50px rgba(4, 10, 20, 0.28);
+  --page-padding: 28px 32px 56px;
+  --panel-padding: 18px;
+  --cashflow-page-gap: 1rem;
+  --cashflow-control-padding: 0.6rem 0.8rem;
+  --cashflow-metric-gap: 1rem;
+  --cashflow-metric-padding: 1rem;
+  --cashflow-table-cell-padding: 0.62rem 0.7rem;
+}
+
+:root[data-cashflow-density="compact"] {
+  --page-padding: 20px 24px 40px;
+  --panel-padding: 12px;
+  --cashflow-page-gap: 0.7rem;
+  --cashflow-control-padding: 0.46rem 0.62rem;
+  --cashflow-metric-gap: 0.65rem;
+  --cashflow-metric-padding: 0.72rem;
+  --cashflow-table-cell-padding: 0.42rem 0.52rem;
+}
+
+:root[data-cashflow-theme="light"] {
+  color-scheme: light;
+  --bg: #eef4f8;
+  --bg-accent: #d9e7ef;
+  --app-background:
+    radial-gradient(circle at top left, rgba(14, 165, 233, 0.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.14), transparent 24%),
+    linear-gradient(180deg, var(--bg-accent), var(--bg));
+  --panel: rgba(255, 255, 255, 0.86);
+  --panel-strong: rgba(255, 255, 255, 0.96);
+  --line: rgba(71, 85, 105, 0.2);
+  --text: #132033;
+  --muted: #526172;
+  --muted-text: #526172;
+  --accent: #0369a1;
+  --accent-strong: #0284c7;
+  --ok: #15803d;
+  --warn: #b45309;
+  --bad: #be123c;
+  --shadow: 0 18px 36px rgba(15, 23, 42, 0.12);
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-cashflow-theme="system"] {
+    color-scheme: light;
+    --bg: #eef4f8;
+    --bg-accent: #d9e7ef;
+    --app-background:
+      radial-gradient(circle at top left, rgba(14, 165, 233, 0.18), transparent 28%),
+      radial-gradient(circle at top right, rgba(34, 197, 94, 0.14), transparent 24%),
+      linear-gradient(180deg, var(--bg-accent), var(--bg));
+    --panel: rgba(255, 255, 255, 0.86);
+    --panel-strong: rgba(255, 255, 255, 0.96);
+    --line: rgba(71, 85, 105, 0.2);
+    --text: #132033;
+    --muted: #526172;
+    --muted-text: #526172;
+    --accent: #0369a1;
+    --accent-strong: #0284c7;
+    --ok: #15803d;
+    --warn: #b45309;
+    --bad: #be123c;
+    --shadow: 0 18px 36px rgba(15, 23, 42, 0.12);
+  }
 }
 
 * {
@@ -79,7 +142,7 @@ a {
   z-index: 1;
   max-width: 1680px;
   margin: 0 auto;
-  padding: 28px 32px 56px;
+  padding: var(--page-padding);
 }
 
 .page-content {
@@ -87,7 +150,7 @@ a {
 }
 
 .panel {
-  padding: 18px;
+  padding: var(--panel-padding);
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -117,6 +180,100 @@ a {
 .empty-state p {
   max-width: 560px;
   color: var(--muted);
+}
+
+.app-loading {
+  position: relative;
+  gap: 16px;
+  width: min(420px, calc(100vw - 36px));
+  margin: min(18vh, 140px) auto 0;
+  overflow: hidden;
+}
+
+.app-loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at top left, rgba(125, 211, 252, 0.14), transparent 42%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.04), transparent 48%);
+}
+
+.app-loading__mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border: 1px solid rgba(125, 211, 252, 0.32);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 42% 34%, rgba(255, 255, 255, 0.16), transparent 30%),
+    rgba(15, 23, 42, 0.66);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.app-loading__mark::before {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  border: 2px solid transparent;
+  border-top-color: var(--accent);
+  animation: app-loading-spin 900ms linear infinite;
+}
+
+.app-loading__mark span {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  color: #f8fbff;
+  font-size: 1.55rem;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0;
+  text-shadow: 0 0 18px rgba(125, 211, 252, 0.3);
+}
+
+.app-loading__mark span::before {
+  content: "C";
+  transform: translateY(-1px);
+}
+
+.app-loading__mark span::after {
+  content: "";
+  position: absolute;
+  right: -4px;
+  top: 11px;
+  width: 16px;
+  height: 9px;
+  border-top: 3px solid #facc15;
+  border-right: 3px solid #facc15;
+  transform: rotate(-18deg) skewX(-12deg);
+  border-radius: 1px 4px 0 0;
+  box-shadow: 0 0 12px rgba(250, 204, 21, 0.28);
+}
+
+.app-loading__copy {
+  position: relative;
+  display: grid;
+  gap: 6px;
+}
+
+@keyframes app-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-loading__mark::before {
+    animation: none;
+  }
 }
 
 @media (max-width: 720px) {

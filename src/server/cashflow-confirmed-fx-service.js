@@ -12,9 +12,12 @@ export function createCashflowConfirmedFxService({
   fetchProviderRate,
   fetchNbpRate,
   getCachedFxRate,
+  getCachedFxRateAsync = null,
   getFxProviderSettings,
+  getFxProviderSettingsAsync = null,
   getFxSnapshotForDate,
-  upsertFxCacheRate
+  upsertFxCacheRate,
+  upsertFxCacheRateAsync = null
 }) {
   async function getConfirmedFxForDate(currency, confirmedDate, settings, input = {}, userId = null) {
     const normalizedCurrency = normalizeCurrency(currency);
@@ -50,7 +53,13 @@ export function createCashflowConfirmedFxService({
       };
     }
 
-    const cached = userId ? getCachedFxRate(userId, normalizedCurrency, confirmedDate) : null;
+    const cached = userId
+      ? (
+        typeof getCachedFxRateAsync === "function"
+          ? await getCachedFxRateAsync(userId, normalizedCurrency, confirmedDate)
+          : getCachedFxRate(userId, normalizedCurrency, confirmedDate)
+      )
+      : null;
 
     if (cached) {
       return {
@@ -59,9 +68,13 @@ export function createCashflowConfirmedFxService({
       };
     }
 
-    const providerSettings = userId && typeof getFxProviderSettings === "function"
-      ? getFxProviderSettings(userId)
-      : { provider: FX_PROVIDER_NBP };
+    const providerSettings = userId && typeof getFxProviderSettingsAsync === "function"
+      ? await getFxProviderSettingsAsync(userId)
+      : (
+        userId && typeof getFxProviderSettings === "function"
+          ? getFxProviderSettings(userId)
+          : { provider: FX_PROVIDER_NBP }
+      );
     const provider = providerSettings.provider || FX_PROVIDER_NBP;
 
     if (provider === FX_PROVIDER_DISABLED) {
@@ -77,7 +90,11 @@ export function createCashflowConfirmedFxService({
       : await fetchNbpRate(normalizedCurrency, confirmedDate, providerSettings.timezone);
 
     if (userId) {
-      upsertFxCacheRate(userId, rateInfo, confirmedDate);
+      if (typeof upsertFxCacheRateAsync === "function") {
+        await upsertFxCacheRateAsync(userId, rateInfo, confirmedDate, providerSettings);
+      } else {
+        upsertFxCacheRate(userId, rateInfo, confirmedDate);
+      }
     }
 
     return {

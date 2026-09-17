@@ -16,6 +16,13 @@ import {
   renderGoalsTab
 } from "./target-tabs.js";
 import {
+  DEFAULT_UI_PREFERENCES,
+  UI_DEFAULT_TAB_OPTIONS,
+  UI_DENSITY_OPTIONS,
+  UI_THEME_OPTIONS,
+  normalizeUiPreferences
+} from "./ui-preferences.js";
+import {
   formatMessage,
   hasCapability,
   hasPermission,
@@ -162,6 +169,88 @@ function renderFxTopBar(locale, cashflow = null, fx = null) {
   `;
 }
 
+export function renderCashflowVersionStatus(locale, versionCheck = null) {
+  const status = versionCheck?.status || "checking";
+  if (status === "checking") {
+    return `<span class="cashflow-version-status cashflow-version-status--muted">${escapeHtml(t(locale, "Checking for updates"))}</span>`;
+  }
+  if (status === "current") {
+    return `<span class="cashflow-version-status cashflow-version-status--current">${escapeHtml(t(locale, "Up to date"))}</span>`;
+  }
+  if (status === "available" && versionCheck?.latestVersion) {
+    const href = versionCheck.htmlUrl || "https://github.com/AndrzejTubacki/Cashflow_Planner/releases";
+    return `
+      <a class="cashflow-version-status cashflow-version-status--available" href="${escapeHtml(href)}" target="_blank" rel="noreferrer">
+        ${escapeHtml(formatMessage(locale, "Update {version} available", { version: `v${versionCheck.latestVersion}` }))}
+      </a>
+    `;
+  }
+  return `<span class="cashflow-version-status cashflow-version-status--muted">${escapeHtml(t(locale, "Version check unavailable"))}</span>`;
+}
+
+function renderMenuLanguageSelect(locale, cashflow = null) {
+  const locales = Array.isArray(cashflow?.availableLocales) ? cashflow.availableLocales : [];
+  if (locales.length <= 1) return "";
+
+  return `
+    <label class="cashflow-menu-language">
+      <span>${escapeHtml(t(locale, "Language"))}</span>
+      <select data-cashflow-language-select aria-label="${escapeHtml(t(locale, "Language"))}">
+        ${locales.map(option => `
+          <option value="${escapeHtml(option.id)}"${option.id === locale ? " selected" : ""}>
+            ${escapeHtml(option.label || option.id)}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderPreferenceSelect(locale, name, labelKey, options, selected) {
+  return `
+    <label>
+      <span>${escapeHtml(t(locale, labelKey))}</span>
+      <select data-cashflow-ui-preference="${escapeHtml(name)}">
+        ${options.map(option => `
+          <option value="${escapeHtml(option.id)}"${option.id === selected ? " selected" : ""}>
+            ${escapeHtml(t(locale, option.labelKey))}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderUserMenu(locale, cashflow = null, canAdmin = false, uiPreferences = DEFAULT_UI_PREFERENCES) {
+  const session = cashflow?.session || {};
+  const label = session.displayName || session.accountDisplayName || session.userId || session.accountId || t(locale, "Account");
+  const preferences = normalizeUiPreferences(uiPreferences);
+
+  return `
+    <details class="cashflow-user-menu">
+      <summary class="cashflow-chip cashflow-chip--menu">
+        ${escapeHtml(t(locale, "User"))}: <strong>${escapeHtml(label)}</strong>
+      </summary>
+      <div class="cashflow-user-menu__panel">
+        <div class="cashflow-user-menu__section">
+          <button type="button" data-cashflow-menu-tab="budgets">${escapeHtml(t(locale, "Budgets"))}</button>
+          <button type="button" data-cashflow-menu-tab="settings">${escapeHtml(t(locale, "Settings"))}</button>
+          ${canAdmin ? `<button type="button" data-cashflow-menu-tab="admin">${escapeHtml(t(locale, "Admin"))}</button>` : ""}
+          <button type="button" data-cashflow-logout>${escapeHtml(t(locale, "Logout"))}</button>
+        </div>
+        <div class="cashflow-user-menu__section cashflow-user-menu__preferences" data-cashflow-ui-preferences>
+          <strong>${escapeHtml(t(locale, "Display preferences"))}</strong>
+          ${renderMenuLanguageSelect(locale, cashflow)}
+          ${renderPreferenceSelect(locale, "theme", "Theme", UI_THEME_OPTIONS, preferences.theme)}
+          ${renderPreferenceSelect(locale, "density", "Density", UI_DENSITY_OPTIONS, preferences.density)}
+          ${renderPreferenceSelect(locale, "defaultTab", "Default landing tab", UI_DEFAULT_TAB_OPTIONS, preferences.defaultTab)}
+          <small>${escapeHtml(t(locale, "Saved in this browser for the selected account."))}</small>
+        </div>
+      </div>
+    </details>
+  `;
+}
+
 function renderCashflowPageContent({
   cashflow = null,
   error = "",
@@ -169,7 +258,9 @@ function renderCashflowPageContent({
   validationResult = null,
   fx = null,
   activeTab = "ledger",
-  budgetManager = {}
+  budgetManager = {},
+  versionCheck = null,
+  uiPreferences = DEFAULT_UI_PREFERENCES
 }) {
   const locale = localeOf(cashflow);
 
@@ -216,6 +307,7 @@ function renderCashflowPageContent({
               <h2>${escapeHtml(t(locale, "Cashflow"))}</h2>
               ${cashflow?.app?.version ? `
                 <span class="cashflow-version">${escapeHtml(`v${cashflow.app.version}`)}</span>
+                <span data-cashflow-version-status-root>${renderCashflowVersionStatus(locale, versionCheck)}</span>
               ` : ""}
             </div>
             <p class="cashflow-eyebrow">${escapeHtml(t(locale, "Financial planner"))}</p>
@@ -225,11 +317,6 @@ function renderCashflowPageContent({
         </div>
 
         <div class="cashflow-header__actions">
-          ${cashflow?.session?.userId ? `
-            <span class="cashflow-chip">
-              ${escapeHtml(t(locale, "User"))}: <strong>${escapeHtml(cashflow.session.displayName || cashflow.session.userId)}</strong>
-            </span>
-          ` : ""}
           ${canMaintain ? `<button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-refresh-fx>
             ${escapeHtml(t(locale, "Refresh FX"))}
           </button>` : ""}
@@ -239,9 +326,7 @@ function renderCashflowPageContent({
           ${canMaintain ? `<button type="button" class="cashflow-action cashflow-action--primary" data-cashflow-run-jobs>
             ${escapeHtml(t(locale, "Regenerate"))}
           </button>` : ""}
-          <button type="button" class="cashflow-action cashflow-action--secondary" data-cashflow-logout>
-            ${escapeHtml(t(locale, "Logout"))}
-          </button>
+          ${renderUserMenu(locale, cashflow, canAdmin, uiPreferences)}
         </div>
       </div>
 

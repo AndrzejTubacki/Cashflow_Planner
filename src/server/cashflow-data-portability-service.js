@@ -1,4 +1,12 @@
 import { requireIsoDate } from "./cashflow-date-utils.js";
+import {
+  applyBudgetStoreImportPlan,
+  createBudgetStoreImportPlanFromFullExport
+} from "./cashflow-budget-store-import-plan.js";
+import {
+  createBudgetStoreSnapshot,
+  restoreBudgetStoreSnapshot
+} from "./cashflow-budget-store-snapshot.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { validateFullImportRows } from "./cashflow-import-validation.js";
 import { roundMoneyAmount } from "./cashflow-money-utils.js";
@@ -63,10 +71,37 @@ const ID_TABLES = [
 ];
 
 const ONE_OFF_CSV_COLUMNS = ["name", "type", "amount", "currency", "date"];
+const CONFIRMED_LEDGER_CSV_HEADERS = [
+  "ledger_year",
+  "id",
+  "name",
+  "type",
+  "date",
+  "confirmed_date",
+  "currency",
+  "amount",
+  "ledger_currency",
+  "ledger_amount",
+  "fx_rate",
+  "buffered_fx_rate",
+  "running_balance",
+  "source_recurring_expense_id",
+  "source_recurring_income_id",
+  "source_one_off_id",
+  "source_flex_id",
+  "source_goal_id",
+  "occurrence_key",
+  "created_at",
+  "updated_at"
+];
 const SETTINGS_COMPAT_DEFAULTS = {
   holiday_country: "PL",
   minimum_reserve_enabled: 0,
-  minimum_reserve_amount: 0
+  minimum_reserve_amount: 0,
+  ledger_history_compaction_months: 0,
+  notification_channel: "ntfy",
+  ntfy_auth_token: null,
+  discord_webhook_url: null
 };
 
 function tableColumns(db, tableName) {
@@ -107,6 +142,19 @@ function insertRows(db, tableName, rows) {
 function csvEscape(value) {
   const text = value === null || value === undefined ? "" : String(value);
   return `"${text.replace(/"/g, "\"\"")}"`;
+}
+
+function confirmedLedgerRowsToCsv(rows = []) {
+  const lines = [CONFIRMED_LEDGER_CSV_HEADERS.join(",")];
+
+  for (const row of rows) {
+    lines.push(CONFIRMED_LEDGER_CSV_HEADERS.map(header => {
+      if (header === "running_balance") return csvEscape(row.running_balance_pln ?? row.running_balance);
+      return csvEscape(row[header]);
+    }).join(","));
+  }
+
+  return lines.join("\n");
 }
 
 function parseCsvLine(line, rowNumber = 1) {
@@ -358,6 +406,29 @@ function rolledBackError(error, safetyBackup, operation) {
   return wrapped;
 }
 
+function safeSnapshotSummary(snapshot) {
+  return {
+    budgetIds: Array.isArray(snapshot?.budgetIds) ? [...snapshot.budgetIds] : [],
+    createdAt: snapshot?.createdAt || null,
+    format: snapshot?.format || null,
+    reason: snapshot?.reason || null
+  };
+}
+
+function rolledBackSnapshotError(error, safetySnapshot, operation) {
+  const wrapped = new Error(`${operation} failed and was rolled back: ${error.message}`);
+  wrapped.status = Number(error?.status) || 500;
+  if (error?.details) wrapped.details = error.details;
+  if (error?.conflicts) wrapped.conflicts = error.conflicts;
+  wrapped.rollback = {
+    phase: "rolled_back",
+    safetySnapshot: safeSnapshotSummary(safetySnapshot),
+    originalError: error.message,
+    originalStatus: wrapped.status
+  };
+  return wrapped;
+}
+
 function importedOccurrenceKeys(exportData) {
   return new Set([
     ...exportData.planning.pending_transactions,
@@ -425,6 +496,7 @@ function sampleExport() {
         future_periods: 4,
         minimum_reserve_enabled: 1,
         minimum_reserve_amount: 500,
+        ledger_history_compaction_months: 0,
         budget_period_income_id: "sample-income-salary",
         fx_buffer_percent: 0,
         fx_provider: "manual",
@@ -434,7 +506,10 @@ function sampleExport() {
         backup_interval_minutes: 1440,
         backup_retention_count: 10,
         backup_location: null,
+        notification_channel: "ntfy",
         ntfy_url: null,
+        ntfy_auth_token: null,
+        discord_webhook_url: null,
         notification_delivery_time: "08:00",
         notify_goal_impossible: 1,
         notify_necessary_underfunded: 1,
@@ -617,6 +692,7 @@ function sampleExport() {
 }
 
 export function createCashflowDataPortabilityService({
+  budgetStore = null,
   cleanupOperationalData = () => null,
   createBackup,
   generateId,
@@ -629,9 +705,25 @@ export function createCashflowDataPortabilityService({
   openPlanningDb,
   normalizeLocale = value => String(value || "en").trim().toLowerCase(),
   recalculateLedgerRunningBalance,
+  recalculateLedgerRunningBalanceAsync = null,
   regenerateProjectionsAfterMutation,
+  regenerateProjectionsAfterMutationAsync = null,
   restoreBackupFromPath
 }) {
+  function usesPostgresBudgetStoreForFullImport() {
+    return budgetStore?.backend === "postgres"
+      && typeof budgetStore.transaction === "function"
+      && typeof recalculateLedgerRunningBalanceAsync === "function"
+      && typeof regenerateProjectionsAfterMutationAsync === "function";
+  }
+
+  // CSV one-off import never touches confirmed ledger balances, so unlike
+  // the full-import gate above it does not need recalculateLedgerRunningBalanceAsync.
+  function usesPostgresBudgetStoreForCsvImport() {
+    return budgetStore?.backend === "postgres"
+      && typeof budgetStore.transaction === "function"
+      && typeof regenerateProjectionsAfterMutationAsync === "function";
+  }
   function runMutationHook(phase, details = {}) {
     if (typeof mutationHook === "function") mutationHook({ phase, ...details });
   }
@@ -661,6 +753,53 @@ export function createCashflowDataPortabilityService({
       } finally {
         ledgerDb.close();
       }
+    }
+
+    return {
+      format: EXPORT_FORMAT,
+      version: EXPORT_VERSION,
+      appVersion,
+      exportedAt: new Date().toISOString(),
+      userId,
+      operationalSettingsIncluded: includeOperationalSettings,
+      planning,
+      ledgers
+    };
+  }
+
+  function stripBudgetStoreColumns(row, columns = ["budget_id"]) {
+    const result = { ...(row || {}) };
+    for (const column of columns) {
+      delete result[column];
+    }
+    return result;
+  }
+
+  async function exportFullDataAsync(userId, appVersion = "0.0.0", options = {}) {
+    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
+      return exportFullData(userId, appVersion, options);
+    }
+
+    const includeOperationalSettings = Boolean(options.includeOperationalSettings);
+    const planning = {};
+    for (const tableName of PLANNING_EXPORT_TABLES) {
+      planning[tableName] = (await budgetStore.listPlanningRows(userId, tableName))
+        .map(row => stripBudgetStoreColumns(row));
+    }
+    if (!includeOperationalSettings) {
+      planning.settings = planning.settings.map(stripOperationalSettings);
+    }
+
+    const ledgers = {};
+    const years = typeof budgetStore.listLedgerYears === "function"
+      ? await budgetStore.listLedgerYears(userId)
+      : listLedgerYears(userId);
+    for (const year of years) {
+      const yearKey = String(year);
+      const rows = typeof budgetStore.listConfirmedTransactions === "function"
+        ? await budgetStore.listConfirmedTransactions(userId, { ledgerYear: Number(year) })
+        : [];
+      ledgers[yearKey] = rows.map(row => stripBudgetStoreColumns(row, ["budget_id", "ledger_year"]));
     }
 
     return {
@@ -777,6 +916,63 @@ export function createCashflowDataPortabilityService({
     return conflicts;
   }
 
+  function idConflictsFromRows(existingRows, tableName, rows, labelPrefix = tableName) {
+    const conflicts = [];
+    const seen = new Set();
+    const existingIds = new Set((existingRows || []).map(row => row.id).filter(Boolean));
+
+    for (const row of rows || []) {
+      const id = row?.id;
+      if (!id) continue;
+
+      const key = `${labelPrefix}:${id}`;
+      if (seen.has(key)) {
+        conflicts.push({ table: labelPrefix, id, reason: "duplicate_in_import" });
+        continue;
+      }
+      seen.add(key);
+
+      if (existingIds.has(id)) {
+        conflicts.push({ table: labelPrefix, id, reason: "already_exists" });
+      }
+    }
+
+    return conflicts;
+  }
+
+  function fxCacheConflictsFromRows(existingRows, rows) {
+    const conflicts = [];
+    const seen = new Set();
+    const existingKeys = new Set((existingRows || [])
+      .map(row => {
+        const base = row?.base_currency;
+        const quote = row?.quote_currency || "PLN";
+        const date = row?.rate_date;
+        return base && quote && date ? `${base}/${quote}/${date}` : null;
+      })
+      .filter(Boolean));
+
+    for (const row of rows || []) {
+      const base = row?.base_currency;
+      const quote = row?.quote_currency || "PLN";
+      const date = row?.rate_date;
+      if (!base || !quote || !date) continue;
+
+      const id = `${base}/${quote}/${date}`;
+      if (seen.has(id)) {
+        conflicts.push({ table: "fx_rates_cache", id, reason: "duplicate_in_import" });
+        continue;
+      }
+      seen.add(id);
+
+      if (existingKeys.has(id)) {
+        conflicts.push({ table: "fx_rates_cache", id, reason: "already_exists" });
+      }
+    }
+
+    return conflicts;
+  }
+
   function collectMergeConflicts(userId, exportData) {
     const conflicts = [];
     const existingConfirmedRows = loadAllConfirmedTransactions(userId);
@@ -850,6 +1046,288 @@ export function createCashflowDataPortabilityService({
     }
 
     return conflicts;
+  }
+
+  async function collectMergeConflictsAsync(userId, exportData) {
+    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
+      return collectMergeConflicts(userId, exportData);
+    }
+
+    const conflicts = [];
+    const existingConfirmedRows = typeof budgetStore.listConfirmedTransactions === "function"
+      ? await budgetStore.listConfirmedTransactions(userId)
+      : loadAllConfirmedTransactions(userId);
+    const existingConfirmedIds = new Set(existingConfirmedRows.map(row => row.id));
+    let existingPendingIds = new Set();
+
+    conflicts.push(
+      ...fxCacheConflictsFromRows(
+        await budgetStore.listPlanningRows(userId, "fx_rates_cache"),
+        exportData.planning.fx_rates_cache
+      )
+    );
+
+    for (const tableName of ID_TABLES) {
+      const existingRows = await budgetStore.listPlanningRows(userId, tableName);
+      conflicts.push(...idConflictsFromRows(existingRows, tableName, exportData.planning[tableName]));
+      if (tableName === "pending_transactions") {
+        existingPendingIds = new Set(existingRows.map(row => row.id).filter(Boolean));
+      }
+    }
+
+    const importedKeys = importedOccurrenceKeys(exportData);
+    if (importedKeys.size) {
+      const existingPendingRows = await budgetStore.listPlanningRows(userId, "pending_transactions");
+      for (const row of existingPendingRows) {
+        if (row.occurrence_key && importedKeys.has(row.occurrence_key)) {
+          conflicts.push({
+            table: "occurrence_keys",
+            id: row.occurrence_key,
+            reason: "already_exists"
+          });
+        }
+      }
+      for (const row of existingConfirmedRows) {
+        if (row.occurrence_key && importedKeys.has(row.occurrence_key)) {
+          conflicts.push({
+            table: "occurrence_keys",
+            id: row.occurrence_key,
+            reason: "already_exists"
+          });
+        }
+      }
+    }
+
+    for (const [year, rows] of Object.entries(exportData.ledgers)) {
+      for (const row of rows) {
+        if (existingConfirmedIds.has(row.id) || existingPendingIds.has(row.id)) {
+          conflicts.push({
+            table: `ledger_${year}.confirmed_transactions`,
+            id: row.id,
+            reason: "already_exists"
+          });
+        }
+      }
+    }
+
+    for (const row of exportData.planning.pending_transactions) {
+      if (existingConfirmedIds.has(row.id)) {
+        conflicts.push({
+          table: "pending_transactions",
+          id: row.id,
+          reason: "already_exists"
+        });
+      }
+    }
+
+    return conflicts;
+  }
+
+  async function prepareFullImportPlanAsync(userId, payload, mode = "replace", options = {}) {
+    const normalizedMode = mode === "merge" ? "merge" : "replace";
+    const includeOperationalSettings = normalizedMode === "replace"
+      && Boolean(options.includeOperationalSettings);
+    let currentSettings;
+
+    if (budgetStore && typeof budgetStore.listPlanningRows === "function") {
+      const rows = await budgetStore.listPlanningRows(userId, "settings");
+      currentSettings = stripBudgetStoreColumns(rows[0] || {});
+    } else {
+      const currentDb = openPlanningDb(userId);
+      try {
+        currentSettings = currentDb.prepare("SELECT * FROM settings WHERE id = 1").get() || {};
+      } finally {
+        currentDb.close();
+      }
+    }
+
+    const exportData = prepareExportDataForImport(
+      normalizeExportPayload(payload),
+      {
+        currentSettings,
+        includeOperationalSettings,
+        merge: normalizedMode === "merge",
+        normalizeLocale,
+        validateSettings: normalizedMode === "replace"
+      }
+    );
+
+    if (normalizedMode === "merge") {
+      const conflicts = await collectMergeConflictsAsync(userId, exportData);
+      if (conflicts.length) {
+        const error = new Error("Import has conflicts");
+        error.status = 409;
+        error.conflicts = conflicts;
+        throw error;
+      }
+    }
+
+    const importPlan = createBudgetStoreImportPlanFromFullExport({
+      budgetId: userId,
+      exportData,
+      includeEmptyReplaceBatches: normalizedMode === "replace",
+      includeSettings: normalizedMode !== "merge"
+    });
+
+    return {
+      ok: true,
+      exportData,
+      importPlan,
+      mode: normalizedMode
+    };
+  }
+
+  async function applyPreparedFullImportPlanAsync(preflight, options = {}) {
+    if (!budgetStore || typeof budgetStore !== "object") {
+      throw new Error("A budget store is required to apply prepared import plans");
+    }
+    if (!preflight?.importPlan) {
+      throw new Error("A prepared full import plan is required");
+    }
+
+    const mode = preflight.mode === "merge" ? "append" : "replace";
+    return await applyBudgetStoreImportPlan({
+      budgetStore,
+      mode,
+      onBatch: options.onBatch,
+      plan: preflight.importPlan
+    });
+  }
+
+  async function applyPreparedFullImportPlanWithRollbackAsync(userId, preflight, options = {}) {
+    const safetySnapshot = await createBudgetSafetySnapshotAsync(
+      userId,
+      options.reason || `full_import_${preflight?.mode || "unknown"}`
+    );
+
+    try {
+      const applyResult = await applyPreparedFullImportPlanAsync(preflight, {
+        onBatch: options.onBatch
+      });
+      return {
+        apply: applyResult,
+        mode: preflight.mode,
+        ok: true,
+        safetySnapshot: safeSnapshotSummary(safetySnapshot)
+      };
+    } catch (error) {
+      logError("cashflow_async_import_failed_before_rollback", {
+        userId,
+        mode: preflight?.mode || null,
+        error: error.message,
+        safetySnapshot: safeSnapshotSummary(safetySnapshot)
+      });
+      try {
+        await restoreBudgetSafetySnapshotAsync(safetySnapshot, {
+          onBatch: options.onRollbackBatch
+        });
+        logServerEvent("cashflow_async_import_rolled_back", {
+          userId,
+          mode: preflight?.mode || null,
+          error: error.message,
+          safetySnapshot: safeSnapshotSummary(safetySnapshot)
+        });
+      } catch (rollbackError) {
+        logError("cashflow_async_import_rollback_failed", {
+          userId,
+          mode: preflight?.mode || null,
+          error: error.message,
+          rollbackError: rollbackError.message,
+          safetySnapshot: safeSnapshotSummary(safetySnapshot)
+        });
+        const combined = new Error("Import failed and rollback also failed");
+        combined.status = 500;
+        combined.details = {
+          phase: "rollback_failed",
+          safetySnapshot: safeSnapshotSummary(safetySnapshot),
+          originalError: error.message,
+          originalStatus: Number(error?.status) || 500,
+          rollbackError: rollbackError.message
+        };
+        throw combined;
+      }
+      throw rolledBackSnapshotError(error, safetySnapshot, "Import");
+    }
+  }
+
+  /**
+   * Postgres-path full import: composes the already-built prepare/apply/
+   * rollback primitives with running-balance recalculation and projection
+   * regeneration so the async path reaches the same end state as the sync
+   * `importFullData` (data written, balances correct, projections rebuilt),
+   * treating a post-apply projection failure as a reason to roll back the
+   * whole import, exactly like the sync version does. Retention cleanup
+   * (`cleanupOperationalData`) is intentionally skipped here: it is SQLite-only
+   * (see `cashflow-backup-service.js`) and purely best-effort, so skipping it
+   * cannot corrupt data — it only means Postgres imports don't yet trigger
+   * retention pruning, to be revisited once the backup service gets a
+   * Postgres path.
+   */
+  async function importFullDataAsync(userId, payload, mode = "replace", options = {}) {
+    if (!usesPostgresBudgetStoreForFullImport()) {
+      return importFullData(userId, payload, mode, options);
+    }
+
+    const preflight = await prepareFullImportPlanAsync(userId, payload, mode, options);
+    const safetySnapshot = await createBudgetSafetySnapshotAsync(userId, `full_import_${preflight.mode}`);
+
+    try {
+      const applyResult = await applyPreparedFullImportPlanAsync(preflight, { onBatch: options.onBatch });
+      await recalculateLedgerRunningBalanceAsync(userId);
+      const projection = await regenerateProjectionsAfterMutationAsync(userId);
+      if (projection?.projection_ok === false) {
+        throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
+      }
+
+      return {
+        ok: true,
+        mode: preflight.mode,
+        safetyBackup: safeSnapshotSummary(safetySnapshot),
+        ...(preflight.mode === "merge"
+          ? { importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings") }
+          : {}),
+        importedLedgerYears: Object.keys(preflight.exportData.ledgers),
+        _projection: projection,
+        apply: applyResult
+      };
+    } catch (error) {
+      logError("cashflow_async_import_failed_before_rollback", {
+        userId,
+        mode: preflight.mode,
+        error: error.message,
+        safetySnapshot: safeSnapshotSummary(safetySnapshot)
+      });
+
+      try {
+        await restoreBudgetSafetySnapshotAsync(safetySnapshot, { onBatch: options.onRollbackBatch });
+        logServerEvent("cashflow_async_import_rolled_back", {
+          userId,
+          mode: preflight.mode,
+          error: error.message,
+          safetySnapshot: safeSnapshotSummary(safetySnapshot)
+        });
+      } catch (rollbackError) {
+        logError("cashflow_async_import_rollback_failed", {
+          userId,
+          mode: preflight.mode,
+          error: error.message,
+          rollbackError: rollbackError.message,
+          safetySnapshot: safeSnapshotSummary(safetySnapshot)
+        });
+        const combined = new Error("Import failed and rollback also failed");
+        combined.status = 500;
+        combined.details = {
+          phase: "rollback_failed",
+          safetySnapshot: safeSnapshotSummary(safetySnapshot),
+          originalError: error.message,
+          originalStatus: Number(error?.status) || 500,
+          rollbackError: rollbackError.message
+        };
+        throw combined;
+      }
+
+      throw rolledBackSnapshotError(error, safetySnapshot, "Import");
+    }
   }
 
   function mergePlanningData(userId, exportData) {
@@ -1049,6 +1527,146 @@ export function createCashflowDataPortabilityService({
     );
   }
 
+  async function confirmedOneOffSourceIdsAsync(userId) {
+    if (budgetStore && typeof budgetStore.listConfirmedTransactions === "function") {
+      return new Set(
+        (await budgetStore.listConfirmedTransactions(userId))
+          .map(row => row.source_one_off_id)
+          .filter(Boolean)
+      );
+    }
+    return confirmedOneOffSourceIds(userId);
+  }
+
+  async function prepareOneOffCsvImportPlanAsync(userId, csv, mode = "append") {
+    const normalizedMode = mode === "replace" ? "replace" : "append";
+    const parsedRows = parseCsv(csv);
+    const rows = parsedRows.map(row => normalizeCsvOneOff(row, generateId));
+    const deleteOneOffIds = [];
+
+    if (normalizedMode === "replace") {
+      const confirmedIds = await confirmedOneOffSourceIdsAsync(userId);
+      let existingRows;
+      if (budgetStore && typeof budgetStore.listPlanningRows === "function") {
+        existingRows = await budgetStore.listPlanningRows(userId, "one_off_transactions");
+      } else {
+        const db = openPlanningDb(userId);
+        try {
+          existingRows = db.prepare("SELECT id FROM one_off_transactions").all();
+        } finally {
+          db.close();
+        }
+      }
+
+      deleteOneOffIds.push(...existingRows
+        .map(row => row.id)
+        .filter(id => !confirmedIds.has(id)));
+    }
+
+    return {
+      ok: true,
+      deleteFutureSourceOneOffIds: [...deleteOneOffIds],
+      deleteOneOffIds,
+      deletePendingSourceOneOffIds: [...deleteOneOffIds],
+      imported: rows.length,
+      mode: normalizedMode,
+      rows
+    };
+  }
+
+  async function applyPreparedOneOffCsvImportPlanAsync(userId, plan) {
+    if (!budgetStore || typeof budgetStore !== "object") {
+      throw new Error("A budget store is required to apply prepared CSV import plans");
+    }
+    if (!plan || !Array.isArray(plan.rows)) {
+      throw new Error("A prepared CSV import plan is required");
+    }
+
+    const applyWithWriter = async writer => {
+      if (typeof writer.insertPlanningRows !== "function") {
+        throw new Error("Budget-store writer must implement insertPlanningRows");
+      }
+
+      let deletedOneOffs = 0;
+      let deletedPendingRows = 0;
+      let deletedFutureRows = 0;
+
+      if (plan.mode === "replace") {
+        if (
+          typeof writer.listPlanningRows !== "function"
+          || typeof writer.deletePlanningRowsById !== "function"
+        ) {
+          throw new Error("Budget-store writer must implement listPlanningRows and deletePlanningRowsById for CSV replace mode");
+        }
+
+        const oneOffIds = new Set(plan.deleteOneOffIds || []);
+        const idsForSource = rows => rows
+          .filter(row => oneOffIds.has(row.source_one_off_id))
+          .map(row => row.id)
+          .filter(Boolean);
+        const pendingIds = idsForSource(await writer.listPlanningRows(userId, "pending_transactions"));
+        const futureIds = idsForSource(await writer.listPlanningRows(userId, "future_transactions"));
+
+        if (pendingIds.length) {
+          deletedPendingRows = Number((await writer.deletePlanningRowsById(userId, "pending_transactions", pendingIds))?.deleted || 0);
+        }
+        if (futureIds.length) {
+          deletedFutureRows = Number((await writer.deletePlanningRowsById(userId, "future_transactions", futureIds))?.deleted || 0);
+        }
+        if (oneOffIds.size) {
+          deletedOneOffs = Number((await writer.deletePlanningRowsById(
+            userId,
+            "one_off_transactions",
+            [...oneOffIds]
+          ))?.deleted || 0);
+        }
+      }
+
+      const inserted = plan.rows.length
+        ? Number((await writer.insertPlanningRows(userId, "one_off_transactions", plan.rows))?.inserted || 0)
+        : 0;
+
+      return {
+        deletedFutureRows,
+        deletedOneOffs,
+        deletedPendingRows,
+        inserted
+      };
+    };
+
+    const summary = typeof budgetStore.transaction === "function"
+      ? await budgetStore.transaction(applyWithWriter)
+      : await applyWithWriter(budgetStore);
+
+    return {
+      ...summary,
+      mode: plan.mode === "replace" ? "replace" : "append",
+      ok: true
+    };
+  }
+
+  async function createBudgetSafetySnapshotAsync(userId, reason = "data_portability") {
+    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
+      throw new Error("A budget store is required to create async safety snapshots");
+    }
+    return await createBudgetStoreSnapshot({
+      budgetIds: [userId],
+      budgetStore,
+      reason
+    });
+  }
+
+  async function restoreBudgetSafetySnapshotAsync(snapshot, options = {}) {
+    if (!budgetStore || typeof budgetStore !== "object") {
+      throw new Error("A budget store is required to restore async safety snapshots");
+    }
+    return await restoreBudgetStoreSnapshot({
+      budgetStore,
+      onBatch: options.onBatch,
+      snapshot
+    });
+  }
+
   function importOneOffCsv(userId, csv, mode = "append") {
     const normalizedMode = mode === "replace" ? "replace" : "append";
     const parsedRows = parseCsv(csv);
@@ -1095,41 +1713,45 @@ export function createCashflowDataPortabilityService({
     };
   }
 
-  function exportConfirmedLedgerCsv(userId) {
-    const headers = [
-      "ledger_year",
-      "id",
-      "name",
-      "type",
-      "date",
-      "confirmed_date",
-      "currency",
-      "amount",
-      "ledger_currency",
-      "ledger_amount",
-      "fx_rate",
-      "buffered_fx_rate",
-      "running_balance",
-      "source_recurring_expense_id",
-      "source_recurring_income_id",
-      "source_one_off_id",
-      "source_flex_id",
-      "source_goal_id",
-      "occurrence_key",
-      "created_at",
-      "updated_at"
-    ];
-
-    const lines = [headers.join(",")];
-
-    for (const row of loadAllConfirmedTransactions(userId)) {
-      lines.push(headers.map(header => {
-        if (header === "running_balance") return csvEscape(row.running_balance_pln);
-        return csvEscape(row[header]);
-      }).join(","));
+  // Matches importOneOffCsv's contract exactly: no safety backup here either
+  // (the sync version doesn't create one for CSV import), just prepare, apply,
+  // and regenerate projections.
+  async function importOneOffCsvAsync(userId, csv, mode = "append") {
+    if (!usesPostgresBudgetStoreForCsvImport()) {
+      return importOneOffCsv(userId, csv, mode);
     }
 
-    return lines.join("\n");
+    const plan = await prepareOneOffCsvImportPlanAsync(userId, csv, mode);
+    const applyResult = await applyPreparedOneOffCsvImportPlanAsync(userId, plan);
+    const projection = await regenerateProjectionsAfterMutationAsync(userId);
+
+    return {
+      ok: true,
+      mode: plan.mode,
+      imported: plan.imported,
+      _projection: projection,
+      apply: applyResult
+    };
+  }
+
+  function exportConfirmedLedgerCsv(userId) {
+    return confirmedLedgerRowsToCsv(loadAllConfirmedTransactions(userId));
+  }
+
+  async function exportConfirmedLedgerCsvAsync(userId) {
+    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+      return exportConfirmedLedgerCsv(userId);
+    }
+
+    const years = typeof budgetStore.listLedgerYears === "function"
+      ? await budgetStore.listLedgerYears(userId)
+      : listLedgerYears(userId);
+    const rows = [];
+    for (const year of years) {
+      rows.push(...(await budgetStore.listConfirmedTransactions(userId, { ledgerYear: Number(year) })));
+    }
+
+    return confirmedLedgerRowsToCsv(rows);
   }
 
   function exportSampleData() {
@@ -1140,12 +1762,29 @@ export function createCashflowDataPortabilityService({
     return importFullData(userId, sampleExport(), "replace");
   }
 
+  async function importSampleDataAsync(userId) {
+    return importFullDataAsync(userId, sampleExport(), "replace");
+  }
+
   return {
     exportConfirmedLedgerCsv,
+    exportConfirmedLedgerCsvAsync,
     exportFullData,
+    exportFullDataAsync,
     exportSampleData,
+    collectMergeConflictsAsync,
+    prepareFullImportPlanAsync,
+    applyPreparedFullImportPlanAsync,
+    applyPreparedFullImportPlanWithRollbackAsync,
+    prepareOneOffCsvImportPlanAsync,
+    applyPreparedOneOffCsvImportPlanAsync,
+    createBudgetSafetySnapshotAsync,
+    restoreBudgetSafetySnapshotAsync,
     importFullData,
+    importFullDataAsync,
     importOneOffCsv,
-    importSampleData
+    importOneOffCsvAsync,
+    importSampleData,
+    importSampleDataAsync
   };
 }

@@ -7,24 +7,36 @@ import {
   SESSION_COOKIE_NAME,
   sessionTokenFromRequest
 } from "./cashflow-session-service.js";
-import { forbidden, unauthorized } from "./cashflow-user-utils.js";
+import {
+  BUDGET_RUNTIME_LOCK_JOBS,
+  budgetRuntimeLockName
+} from "./cashflow-runtime-locks.js";
+import { conflict, forbidden, unauthorized } from "./cashflow-user-utils.js";
 
 export function registerCashflowRoutes(app, {
   acceptInvitation = null,
+  acceptInvitationAsync = null,
   activateAdminAuthDraft = null,
+  activateAdminAuthDraftAsync = null,
   authenticateExternalLogin = null,
   authenticateInternalLogin = null,
   appVersion = "0.0.0",
   archiveBudget = null,
+  archiveBudgetAsync = null,
   collectCurrenciesForFxSnapshot,
+  collectCurrenciesForFxSnapshotAsync = null,
+  compactLedgerHistory = null,
   confirmPendingTransaction,
   completeSetup = null,
   createNoneSession = null,
   createBackup,
+  createBackupAsync = null,
   createBudget = null,
+  createBudgetAsync = null,
   completeAuthProviderCallback = null,
   completeInternalPasswordSetup = null,
   createInvitation = null,
+  createInvitationAsync = null,
   createAdminPasswordResetToken = null,
   createExternalAccountSession = null,
   createInternalAccountSession = null,
@@ -35,9 +47,13 @@ export function registerCashflowRoutes(app, {
   createOneOffTransaction,
   createRecurringExpense,
   createRecurringIncome,
+  clearPendingTransactions = null,
   createUser = null,
+  createUserAsync = null,
   deleteAdminAccount = null,
+  deleteAdminAccountAsync = null,
   deleteAdminAuthProvider = null,
+  deleteAdminAuthProviderAsync = null,
   deleteFlexTransaction,
   deleteGoal,
   deleteOneOffTransaction,
@@ -46,60 +62,100 @@ export function registerCashflowRoutes(app, {
   dismissPendingOneOffRemainder,
   ensureFxCacheForMutation,
   exportConfirmedLedgerCsv,
+  exportConfirmedLedgerCsvAsync = null,
   exportFullData,
+  exportFullDataAsync = null,
   exportSampleData,
   fetchNbpFxSnapshot,
   fetchNbpRate,
   getAdminAuthConfig = null,
+  getAdminAuthConfigAsync = null,
   getCachedFxSnapshot,
+  getCachedFxSnapshotAsync = null,
   getGlobalOptions = null,
+  getGlobalOptionsAsync = null,
   getProviderPairRate,
+  getSettingsAsync = null,
   getSnapshot,
+  getSnapshotAsync = null,
+  countPendingTransactions = null,
   listAvailableLocales = () => [{ id: "en", label: "English" }],
   listAdminAccounts = null,
+  listAdminAccountsAsync = null,
   listAuthProviders = null,
+  listAuthProvidersAsync = null,
   listAccounts = null,
+  listAccountsAsync = null,
   listBudgetsForAccount = null,
+  listBudgetsForAccountAsync = null,
   listConfirmedTransactionsPage = null,
+  listConfirmedTransactionsPageAsync = null,
   listInvitations = null,
+  listInvitationsAsync = null,
   listMembers = null,
+  listMembersAsync = null,
   listUsers = null,
+  listUsersAsync = null,
+  lockService = null,
   logCashflowError,
   logError,
   moveFutureTransactionToPending,
   openPlanningDb,
   recordProjectionFailure,
+  recordProjectionFailureAsync = null,
   refreshNbpFxCacheForAllUsers,
   regenerateProjectionsWithFxRefresh,
   removeMember = null,
+  removeMemberAsync = null,
   registerInternalAccountWithInvitation = null,
   renameBudget = null,
+  renameBudgetAsync = null,
   resolveRequestActor = null,
   resolveRequestContext = null,
   resolveBudgetContext = null,
+  resolveBudgetContextAsync = null,
   resolveRequestUser,
   resolveSession = null,
+  resolveSessionAsync = null,
   revokeAdminAccountSession = null,
+  revokeAdminAccountSessionAsync = null,
   revokeSession = null,
   rotateCsrfToken = null,
   selectUser = null,
+  selectUserAsync = null,
   restoreBackup,
+  restoreBackupAsync = null,
   restoreBudgetMetadata = null,
+  restoreBudgetMetadataAsync = null,
   revokeInvitation = null,
+  revokeInvitationAsync = null,
   purgeBudget = null,
+  purgeBudgetAsync = null,
   leaveBudget = null,
+  leaveBudgetAsync = null,
   selectBudget = null,
   transferOwnership = null,
+  transferOwnershipAsync = null,
   testAdminAuthDraft = null,
+  testAdminAuthDraftAsync = null,
   setAdminProviderIdentity = null,
+  setAdminProviderIdentityAsync = null,
   setAdminExternalIdentity = null,
+  setAdminExternalIdentityAsync = null,
   setAccountSystemAdmin = null,
+  setAccountSystemAdminAsync = null,
   updateMemberRole = null,
+  updateMemberRoleAsync = null,
   importFullData,
+  importFullDataAsync = null,
   importOneOffCsv,
+  importOneOffCsvAsync = null,
   importSampleData,
+  importSampleDataAsync = null,
   safeGetCurrentFxSnapshot,
+  safeGetCurrentFxSnapshotAsync = null,
   setupRequired = null,
+  setupRequiredAsync = null,
   updateFlexTransaction,
   updateGoal,
   updateOneOffTransaction,
@@ -107,12 +163,16 @@ export function registerCashflowRoutes(app, {
   updateRecurringExpense,
   updateRecurringIncome,
   updateAdminAccount = null,
+  updateAdminAccountAsync = null,
   updateAdminAuthDraft = null,
+  updateAdminAuthDraftAsync = null,
   upsertAdminAuthProvider = null,
+  upsertAdminAuthProviderAsync = null,
   startAuthProviderLink = null,
   startAuthProviderLogin = null,
   updateSettings,
   updateGlobalOptions = null,
+  updateGlobalOptionsAsync = null,
   validatePlanMutationInput,
   translateLocale = async (_locale, key, params = {}) => String(key || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => params?.[name] ?? ""),
   validateCashflowData,
@@ -163,21 +223,27 @@ export function registerCashflowRoutes(app, {
       return `${proto}://${host}${req.originalUrl || req.url || "/"}`;
     }
 
-    function resolveRequestLocale(req) {
+    async function resolveRequestLocale(req) {
       try {
         const hasBudgetHeader = Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-budget-id")
           || Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-user-id");
         if (!hasBudgetHeader && !sessionTokenFromRequest(req)) return "en";
-        const userId = resolveRequestUser(req);
-        const db = openPlanningDb(userId, { create: false });
-        try {
-          return db.prepare("SELECT locale FROM settings WHERE id = 1").get()?.locale || "en";
-        } finally {
-          db.close();
-        }
+        const context = req.cashflowContext && typeof req.cashflowContext.then !== "function"
+          ? req.cashflowContext
+          : null;
+        const userId = context?.budget?.id
+          || String(req.headers["x-cashflow-budget-id"] || req.headers["x-cashflow-user-id"] || "").trim();
+        if (!userId) return "en";
+        return (await getSettingsAsync(userId))?.locale || "en";
       } catch {
         return "en";
       }
+    }
+
+    async function snapshotForUser(userId) {
+      return typeof getSnapshotAsync === "function"
+        ? await getSnapshotAsync(userId)
+        : getSnapshot(userId);
     }
 
     async function fail(req, res, error, fallback, logKind = null) {
@@ -193,8 +259,30 @@ export function registerCashflowRoutes(app, {
       });
     }
 
-    function requestUserId(req) {
-      return resolveRequestUser(req);
+    async function recordRouteProjectionFailure(userId, error) {
+      if (!userId) return;
+
+      try {
+        const currentSnapshot = (
+          typeof safeGetCurrentFxSnapshotAsync === "function"
+            ? await safeGetCurrentFxSnapshotAsync(userId)
+            : safeGetCurrentFxSnapshot(userId)
+        );
+        const fxSnapshot = currentSnapshot || (
+          typeof getCachedFxSnapshotAsync === "function"
+            ? await getCachedFxSnapshotAsync(userId)
+            : getCachedFxSnapshot(userId)
+        );
+        await recordProjectionFailureAsync(userId, error, fxSnapshot);
+      } catch (recordError) {
+        logCashflowError("cashflow_projection_failure_record_failed", recordError, {
+          userId
+        });
+      }
+    }
+
+    async function requestUserId(req) {
+      return await resolveRequestUser(req);
     }
 
     function requestUserHeader(req) {
@@ -206,34 +294,58 @@ export function registerCashflowRoutes(app, {
         || Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-user-id");
     }
 
-    function contextForRequest(req) {
-      if (activeAuthMode() !== "none" && !sessionTokenFromRequest(req)) {
+    async function contextForRequest(req) {
+      if ((await activeAuthMode()) !== "none" && !sessionTokenFromRequest(req)) {
         throw unauthorized();
       }
       return typeof resolveRequestContext === "function"
-        ? resolveRequestContext(req)
+        ? await resolveRequestContext(req)
         : null;
     }
 
-    function actorForRequest(req) {
+    async function actorForRequest(req) {
       const actor = typeof resolveRequestActor === "function"
-        ? resolveRequestActor(req)
+        ? await resolveRequestActor(req)
         : null;
       if (actor) return actor;
-      return activeAuthMode() === "none" ? contextForRequest(req) : null;
+      return (await activeAuthMode()) === "none" ? await contextForRequest(req) : null;
     }
 
-    function requireActor(req) {
-      const actor = actorForRequest(req);
+    async function requireActor(req) {
+      const actor = await actorForRequest(req);
       if (!actor?.account?.id || !actor.authSession) throw unauthorized();
       return actor;
     }
 
-    function sessionForRequest(req) {
-      const context = actorForRequest(req);
+    async function sessionForRequest(req) {
+      const context = await actorForRequest(req);
       if (context?.session) return context.session;
-      if (activeAuthMode() !== "none") throw unauthorized();
+      if ((await activeAuthMode()) !== "none") throw unauthorized();
       const userId = requestUserHeader(req);
+      return await resolveSessionForRoute(userId);
+    }
+
+    function canAdmin(session) {
+      return Array.isArray(session?.permissions) && session.permissions.includes("admin");
+    }
+
+    async function adminAuthConfig() {
+      if (typeof getAdminAuthConfigAsync === "function") return await getAdminAuthConfigAsync();
+      return typeof getAdminAuthConfig === "function" ? getAdminAuthConfig() : null;
+    }
+
+    async function globalOptions() {
+      if (typeof getGlobalOptionsAsync === "function") return await getGlobalOptionsAsync();
+      return typeof getGlobalOptions === "function" ? getGlobalOptions() : {};
+    }
+
+    async function authProviders(options = {}) {
+      if (typeof listAuthProvidersAsync === "function") return await listAuthProvidersAsync(options);
+      return typeof listAuthProviders === "function" ? listAuthProviders(options) : [];
+    }
+
+    async function resolveSessionForRoute(userId = "") {
+      if (typeof resolveSessionAsync === "function") return await resolveSessionAsync(userId);
       return typeof resolveSession === "function"
         ? resolveSession(userId)
         : {
@@ -244,18 +356,36 @@ export function registerCashflowRoutes(app, {
           };
     }
 
-    function canAdmin(session) {
-      return Array.isArray(session?.permissions) && session.permissions.includes("admin");
+    async function resolveBudgetContextForRoute(budgetId, options = {}) {
+      if (typeof resolveBudgetContextAsync === "function") return await resolveBudgetContextAsync(budgetId, options);
+      if (typeof resolveBudgetContext === "function") return resolveBudgetContext(budgetId, options);
+      throw new Error("Budget context service is unavailable");
     }
 
-    function requireAdmin(req) {
-      const context = actorForRequest(req);
+    async function adminPayload(session) {
+      if (!canAdmin(session)) return null;
+      return {
+        accounts: await callGlobal(listAdminAccountsAsync, listAdminAccounts, [], "Admin account service is unavailable"),
+        authConfig: await adminAuthConfig(),
+        options: await globalOptions(),
+        providers: await authProviders()
+      };
+    }
+
+    async function callGlobal(asyncFn, syncFn, args = [], message = "Service is unavailable") {
+      if (typeof asyncFn === "function") return await asyncFn(...args);
+      if (typeof syncFn === "function") return syncFn(...args);
+      throw new Error(message);
+    }
+
+    async function requireAdmin(req) {
+      const context = await actorForRequest(req);
       if (context) {
         assertCapability(context, CAPABILITIES.SYSTEM_ADMIN, "Admin permission required");
         return context.session;
       }
 
-      const session = sessionForRequest(req);
+      const session = await sessionForRequest(req);
       if (!canAdmin(session)) {
         throw forbidden("Admin permission required");
       }
@@ -266,17 +396,38 @@ export function registerCashflowRoutes(app, {
       return session?.accountId || session?.userId || null;
     }
 
-    function requireBudgetCapability(req, capability, message = "Budget permission required") {
-      const context = contextForRequest(req);
-      if (!context) return sessionForRequest(req);
+    async function requireBudgetCapability(req, capability, message = "Budget permission required") {
+      const context = await contextForRequest(req);
+      if (!context) return await sessionForRequest(req);
       assertCapability(context, capability, message);
       return context;
     }
 
-    function activeAuthMode() {
-      return typeof getAdminAuthConfig === "function"
-        ? getAdminAuthConfig()?.activeMode || "none"
-        : "none";
+    async function withBudgetRouteLock(userId, jobName, work, {
+      message = "Operation is already running",
+      ttlMs = 120000
+    } = {}) {
+      if (!lockService || typeof lockService.withLock !== "function") {
+        return await work();
+      }
+
+      const lockResult = await lockService.withLock(
+        budgetRuntimeLockName(userId, jobName),
+        work,
+        { ttlMs }
+      );
+      if (!lockResult?.acquired) {
+        throw conflict(message, [{
+          field: "operation",
+          reason: "locked",
+          lock: budgetRuntimeLockName(userId, jobName)
+        }]);
+      }
+      return lockResult.result;
+    }
+
+    async function activeAuthMode() {
+      return (await adminAuthConfig())?.activeMode || "none";
     }
 
     app.use("/api", (req, res, next) => {
@@ -306,7 +457,7 @@ export function registerCashflowRoutes(app, {
 
       try {
         const csrfToken = String(req.headers["x-cashflow-csrf-token"] || "");
-        if (typeof validateCsrfToken !== "function" || !validateCsrfToken(token, csrfToken)) {
+        if (typeof validateCsrfToken !== "function" || !(await validateCsrfToken(token, csrfToken))) {
           throw forbidden("Invalid CSRF token");
         }
         next();
@@ -317,9 +468,9 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/users", async (req, res) => {
       try {
-        if (activeAuthMode() !== "none") requireActor(req);
+        if ((await activeAuthMode()) !== "none") await requireActor(req);
         res.json({
-          users: typeof listUsers === "function" ? listUsers() : []
+          users: await callGlobal(listUsersAsync, listUsers, [], "User service is unavailable")
         });
       } catch (error) {
         await fail(req, res, error, "Failed to list users", "cashflow_users_list_failed");
@@ -328,11 +479,10 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/users", async (req, res) => {
       try {
-        if (activeAuthMode() !== "none") throw forbidden("Account creation is invite-only in this authentication mode");
-        if (typeof createUser !== "function") throw new Error("User service is unavailable");
-        const created = createUser(req.body || {});
+        if ((await activeAuthMode()) !== "none") throw forbidden("Account creation is invite-only in this authentication mode");
+        const created = await callGlobal(createUserAsync, createUser, [req.body || {}], "User service is unavailable");
         const issued = typeof createNoneSession === "function"
-          ? createNoneSession(created.budgetId || created.userId)
+          ? await createNoneSession(created.budgetId || created.userId)
           : null;
         if (issued?.token) setSessionCookie(req, res, issued.token);
         res.json({
@@ -346,9 +496,9 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/accounts", async (req, res) => {
       try {
-        if (activeAuthMode() !== "none") requireActor(req);
+        if ((await activeAuthMode()) !== "none") await requireActor(req);
         res.json({
-          accounts: typeof listAccounts === "function" ? listAccounts() : []
+          accounts: await callGlobal(listAccountsAsync, listAccounts, [], "Account service is unavailable")
         });
       } catch (error) {
         await fail(req, res, error, "Failed to list accounts", "cashflow_accounts_list_failed");
@@ -357,18 +507,20 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/accounts", async (req, res) => {
       try {
-        if (activeAuthMode() !== "none") throw forbidden("Account creation is invite-only in this authentication mode");
-        if (typeof createUser !== "function") throw new Error("Account service is unavailable");
-        const created = createUser(req.body || {});
+        if ((await activeAuthMode()) !== "none") throw forbidden("Account creation is invite-only in this authentication mode");
+        const created = await callGlobal(createUserAsync, createUser, [req.body || {}], "Account service is unavailable");
         const issued = typeof createNoneAccountSession === "function"
-          ? createNoneAccountSession(created.accountId)
+          ? await createNoneAccountSession(created.accountId)
           : null;
         if (issued?.token) setSessionCookie(req, res, issued.token);
         res.json({
           session: issued?.context?.session || created,
-          budgets: typeof listBudgetsForAccount === "function"
-            ? listBudgetsForAccount(created.accountId)
-            : [],
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [created.accountId],
+            "Budget service is unavailable"
+          ),
           ...(issued?.csrfToken ? { csrfToken: issued.csrfToken } : {})
         });
       } catch (error) {
@@ -378,10 +530,8 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/auth/config", async (req, res) => {
       try {
-        const config = typeof getAdminAuthConfig === "function" ? getAdminAuthConfig() : null;
-        const providers = typeof listAuthProviders === "function"
-          ? listAuthProviders({ publicOnly: true })
-          : [];
+        const config = await adminAuthConfig();
+        const providers = await authProviders({ publicOnly: true });
         res.json({
           auth: config
             ? {
@@ -418,7 +568,7 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/auth/providers/:providerId/link/start", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         if (typeof startAuthProviderLink !== "function") throw new Error("Authentication provider service is unavailable");
         res.json(await startAuthProviderLink(actor.account.id, req.params.providerId));
       } catch (error) {
@@ -431,7 +581,7 @@ export function registerCashflowRoutes(app, {
         if (typeof completeAuthProviderCallback !== "function") throw new Error("Authentication provider service is unavailable");
         if (typeof createInternalAccountSession !== "function") throw new Error("Session service is unavailable");
         const completed = await completeAuthProviderCallback(req.params.providerId, absoluteRequestUrl(req));
-        const issued = createInternalAccountSession(completed.accountId);
+        const issued = await createInternalAccountSession(completed.accountId);
         setSessionCookie(req, res, issued.token);
         res.redirect("/?cashflow_auth=provider");
       } catch (error) {
@@ -452,15 +602,18 @@ export function registerCashflowRoutes(app, {
       try {
         if (typeof authenticateExternalLogin !== "function") throw new Error("External authentication service is unavailable");
         if (typeof createExternalAccountSession !== "function") throw new Error("Session service is unavailable");
-        const authenticated = authenticateExternalLogin(req.headers || {});
-        const issued = createExternalAccountSession(authenticated.accountId);
+        const authenticated = await authenticateExternalLogin(req.headers || {});
+        const issued = await createExternalAccountSession(authenticated.accountId);
         setSessionCookie(req, res, issued.token);
         res.json({
           session: issued.context.session,
           csrfToken: issued.csrfToken,
-          budgets: typeof listBudgetsForAccount === "function"
-            ? listBudgetsForAccount(issued.context.account.id)
-            : []
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [issued.context.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to log in with external authentication", "cashflow_external_login_failed");
@@ -472,14 +625,17 @@ export function registerCashflowRoutes(app, {
         if (typeof authenticateInternalLogin !== "function") throw new Error("Internal authentication service is unavailable");
         if (typeof createInternalAccountSession !== "function") throw new Error("Session service is unavailable");
         const authenticated = await authenticateInternalLogin(req.body || {});
-        const issued = createInternalAccountSession(authenticated.accountId);
+        const issued = await createInternalAccountSession(authenticated.accountId);
         setSessionCookie(req, res, issued.token);
         res.json({
           session: issued.context.session,
           csrfToken: issued.csrfToken,
-          budgets: typeof listBudgetsForAccount === "function"
-            ? listBudgetsForAccount(issued.context.account.id)
-            : []
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [issued.context.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to log in", "cashflow_internal_login_failed");
@@ -491,7 +647,7 @@ export function registerCashflowRoutes(app, {
         if (typeof registerInternalAccountWithInvitation !== "function") throw new Error("Internal authentication service is unavailable");
         if (typeof createInternalSession !== "function") throw new Error("Session service is unavailable");
         const registered = await registerInternalAccountWithInvitation(req.body || {});
-        const issued = createInternalSession(registered.budgetId, {
+        const issued = await createInternalSession(registered.budgetId, {
           accountId: registered.account.id
         });
         setSessionCookie(req, res, issued.token);
@@ -503,9 +659,12 @@ export function registerCashflowRoutes(app, {
           },
           session: issued.context.session,
           csrfToken: issued.csrfToken,
-          budgets: typeof listBudgetsForAccount === "function"
-            ? listBudgetsForAccount(issued.context.account.id)
-            : []
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [issued.context.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to register account", "cashflow_internal_register_failed");
@@ -514,13 +673,17 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/accounts/:accountId/budgets", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         if (actor.account.id !== req.params.accountId) {
           throw forbidden("Account access denied");
         }
-        if (typeof listBudgetsForAccount !== "function") throw new Error("Budget service is unavailable");
         res.json({
-          budgets: listBudgetsForAccount(req.params.accountId)
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [req.params.accountId],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to list budgets", "cashflow_budgets_list_failed");
@@ -531,24 +694,15 @@ export function registerCashflowRoutes(app, {
       try {
         const token = sessionTokenFromRequest(req);
         const session = hasBudgetSelector(req) || token
-          ? sessionForRequest(req)
-          : typeof resolveSession === "function"
-            ? resolveSession("")
-            : { authenticated: false, userId: "", displayName: "", permissions: [] };
+          ? await sessionForRequest(req)
+          : await resolveSessionForRoute("");
         const csrfToken = token && typeof rotateCsrfToken === "function"
-          ? rotateCsrfToken(token)
+          ? await rotateCsrfToken(token)
           : "";
         res.json({
           session,
           ...(csrfToken ? { csrfToken } : {}),
-          admin: typeof getGlobalOptions === "function" && canAdmin(session)
-            ? {
-                accounts: typeof listAdminAccounts === "function" ? listAdminAccounts() : [],
-                authConfig: typeof getAdminAuthConfig === "function" ? getAdminAuthConfig() : null,
-                options: getGlobalOptions(),
-                providers: typeof listAuthProviders === "function" ? listAuthProviders() : []
-              }
-            : null
+          admin: await adminPayload(session)
         });
       } catch (error) {
         await fail(req, res, error, "Failed to load session", "cashflow_session_failed");
@@ -557,16 +711,15 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/session/select", async (req, res) => {
       try {
-        if (activeAuthMode() !== "none") throw forbidden("None-mode account selection is disabled");
+        if ((await activeAuthMode()) !== "none") throw forbidden("None-mode account selection is disabled");
         const requestedBudgetId = req.body?.budgetId || req.body?.userId || req.body?.id || "";
         const requestedAccountId = req.body?.accountId || null;
         let selected = null;
         if (!requestedAccountId) {
-          if (typeof selectUser !== "function") throw new Error("User service is unavailable");
-          selected = selectUser(requestedBudgetId);
+          selected = await callGlobal(selectUserAsync, selectUser, [requestedBudgetId], "User service is unavailable");
         }
         const issued = typeof createNoneSession === "function"
-          ? createNoneSession(selected?.budgetId || selected?.userId || requestedBudgetId, {
+          ? await createNoneSession(selected?.budgetId || selected?.userId || requestedBudgetId, {
               accountId: requestedAccountId
             })
           : null;
@@ -575,14 +728,7 @@ export function registerCashflowRoutes(app, {
         res.json({
           session,
           ...(issued?.csrfToken ? { csrfToken: issued.csrfToken } : {}),
-          admin: typeof getGlobalOptions === "function" && canAdmin(session)
-            ? {
-                accounts: typeof listAdminAccounts === "function" ? listAdminAccounts() : [],
-                authConfig: typeof getAdminAuthConfig === "function" ? getAdminAuthConfig() : null,
-                options: getGlobalOptions(),
-                providers: typeof listAuthProviders === "function" ? listAuthProviders() : []
-              }
-            : null
+          admin: await adminPayload(session)
         });
       } catch (error) {
         await fail(req, res, error, "Failed to select user", "cashflow_session_select_failed");
@@ -592,14 +738,17 @@ export function registerCashflowRoutes(app, {
     app.post("/api/session/select-account", async (req, res) => {
       try {
         if (typeof createNoneAccountSession !== "function") throw new Error("Session service is unavailable");
-        const issued = createNoneAccountSession(req.body?.accountId || req.body?.id || "");
+        const issued = await createNoneAccountSession(req.body?.accountId || req.body?.id || "");
         setSessionCookie(req, res, issued.token);
         res.json({
           session: issued.context.session,
           csrfToken: issued.csrfToken,
-          budgets: typeof listBudgetsForAccount === "function"
-            ? listBudgetsForAccount(issued.context.account.id)
-            : []
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [issued.context.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to select account", "cashflow_account_select_failed");
@@ -609,7 +758,7 @@ export function registerCashflowRoutes(app, {
     app.post("/api/logout", async (req, res) => {
       const token = sessionTokenFromRequest(req);
       if (token && typeof revokeSession === "function") {
-        revokeSession(token);
+        await revokeSession(token);
       }
       clearSessionCookie(req, res);
       res.json({
@@ -625,11 +774,14 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/budgets", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          budgets: typeof listBudgetsForAccount === "function"
-            ? listBudgetsForAccount(actor.account.id)
-            : []
+          budgets: await callGlobal(
+            listBudgetsForAccountAsync,
+            listBudgetsForAccount,
+            [actor.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to list budgets", "cashflow_budgets_list_failed");
@@ -638,10 +790,14 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets", async (req, res) => {
       try {
-        const actor = requireActor(req);
-        if (typeof createBudget !== "function") throw new Error("Budget service is unavailable");
+        const actor = await requireActor(req);
         res.json({
-          budget: createBudget(actor.account.id, req.body || {})
+          budget: await callGlobal(
+            createBudgetAsync,
+            createBudget,
+            [actor.account.id, req.body || {}],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to create budget", "cashflow_budget_create_failed");
@@ -650,9 +806,9 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets/:budgetId/select", async (req, res) => {
       try {
-        requireActor(req);
+        await requireActor(req);
         if (typeof selectBudget !== "function") throw new Error("Session service is unavailable");
-        const context = selectBudget(sessionTokenFromRequest(req), req.params.budgetId);
+        const context = await selectBudget(sessionTokenFromRequest(req), req.params.budgetId);
         res.json({ session: context.session });
       } catch (error) {
         await fail(req, res, error, "Failed to select budget", "cashflow_budget_select_failed");
@@ -661,9 +817,14 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/budgets/:budgetId", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          budget: renameBudget(actor.account.id, req.params.budgetId, req.body || {})
+          budget: await callGlobal(
+            renameBudgetAsync,
+            renameBudget,
+            [actor.account.id, req.params.budgetId, req.body || {}],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to rename budget", "cashflow_budget_rename_failed");
@@ -672,9 +833,14 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets/:budgetId/archive", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          budget: archiveBudget(actor.account.id, req.params.budgetId)
+          budget: await callGlobal(
+            archiveBudgetAsync,
+            archiveBudget,
+            [actor.account.id, req.params.budgetId],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to archive budget", "cashflow_budget_archive_failed");
@@ -683,15 +849,16 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/budgets/:budgetId/export", async (req, res) => {
       try {
-        const actor = requireActor(req);
-        if (typeof resolveBudgetContext !== "function") throw new Error("Budget context service is unavailable");
-        const context = resolveBudgetContext(req.params.budgetId, {
+        const actor = await requireActor(req);
+        const context = await resolveBudgetContextForRoute(req.params.budgetId, {
           accountId: actor.account.id
         });
         assertCapability(context, CAPABILITIES.BUDGET_EXPORT, "Budget permission required");
         const includeOperationalSettings = req.query.includeOperationalSettings === "1"
           || req.query.includeOperationalSettings === "true";
-        const exported = exportFullData(context.budget.id, appVersion, { includeOperationalSettings });
+        const exported = typeof exportFullDataAsync === "function"
+          ? await exportFullDataAsync(context.budget.id, appVersion, { includeOperationalSettings })
+          : exportFullData(context.budget.id, appVersion, { includeOperationalSettings });
         const fileName = `cashflow-${context.budget.id}-full-export.json`;
 
         res.setHeader("Content-Type", "application/json");
@@ -704,9 +871,14 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets/:budgetId/restore", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          budget: restoreBudgetMetadata(actor.account.id, req.params.budgetId)
+          budget: await callGlobal(
+            restoreBudgetMetadataAsync,
+            restoreBudgetMetadata,
+            [actor.account.id, req.params.budgetId],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to restore budget", "cashflow_budget_restore_failed");
@@ -715,9 +887,14 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/budgets/:budgetId", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          budget: purgeBudget(actor.account.id, req.params.budgetId)
+          budget: await callGlobal(
+            purgeBudgetAsync,
+            purgeBudget,
+            [actor.account.id, req.params.budgetId],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to purge budget", "cashflow_budget_purge_failed");
@@ -726,9 +903,14 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/budgets/:budgetId/members", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          members: listMembers(req.params.budgetId, actor.account.id)
+          members: await callGlobal(
+            listMembersAsync,
+            listMembers,
+            [req.params.budgetId, actor.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to list budget members", "cashflow_budget_members_failed");
@@ -737,13 +919,18 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/budgets/:budgetId/members/:accountId", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          membership: updateMemberRole(
-            actor.account.id,
-            req.params.budgetId,
-            req.params.accountId,
-            req.body || {}
+          membership: await callGlobal(
+            updateMemberRoleAsync,
+            updateMemberRole,
+            [
+              actor.account.id,
+              req.params.budgetId,
+              req.params.accountId,
+              req.body || {}
+            ],
+            "Budget service is unavailable"
           )
         });
       } catch (error) {
@@ -753,8 +940,13 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/budgets/:budgetId/members/:accountId", async (req, res) => {
       try {
-        const actor = requireActor(req);
-        removeMember(actor.account.id, req.params.budgetId, req.params.accountId);
+        const actor = await requireActor(req);
+        await callGlobal(
+          removeMemberAsync,
+          removeMember,
+          [actor.account.id, req.params.budgetId, req.params.accountId],
+          "Budget service is unavailable"
+        );
         res.json({ ok: true });
       } catch (error) {
         await fail(req, res, error, "Failed to remove budget member", "cashflow_budget_member_remove_failed");
@@ -763,8 +955,13 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets/:budgetId/leave", async (req, res) => {
       try {
-        const actor = requireActor(req);
-        leaveBudget(actor.account.id, req.params.budgetId);
+        const actor = await requireActor(req);
+        await callGlobal(
+          leaveBudgetAsync,
+          leaveBudget,
+          [actor.account.id, req.params.budgetId],
+          "Budget service is unavailable"
+        );
         res.json({ ok: true });
       } catch (error) {
         await fail(req, res, error, "Failed to leave budget", "cashflow_budget_leave_failed");
@@ -773,12 +970,17 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets/:budgetId/transfer-ownership", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          membership: transferOwnership(
-            actor.account.id,
-            req.params.budgetId,
-            req.body?.accountId || ""
+          membership: await callGlobal(
+            transferOwnershipAsync,
+            transferOwnership,
+            [
+              actor.account.id,
+              req.params.budgetId,
+              req.body?.accountId || ""
+            ],
+            "Budget service is unavailable"
           )
         });
       } catch (error) {
@@ -788,9 +990,14 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/budgets/:budgetId/invitations", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          invitations: listInvitations(req.params.budgetId, actor.account.id)
+          invitations: await callGlobal(
+            listInvitationsAsync,
+            listInvitations,
+            [req.params.budgetId, actor.account.id],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to list invitations", "cashflow_budget_invitations_failed");
@@ -799,9 +1006,14 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/budgets/:budgetId/invitations", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          invitation: createInvitation(actor.account.id, req.params.budgetId, req.body || {})
+          invitation: await callGlobal(
+            createInvitationAsync,
+            createInvitation,
+            [actor.account.id, req.params.budgetId, req.body || {}],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to create invitation", "cashflow_budget_invitation_create_failed");
@@ -810,8 +1022,13 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/budgets/:budgetId/invitations/:invitationId", async (req, res) => {
       try {
-        const actor = requireActor(req);
-        revokeInvitation(actor.account.id, req.params.budgetId, req.params.invitationId);
+        const actor = await requireActor(req);
+        await callGlobal(
+          revokeInvitationAsync,
+          revokeInvitation,
+          [actor.account.id, req.params.budgetId, req.params.invitationId],
+          "Budget service is unavailable"
+        );
         res.json({ ok: true });
       } catch (error) {
         await fail(req, res, error, "Failed to revoke invitation", "cashflow_budget_invitation_revoke_failed");
@@ -820,9 +1037,14 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/invitations/accept", async (req, res) => {
       try {
-        const actor = requireActor(req);
+        const actor = await requireActor(req);
         res.json({
-          invitation: acceptInvitation(actor.account.id, req.body?.token || "")
+          invitation: await callGlobal(
+            acceptInvitationAsync,
+            acceptInvitation,
+            [actor.account.id, req.body?.token || ""],
+            "Budget service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to accept invitation", "cashflow_budget_invitation_accept_failed");
@@ -831,10 +1053,10 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/admin/options", async (req, res) => {
       try {
-        const session = requireAdmin(req);
+        const session = await requireAdmin(req);
 
         res.json({
-          options: typeof getGlobalOptions === "function" ? getGlobalOptions() : {}
+          options: await globalOptions()
         });
       } catch (error) {
         await fail(req, res, error, "Failed to load admin options", "cashflow_admin_options_failed");
@@ -843,11 +1065,15 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/admin/accounts", async (req, res) => {
       try {
-        requireAdmin(req);
-        if (typeof listAdminAccounts !== "function") throw new Error("Admin account service is unavailable");
+        await requireAdmin(req);
 
         res.json({
-          accounts: listAdminAccounts()
+          accounts: await callGlobal(
+            listAdminAccountsAsync,
+            listAdminAccounts,
+            [],
+            "Admin account service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to load admin accounts", "cashflow_admin_accounts_failed");
@@ -856,11 +1082,15 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/accounts/:accountId", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof updateAdminAccount !== "function") throw new Error("Admin account service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          account: updateAdminAccount(adminActorId(session), req.params.accountId, req.body || {})
+          account: await callGlobal(
+            updateAdminAccountAsync,
+            updateAdminAccount,
+            [adminActorId(session), req.params.accountId, req.body || {}],
+            "Admin account service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to update admin account", "cashflow_admin_account_update_failed");
@@ -869,7 +1099,7 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/admin/accounts/:accountId/password-reset-token", async (req, res) => {
       try {
-        const session = requireAdmin(req);
+        const session = await requireAdmin(req);
         if (typeof createAdminPasswordResetToken !== "function") throw new Error("Internal authentication service is unavailable");
 
         res.json(await createAdminPasswordResetToken(adminActorId(session), req.params.accountId, req.body || {}));
@@ -880,11 +1110,15 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/accounts/:accountId/external-identity", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof setAdminExternalIdentity !== "function") throw new Error("External authentication service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          account: setAdminExternalIdentity(adminActorId(session), req.params.accountId, req.body || {})
+          account: await callGlobal(
+            setAdminExternalIdentityAsync,
+            setAdminExternalIdentity,
+            [adminActorId(session), req.params.accountId, req.body || {}],
+            "External authentication service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to link external identity", "cashflow_admin_account_external_identity_failed");
@@ -893,11 +1127,15 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/accounts/:accountId/provider-identities/:providerId", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof setAdminProviderIdentity !== "function") throw new Error("Authentication provider service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          account: setAdminProviderIdentity(adminActorId(session), req.params.accountId, req.params.providerId, req.body || {})
+          account: await callGlobal(
+            setAdminProviderIdentityAsync,
+            setAdminProviderIdentity,
+            [adminActorId(session), req.params.accountId, req.params.providerId, req.body || {}],
+            "Authentication provider service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to link provider identity", "cashflow_admin_account_provider_identity_failed");
@@ -906,11 +1144,15 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/accounts/:accountId/system-admin", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof setAccountSystemAdmin !== "function") throw new Error("Admin account service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          account: setAccountSystemAdmin(adminActorId(session), req.params.accountId, req.body?.enabled)
+          account: await callGlobal(
+            setAccountSystemAdminAsync,
+            setAccountSystemAdmin,
+            [adminActorId(session), req.params.accountId, req.body?.enabled],
+            "Admin account service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to update system admin role", "cashflow_admin_account_role_update_failed");
@@ -919,11 +1161,15 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/admin/accounts/:accountId/sessions/:sessionId/revoke", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof revokeAdminAccountSession !== "function") throw new Error("Admin account service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          account: revokeAdminAccountSession(adminActorId(session), req.params.accountId, req.params.sessionId)
+          account: await callGlobal(
+            revokeAdminAccountSessionAsync,
+            revokeAdminAccountSession,
+            [adminActorId(session), req.params.accountId, req.params.sessionId],
+            "Admin account service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to revoke account session", "cashflow_admin_account_session_revoke_failed");
@@ -932,11 +1178,15 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/admin/accounts/:accountId", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof deleteAdminAccount !== "function") throw new Error("Admin account service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          account: deleteAdminAccount(adminActorId(session), req.params.accountId)
+          account: await callGlobal(
+            deleteAdminAccountAsync,
+            deleteAdminAccount,
+            [adminActorId(session), req.params.accountId],
+            "Admin account service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to delete admin account", "cashflow_admin_account_delete_failed");
@@ -945,12 +1195,10 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/admin/auth", async (req, res) => {
       try {
-        requireAdmin(req);
-        if (typeof getAdminAuthConfig !== "function") throw new Error("Admin auth service is unavailable");
-
+        await requireAdmin(req);
         res.json({
-          authConfig: getAdminAuthConfig(),
-          providers: typeof listAuthProviders === "function" ? listAuthProviders() : []
+          authConfig: await adminAuthConfig(),
+          providers: await authProviders()
         });
       } catch (error) {
         await fail(req, res, error, "Failed to load admin auth configuration", "cashflow_admin_auth_failed");
@@ -959,9 +1207,8 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/admin/auth/providers", async (req, res) => {
       try {
-        requireAdmin(req);
-        if (typeof listAuthProviders !== "function") throw new Error("Authentication provider service is unavailable");
-        res.json({ providers: listAuthProviders() });
+        await requireAdmin(req);
+        res.json({ providers: await authProviders() });
       } catch (error) {
         await fail(req, res, error, "Failed to load authentication providers", "cashflow_admin_auth_providers_failed");
       }
@@ -969,10 +1216,14 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/auth/providers/:providerId", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof upsertAdminAuthProvider !== "function") throw new Error("Authentication provider service is unavailable");
+        const session = await requireAdmin(req);
         res.json({
-          provider: upsertAdminAuthProvider(adminActorId(session), req.params.providerId, req.body || {})
+          provider: await callGlobal(
+            upsertAdminAuthProviderAsync,
+            upsertAdminAuthProvider,
+            [adminActorId(session), req.params.providerId, req.body || {}],
+            "Authentication provider service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to save authentication provider", "cashflow_admin_auth_provider_save_failed");
@@ -981,9 +1232,13 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/admin/auth/providers/:providerId", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof deleteAdminAuthProvider !== "function") throw new Error("Authentication provider service is unavailable");
-        res.json(deleteAdminAuthProvider(adminActorId(session), req.params.providerId));
+        const session = await requireAdmin(req);
+        res.json(await callGlobal(
+          deleteAdminAuthProviderAsync,
+          deleteAdminAuthProvider,
+          [adminActorId(session), req.params.providerId],
+          "Authentication provider service is unavailable"
+        ));
       } catch (error) {
         await fail(req, res, error, "Failed to delete authentication provider", "cashflow_admin_auth_provider_delete_failed");
       }
@@ -991,11 +1246,15 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/auth/draft", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof updateAdminAuthDraft !== "function") throw new Error("Admin auth service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          authConfig: updateAdminAuthDraft(adminActorId(session), req.body || {})
+          authConfig: await callGlobal(
+            updateAdminAuthDraftAsync,
+            updateAdminAuthDraft,
+            [adminActorId(session), req.body || {}],
+            "Admin auth service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to save admin auth draft", "cashflow_admin_auth_draft_failed");
@@ -1004,10 +1263,14 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/admin/auth/test", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof testAdminAuthDraft !== "function") throw new Error("Admin auth service is unavailable");
+        const session = await requireAdmin(req);
 
-        res.json(testAdminAuthDraft(adminActorId(session)));
+        res.json(await callGlobal(
+          testAdminAuthDraftAsync,
+          testAdminAuthDraft,
+          [adminActorId(session)],
+          "Admin auth service is unavailable"
+        ));
       } catch (error) {
         await fail(req, res, error, "Failed to test admin auth draft", "cashflow_admin_auth_test_failed");
       }
@@ -1015,11 +1278,15 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/admin/auth/activate", async (req, res) => {
       try {
-        const session = requireAdmin(req);
-        if (typeof activateAdminAuthDraft !== "function") throw new Error("Admin auth service is unavailable");
+        const session = await requireAdmin(req);
 
         res.json({
-          authConfig: activateAdminAuthDraft(adminActorId(session))
+          authConfig: await callGlobal(
+            activateAdminAuthDraftAsync,
+            activateAdminAuthDraft,
+            [adminActorId(session)],
+            "Admin auth service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to activate admin auth draft", "cashflow_admin_auth_activate_failed");
@@ -1028,12 +1295,16 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/admin/options", async (req, res) => {
       try {
-        requireAdmin(req);
+        await requireAdmin(req);
 
-        if (typeof updateGlobalOptions !== "function") throw new Error("Admin options service is unavailable");
         res.json({
           ok: true,
-          options: updateGlobalOptions(req.body || {})
+          options: await callGlobal(
+            updateGlobalOptionsAsync,
+            updateGlobalOptions,
+            [req.body || {}],
+            "Admin options service is unavailable"
+          )
         });
       } catch (error) {
         await fail(req, res, error, "Failed to save admin options", "cashflow_admin_options_update_failed");
@@ -1042,12 +1313,12 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/setup", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_SETTINGS);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_SETTINGS);
         if (typeof completeSetup !== "function") throw new Error("Setup service is unavailable");
-        const userId = requestUserId(req);
-        const result = completeSetup(userId, req.body || {});
-        const snapshot = getSnapshot(userId);
-        const session = sessionForRequest(req);
+        const userId = await requestUserId(req);
+        const result = await completeSetup(userId, req.body || {});
+        const snapshot = await snapshotForUser(userId);
+        const session = await sessionForRequest(req);
         res.json({
           app: {
             name: "cashflow",
@@ -1056,14 +1327,7 @@ export function registerCashflowRoutes(app, {
           ...snapshot,
           session,
           setup_required: false,
-          admin: typeof getGlobalOptions === "function" && canAdmin(session)
-            ? {
-                accounts: typeof listAdminAccounts === "function" ? listAdminAccounts() : [],
-                authConfig: typeof getAdminAuthConfig === "function" ? getAdminAuthConfig() : null,
-                options: getGlobalOptions(),
-                providers: typeof listAuthProviders === "function" ? listAuthProviders() : []
-              }
-            : null,
+          admin: await adminPayload(session),
           setup: result
         });
       } catch (error) {
@@ -1073,11 +1337,13 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        const userId = requestUserId(req);
-        const session = sessionForRequest(req);
-        const isSetupRequired = typeof setupRequired === "function" ? setupRequired(userId) : false;
-        const snapshot = getSnapshot(userId);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await requestUserId(req);
+        const session = await sessionForRequest(req);
+        const isSetupRequired = typeof setupRequiredAsync === "function"
+          ? await setupRequiredAsync(userId)
+          : typeof setupRequired === "function" ? setupRequired(userId) : false;
+        const snapshot = await snapshotForUser(userId);
         res.json({
           app: {
             name: "cashflow",
@@ -1085,14 +1351,7 @@ export function registerCashflowRoutes(app, {
           },
           session,
           setup_required: isSetupRequired,
-          admin: typeof getGlobalOptions === "function" && canAdmin(session)
-            ? {
-                accounts: typeof listAdminAccounts === "function" ? listAdminAccounts() : [],
-                authConfig: typeof getAdminAuthConfig === "function" ? getAdminAuthConfig() : null,
-                options: getGlobalOptions(),
-                providers: typeof listAuthProviders === "function" ? listAuthProviders() : []
-              }
-            : null,
+          admin: await adminPayload(session),
           ...snapshot
         });
       } catch (error) {
@@ -1113,9 +1372,12 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/ledger/confirmed", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        const userId = resolveRequestUser(req);
-        res.json(listConfirmedTransactionsPage(userId, {
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await resolveRequestUser(req);
+        const listPage = typeof listConfirmedTransactionsPageAsync === "function"
+          ? listConfirmedTransactionsPageAsync
+          : listConfirmedTransactionsPage;
+        res.json(await listPage(userId, {
           currency: req.query.currency,
           dateFrom: req.query.date_from,
           dateTo: req.query.date_to,
@@ -1136,8 +1398,8 @@ export function registerCashflowRoutes(app, {
       let userId = "";
 
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
-        userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
+        userId = await resolveRequestUser(req);
         const projection = await regenerateProjectionsWithFxRefresh(userId, {
           date: req.body?.date || null,
           allowCachedFxOnRefreshFailure: true,
@@ -1147,27 +1409,10 @@ export function registerCashflowRoutes(app, {
         res.json({
           ok: true,
           _projection: projection,
-          ...getSnapshot(userId)
+          ...(await snapshotForUser(userId))
         });
       } catch (error) {
-        try {
-          const db = openPlanningDb(userId);
-
-          try {
-            recordProjectionFailure(
-              db,
-              userId,
-              error,
-              safeGetCurrentFxSnapshot(userId) || getCachedFxSnapshot(userId)
-            );
-          } finally {
-            db.close();
-          }
-        } catch (recordError) {
-          logCashflowError("cashflow_projection_failure_record_failed", recordError, {
-            userId
-          });
-        }
+        await recordRouteProjectionFailure(userId, error);
 
         logCashflowError("cashflow_run_jobs_failed", error, {
           userId
@@ -1181,8 +1426,8 @@ export function registerCashflowRoutes(app, {
       let userId = "";
 
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
-        userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
+        userId = await resolveRequestUser(req);
         const projection = await regenerateProjectionsWithFxRefresh(userId, {
           date: req.body?.date || null,
           refreshFxFirst: true
@@ -1191,7 +1436,7 @@ export function registerCashflowRoutes(app, {
         res.json({
           ok: true,
           _projection: projection,
-          ...getSnapshot(userId)
+          ...(await snapshotForUser(userId))
         });
       } catch (error) {
         logCashflowError("cashflow_fx_refresh_failed", error, {
@@ -1204,7 +1449,7 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/fx/refresh-all", async (req, res) => {
       try {
-        requireAdmin(req);
+        await requireAdmin(req);
         const result = await refreshNbpFxCacheForAllUsers(req.body?.date || null);
         res.json({ ok: true, users: result });
       } catch (error) {
@@ -1213,39 +1458,37 @@ export function registerCashflowRoutes(app, {
     });
 
     app.get("/api/fx/nbp/:currency", async (req, res) => {
-      let db = null;
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        db = openPlanningDb(resolveRequestUser(req));
-        const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
-        const rate = await fetchNbpRate(req.params.currency, null, settings.timezone);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await resolveRequestUser(req);
+        const settings = typeof getSettingsAsync === "function"
+          ? await getSettingsAsync(userId)
+          : null;
+        const rate = await fetchNbpRate(req.params.currency, null, settings?.timezone);
         res.json(rate);
       } catch (error) {
         await fail(req, res, error, "Failed to fetch FX rates", "cashflow_nbp_fx_current_failed");
-      } finally {
-        db?.close();
       }
     });
 
     app.get("/api/fx/nbp/:currency/:date", async (req, res) => {
-      let db = null;
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        db = openPlanningDb(resolveRequestUser(req));
-        const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
-        const rate = await fetchNbpRate(req.params.currency, req.params.date, settings.timezone);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await resolveRequestUser(req);
+        const settings = typeof getSettingsAsync === "function"
+          ? await getSettingsAsync(userId)
+          : null;
+        const rate = await fetchNbpRate(req.params.currency, req.params.date, settings?.timezone);
         res.json(rate);
       } catch (error) {
         await fail(req, res, error, "Failed to fetch FX rates", "cashflow_nbp_fx_historical_failed");
-      } finally {
-        db?.close();
       }
     });
 
     app.get("/api/fx/rate/:base/:quote", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await resolveRequestUser(req);
         const rate = await getProviderPairRate(userId, req.params.base, req.params.quote, req.query.date || null);
         res.json(rate);
       } catch (error) {
@@ -1255,8 +1498,8 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/fx/rate/:base/:quote/:date", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await resolveRequestUser(req);
         const rate = await getProviderPairRate(userId, req.params.base, req.params.quote, req.params.date);
         res.json(rate);
       } catch (error) {
@@ -1266,16 +1509,15 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/fx/nbp-snapshot", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
-        const userId = resolveRequestUser(req);
-        const db = openPlanningDb(userId);
-        let timezone = null;
-        try {
-          timezone = db.prepare("SELECT timezone FROM settings WHERE id = 1").get()?.timezone || null;
-        } finally {
-          db.close();
-        }
-        const currencies = collectCurrenciesForFxSnapshot(userId);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        const userId = await resolveRequestUser(req);
+        const settings = typeof getSettingsAsync === "function"
+          ? await getSettingsAsync(userId)
+          : null;
+        const timezone = settings?.timezone || null;
+        const currencies = typeof collectCurrenciesForFxSnapshotAsync === "function"
+          ? await collectCurrenciesForFxSnapshotAsync(userId)
+          : collectCurrenciesForFxSnapshot(userId);
         const snapshot = await fetchNbpFxSnapshot(currencies, req.query.date || null, timezone);
         res.json(snapshot);
       } catch (error) {
@@ -1285,8 +1527,8 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/settings", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_SETTINGS);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_SETTINGS);
+        const userId = await resolveRequestUser(req);
         const updated = await updateSettings(userId, req.body);
 
         res.json(withProjectionStatus(userId, updated));
@@ -1297,9 +1539,9 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/pending/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
-        const updated = updatePendingTransaction(userId, req.params.id, req.body);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        const updated = await updatePendingTransaction(userId, req.params.id, req.body);
         res.json(updated);
       } catch (error) {
         await fail(req, res, error, "Failed to update pending transaction", "cashflow_pending_update_failed");
@@ -1308,9 +1550,9 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/pending/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
-        const dismissed = dismissPendingOneOffRemainder(userId, req.params.id);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        const dismissed = await dismissPendingOneOffRemainder(userId, req.params.id);
         res.json(dismissed);
       } catch (error) {
         await fail(req, res, error, "Failed to dismiss pending one-off remainder", "cashflow_pending_remainder_dismiss_failed");
@@ -1319,8 +1561,8 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/pending/:id/confirm", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.LEDGER_CONFIRM);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.LEDGER_CONFIRM);
+        const userId = await resolveRequestUser(req);
         const confirmed = await confirmPendingTransaction(userId, req.params.id, req.body);
         res.json(confirmed);
       } catch (error) {
@@ -1332,46 +1574,45 @@ export function registerCashflowRoutes(app, {
       let userId = "";
 
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
-        userId = resolveRequestUser(req);
-        const db = openPlanningDb(userId);
-        let deletedPendingCount = 0;
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
+        userId = await resolveRequestUser(req);
+        const result = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.projection,
+          async () => {
+            let deletedPendingCount = typeof countPendingTransactions === "function"
+              ? await countPendingTransactions(userId)
+              : 0;
 
-        try {
-          deletedPendingCount = db.prepare("SELECT COUNT(*) AS count FROM pending_transactions").get().count || 0;
-        } finally {
-          db.close();
-        }
+            const preflightProjection = await regenerateProjectionsWithFxRefresh(userId, {
+              date: req.body?.date || null,
+              allowCachedFxOnRefreshFailure: true,
+              refreshFxFirst: true,
+              skipProjectionLock: true
+            });
 
-        const preflightProjection = await regenerateProjectionsWithFxRefresh(userId, {
-          date: req.body?.date || null,
-          allowCachedFxOnRefreshFailure: true,
-          refreshFxFirst: true
-        });
+            deletedPendingCount = typeof clearPendingTransactions === "function"
+              ? await clearPendingTransactions(userId)
+              : 0;
 
-        const deleteDb = openPlanningDb(userId);
+            const projection = await regenerateProjectionsWithFxRefresh(userId, {
+              date: req.body?.date || null,
+              refreshFxFirst: false,
+              skipProjectionLock: true
+            });
+            projection.fx_refresh = preflightProjection.fx_refresh;
 
-        try {
-          deletedPendingCount = deleteDb.transaction(() => {
-            const result = deleteDb.prepare("DELETE FROM pending_transactions").run();
-            return result.changes || 0;
-          })();
-        } finally {
-          deleteDb.close();
-        }
+            return {
+              ok: true,
+              deletedPendingCount,
+              _projection: projection,
+              ...(await snapshotForUser(userId))
+            };
+          },
+          { message: "Pending recalculation is already running" }
+        );
 
-        const projection = await regenerateProjectionsWithFxRefresh(userId, {
-          date: req.body?.date || null,
-          refreshFxFirst: false
-        });
-        projection.fx_refresh = preflightProjection.fx_refresh;
-
-        res.json({
-          ok: true,
-          deletedPendingCount,
-          _projection: projection,
-          ...getSnapshot(userId)
-        });
+        res.json(result);
       } catch (error) {
         logCashflowError("cashflow_pending_recalculate_failed", error, {
           userId
@@ -1385,11 +1626,11 @@ export function registerCashflowRoutes(app, {
       const occurrenceKey = typeof req.body?.occurrenceKey === "string" ? req.body.occurrenceKey : "";
 
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        userId = resolveRequestUser(req);
-        const moved = moveFutureTransactionToPending(userId, req.params.id, { occurrenceKey });
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        userId = await resolveRequestUser(req);
+        const moved = await moveFutureTransactionToPending(userId, req.params.id, { occurrenceKey });
         res.json({
-          ...getSnapshot(userId),
+          ...(await snapshotForUser(userId)),
           move: moved
         });
       } catch (error) {
@@ -1403,13 +1644,41 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    app.post("/api/ledger/compact-history", async (req, res) => {
+      let userId = "";
+
+      try {
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
+        userId = await resolveRequestUser(req);
+        const result = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.retention,
+          () => compactLedgerHistory(userId, {
+            months: Object.prototype.hasOwnProperty.call(req.body || {}, "months")
+              ? req.body.months
+              : undefined
+          }),
+          { message: "Ledger compaction is already running" }
+        );
+        res.json({
+          ...(await snapshotForUser(userId)),
+          compaction: result
+        });
+      } catch (error) {
+        logCashflowError("cashflow_ledger_compaction_failed", error, {
+          userId
+        });
+        await fail(req, res, error, "Failed to compact ledger history", "cashflow_ledger_compaction_failed");
+      }
+    });
+
     app.post("/api/recurring-expenses", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("recurring-expense", req.body, { create: true });
         await ensureFxCacheForMutation(userId, input);
-        res.json(createRecurringExpense(userId, input));
+        res.json(await createRecurringExpense(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create recurring expense", "cashflow_recurring_expense_create_failed");
       }
@@ -1417,11 +1686,11 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/recurring-expenses/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("recurring-expense", req.body);
         await ensureFxCacheForMutation(userId, input);
-        res.json(updateRecurringExpense(userId, req.params.id, input));
+        res.json(await updateRecurringExpense(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update recurring expense", "cashflow_recurring_expense_update_failed");
       }
@@ -1429,9 +1698,9 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/recurring-expenses/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
-        res.json(deleteRecurringExpense(userId, req.params.id));
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        res.json(await deleteRecurringExpense(userId, req.params.id));
       } catch (error) {
         await fail(req, res, error, "Failed to delete recurring expense", "cashflow_recurring_expense_delete_failed");
       }
@@ -1439,11 +1708,11 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/recurring-incomes", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("recurring-income", req.body, { create: true });
         await ensureFxCacheForMutation(userId, input);
-        res.json(createRecurringIncome(userId, input));
+        res.json(await createRecurringIncome(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create recurring income", "cashflow_recurring_income_create_failed");
       }
@@ -1451,11 +1720,11 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/recurring-incomes/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("recurring-income", req.body);
         await ensureFxCacheForMutation(userId, input);
-        res.json(updateRecurringIncome(userId, req.params.id, input));
+        res.json(await updateRecurringIncome(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update recurring income", "cashflow_recurring_income_update_failed");
       }
@@ -1463,9 +1732,9 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/recurring-incomes/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
-        res.json(deleteRecurringIncome(userId, req.params.id));
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        res.json(await deleteRecurringIncome(userId, req.params.id));
       } catch (error) {
         await fail(req, res, error, "Failed to delete recurring income", "cashflow_recurring_income_delete_failed");
       }
@@ -1473,11 +1742,11 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/goals", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("goal", req.body, { create: true });
         await ensureFxCacheForMutation(userId, input);
-        res.json(createGoal(userId, input));
+        res.json(await createGoal(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create goal", "cashflow_goal_create_failed");
       }
@@ -1485,11 +1754,11 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/goals/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("goal", req.body);
         await ensureFxCacheForMutation(userId, input);
-        res.json(updateGoal(userId, req.params.id, input));
+        res.json(await updateGoal(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update goal", "cashflow_goal_update_failed");
       }
@@ -1497,9 +1766,9 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/goals/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
-        res.json(deleteGoal(userId, req.params.id));
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        res.json(await deleteGoal(userId, req.params.id));
       } catch (error) {
         await fail(req, res, error, "Failed to delete goal", "cashflow_goal_delete_failed");
       }
@@ -1507,11 +1776,11 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/flex", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("flex", req.body, { create: true });
         await ensureFxCacheForMutation(userId, input);
-        res.json(createFlexTransaction(userId, input));
+        res.json(await createFlexTransaction(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create flex transaction", "cashflow_flex_create_failed");
       }
@@ -1519,11 +1788,11 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/flex/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("flex", req.body);
         await ensureFxCacheForMutation(userId, input);
-        res.json(updateFlexTransaction(userId, req.params.id, input));
+        res.json(await updateFlexTransaction(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update flex transaction", "cashflow_flex_update_failed");
       }
@@ -1531,9 +1800,9 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/flex/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
-        res.json(deleteFlexTransaction(userId, req.params.id));
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        res.json(await deleteFlexTransaction(userId, req.params.id));
       } catch (error) {
         await fail(req, res, error, "Failed to delete flex transaction", "cashflow_flex_delete_failed");
       }
@@ -1541,11 +1810,11 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/one-off", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("one-off", req.body, { create: true });
         await ensureFxCacheForMutation(userId, input);
-        res.json(createOneOffTransaction(userId, input));
+        res.json(await createOneOffTransaction(userId, input));
       } catch (error) {
         await fail(req, res, error, "Failed to create one-off transaction", "cashflow_oneoff_create_failed");
       }
@@ -1553,11 +1822,11 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/one-off/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         const input = validatePlanMutationInput("one-off", req.body);
         await ensureFxCacheForMutation(userId, input);
-        res.json(updateOneOffTransaction(userId, req.params.id, input));
+        res.json(await updateOneOffTransaction(userId, req.params.id, input));
       } catch (error) {
         await fail(req, res, error, "Failed to update one-off transaction", "cashflow_oneoff_update_failed");
       }
@@ -1565,8 +1834,8 @@ export function registerCashflowRoutes(app, {
 
     app.delete("/api/one-off/:id", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
         res.json(await deleteOneOffTransaction(userId, req.params.id));
       } catch (error) {
         await fail(req, res, error, "Failed to delete one-off transaction", "cashflow_oneoff_delete_failed");
@@ -1577,8 +1846,8 @@ export function registerCashflowRoutes(app, {
       let userId = "";
 
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
-        userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_MAINTAIN);
+        userId = await resolveRequestUser(req);
         const projection = await regenerateProjectionsWithFxRefresh(userId, {
           date: req.body?.date || null,
           allowCachedFxOnRefreshFailure: true,
@@ -1588,27 +1857,10 @@ export function registerCashflowRoutes(app, {
         res.json({
           ok: true,
           _projection: projection,
-          ...getSnapshot(userId)
+          ...(await snapshotForUser(userId))
         });
       } catch (error) {
-        try {
-          const db = openPlanningDb(userId);
-
-          try {
-            recordProjectionFailure(
-              db,
-              userId,
-              error,
-              safeGetCurrentFxSnapshot(userId) || getCachedFxSnapshot(userId)
-            );
-          } finally {
-            db.close();
-          }
-        } catch (recordError) {
-          logCashflowError("cashflow_projection_failure_record_failed", recordError, {
-            userId
-          });
-        }
+        await recordRouteProjectionFailure(userId, error);
 
         logCashflowError("cashflow_regenerate_projections_failed", error, {
           userId
@@ -1620,9 +1872,17 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/backup", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_BACKUP);
-        const userId = resolveRequestUser(req);
-        const backupPath = createBackup(userId);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_BACKUP);
+        const userId = await resolveRequestUser(req);
+        const backupPath = await withBudgetRouteLock(
+          userId,
+          BUDGET_RUNTIME_LOCK_JOBS.automaticBackup,
+          () => typeof createBackupAsync === "function" ? createBackupAsync(userId) : createBackup(userId),
+          {
+            message: "Backup is already running",
+            ttlMs: 300000
+          }
+        );
         res.json({ ok: true, path: backupPath });
       } catch (error) {
         await fail(req, res, error, "Failed to create backup", "cashflow_backup_failed");
@@ -1631,11 +1891,13 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/export/full", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_EXPORT);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_EXPORT);
+        const userId = await resolveRequestUser(req);
         const includeOperationalSettings = req.query.includeOperationalSettings === "1"
           || req.query.includeOperationalSettings === "true";
-        const exported = exportFullData(userId, appVersion, { includeOperationalSettings });
+        const exported = typeof exportFullDataAsync === "function"
+          ? await exportFullDataAsync(userId, appVersion, { includeOperationalSettings })
+          : exportFullData(userId, appVersion, { includeOperationalSettings });
         const fileName = `cashflow-${userId}-full-export.json`;
 
         res.setHeader("Content-Type", "application/json");
@@ -1648,16 +1910,19 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/import/full", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
-        const userId = resolveRequestUser(req);
-        const result = importFullData(
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const userId = await resolveRequestUser(req);
+        const importArgs = [
           userId,
           req.body?.export || req.body,
           req.body?.mode || "replace",
           { includeOperationalSettings: Boolean(req.body?.includeOperationalSettings) }
-        );
+        ];
+        const result = typeof importFullDataAsync === "function"
+          ? await importFullDataAsync(...importArgs)
+          : importFullData(...importArgs);
         res.json({
-          ...getSnapshot(userId),
+          ...(await snapshotForUser(userId)),
           import: result
         });
       } catch (error) {
@@ -1667,11 +1932,15 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/import/one-offs-csv", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
-        const userId = resolveRequestUser(req);
-        const result = importOneOffCsv(userId, req.body?.csv || "", req.body?.mode || "append");
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const userId = await resolveRequestUser(req);
+        const csv = req.body?.csv || "";
+        const mode = req.body?.mode || "append";
+        const result = typeof importOneOffCsvAsync === "function"
+          ? await importOneOffCsvAsync(userId, csv, mode)
+          : importOneOffCsv(userId, csv, mode);
         res.json({
-          ...getSnapshot(userId),
+          ...(await snapshotForUser(userId)),
           import: result
         });
       } catch (error) {
@@ -1681,9 +1950,11 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/export/confirmed-ledger.csv", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_EXPORT);
-        const userId = resolveRequestUser(req);
-        const csv = exportConfirmedLedgerCsv(userId);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_EXPORT);
+        const userId = await resolveRequestUser(req);
+        const csv = typeof exportConfirmedLedgerCsvAsync === "function"
+          ? await exportConfirmedLedgerCsvAsync(userId)
+          : exportConfirmedLedgerCsv(userId);
 
         res.setHeader("Content-Type", "text/csv; charset=utf-8");
         res.setHeader("Content-Disposition", `attachment; filename="cashflow-${userId}-confirmed-ledger.csv"`);
@@ -1707,11 +1978,13 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/import/sample", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
-        const userId = resolveRequestUser(req);
-        const result = importSampleData(userId);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const userId = await resolveRequestUser(req);
+        const result = typeof importSampleDataAsync === "function"
+          ? await importSampleDataAsync(userId)
+          : importSampleData(userId);
         res.json({
-          ...getSnapshot(userId),
+          ...(await snapshotForUser(userId)),
           import: result
         });
       } catch (error) {
@@ -1721,8 +1994,8 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/validate", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_VALIDATE);
-        const userId = resolveRequestUser(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_VALIDATE);
+        const userId = await resolveRequestUser(req);
         res.json(validateCashflowData(userId));
       } catch (error) {
         await fail(req, res, error, "Failed to run validation", "cashflow_validate_failed");
@@ -1731,11 +2004,13 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/restore/:backupId", async (req, res) => {
       try {
-        requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
-        const userId = resolveRequestUser(req);
-        const result = restoreBackup(userId, req.params.backupId);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
+        const userId = await resolveRequestUser(req);
+        const result = typeof restoreBackupAsync === "function"
+          ? await restoreBackupAsync(userId, req.params.backupId)
+          : restoreBackup(userId, req.params.backupId);
         res.json({
-          ...getSnapshot(userId),
+          ...(await snapshotForUser(userId)),
           restore: result
         });
       } catch (error) {

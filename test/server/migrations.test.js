@@ -84,10 +84,16 @@ test("planning migration from version 8 adds locale and preserves valid settings
   assert.equal(columns.includes("holiday_country"), true);
   assert.equal(columns.includes("minimum_reserve_enabled"), true);
   assert.equal(columns.includes("minimum_reserve_amount"), true);
+  assert.equal(columns.includes("ledger_history_compaction_months"), true);
+  assert.equal(columns.includes("notification_channel"), true);
+  assert.equal(columns.includes("discord_webhook_url"), true);
   assert.equal(settings.locale, "en");
   assert.equal(settings.holiday_country, "PL");
   assert.equal(settings.minimum_reserve_enabled, 0);
   assert.equal(settings.minimum_reserve_amount, 0);
+  assert.equal(settings.ledger_history_compaction_months, 0);
+  assert.equal(settings.notification_channel, "ntfy");
+  assert.equal(settings.discord_webhook_url, null);
   assert.equal(settings.setup_completed, 1);
   assert.equal(settings.fx_provider, "manual");
   assert.equal(settings.fx_used_currencies, '["EUR"]');
@@ -429,4 +435,67 @@ test("current ledger migrations create confirmed source indexes for existing dat
   ]) {
     assert.equal(indexes.has(name), true, name);
   }
+}));
+
+test("planning migration extracts a URL-embedded ntfy access token into its own column", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 18;
+
+    CREATE TABLE settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      ntfy_url TEXT
+    );
+
+    INSERT INTO settings (id, ntfy_url)
+    VALUES (1, 'https://:tk_g5qdcly4l23ssxlpx8ys8wcwtqh68@ntfy.tubacki.pl/budget');
+  `);
+
+  applyPlanningMigrations(db);
+
+  const version = db.pragma("user_version", { simple: true });
+  const row = db.prepare("SELECT ntfy_url, ntfy_auth_token FROM settings WHERE id = 1").get();
+
+  assert.equal(version, PLANNING_SCHEMA_VERSION);
+  assert.equal(row.ntfy_url, "https://ntfy.tubacki.pl/budget");
+  assert.equal(row.ntfy_auth_token, "tk_g5qdcly4l23ssxlpx8ys8wcwtqh68");
+}));
+
+test("planning migration leaves a plain ntfy URL untouched", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 18;
+
+    CREATE TABLE settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      ntfy_url TEXT
+    );
+
+    INSERT INTO settings (id, ntfy_url)
+    VALUES (1, 'https://ntfy.example.com/topic');
+  `);
+
+  applyPlanningMigrations(db);
+
+  const row = db.prepare("SELECT ntfy_url, ntfy_auth_token FROM settings WHERE id = 1").get();
+  assert.equal(row.ntfy_url, "https://ntfy.example.com/topic");
+  assert.equal(row.ntfy_auth_token, null);
+}));
+
+test("planning migration adds ntfy_auth_token even when settings has no ntfy_url column yet", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 15;
+
+    CREATE TABLE settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1)
+    );
+
+    INSERT INTO settings (id) VALUES (1);
+  `);
+
+  applyPlanningMigrations(db);
+
+  const version = db.pragma("user_version", { simple: true });
+  const columns = db.prepare("PRAGMA table_info(settings)").all().map(column => column.name);
+
+  assert.equal(version, PLANNING_SCHEMA_VERSION);
+  assert.equal(columns.includes("ntfy_auth_token"), true);
 }));

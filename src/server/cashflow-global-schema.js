@@ -1,5 +1,29 @@
 export const GLOBAL_SCHEMA_VERSION = 5;
 export const LEGACY_ADMIN_ACCOUNT_ID = "legacy-admin";
+export const GLOBAL_TABLE_NAMES = [
+  "users",
+  "global_options",
+  "accounts",
+  "account_global_roles",
+  "budgets",
+  "budget_memberships",
+  "budget_invitations",
+  "auth_identities",
+  "password_credentials",
+  "password_reset_tokens",
+  "auth_sessions",
+  "auth_providers",
+  "auth_oauth_states",
+  "auth_config",
+  "security_audit_log"
+];
+
+export const GLOBAL_RUNTIME_GUARD_TRIGGER_NAMES = [
+  "prevent_last_system_admin_delete",
+  "prevent_last_system_admin_disable",
+  "prevent_budget_owner_delete",
+  "prevent_budget_owner_demotion"
+];
 
 const GLOBAL_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS users (
@@ -289,6 +313,16 @@ const GLOBAL_SCHEMA_SQL = `
   INSERT OR IGNORE INTO auth_config (id, updated_at)
   VALUES (1, datetime('now'));
 `;
+
+export function dropGlobalRuntimeGuardTriggers(db) {
+  for (const triggerName of GLOBAL_RUNTIME_GUARD_TRIGGER_NAMES) {
+    db.exec(`DROP TRIGGER IF EXISTS ${triggerName}`);
+  }
+}
+
+export function ensureGlobalRuntimeSchemaObjects(db) {
+  db.exec(GLOBAL_SCHEMA_SQL);
+}
 
 function tableColumns(db, tableName) {
   return db.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name);

@@ -25,6 +25,10 @@ import {
 import { renderGoalsTab } from "../public/app/cashflow/target-tabs.js";
 import { renderTransactionTable } from "../public/app/cashflow/transactions.js";
 import { SUPPORTED_FX_CURRENCIES as SERVER_CURRENCIES } from "../src/server/cashflow-fx-provider-utils.js";
+import {
+  applyUiPreferences,
+  normalizeUiPreferences
+} from "../public/app/cashflow/ui-preferences.js";
 
 function assertNoMojibake(html) {
   assert.equal(/[\u00c4\u0102\u0139\u00e2\u00c2]/u.test(html), false, html);
@@ -32,12 +36,62 @@ function assertNoMojibake(html) {
 
 test("app background is rendered by a fixed root layer for expanded pages", async () => {
   const css = await readFile(new URL("../public/styles/base.css", import.meta.url), "utf8");
+  const index = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
 
   assert.match(css, /--app-background:/);
   assert.match(css, /body\s*{[^}]*min-height:\s*100dvh/s);
   assert.match(css, /\.page-shell\s*{[^}]*min-height:\s*100dvh/s);
   assert.match(css, /\.page-shell::before\s*{[^}]*position:\s*fixed;[^}]*background:\s*var\(--app-background\);[^}]*background-size:\s*cover;/s);
   assert.doesNotMatch(css, /background-size:\s*100vw\s+100vh/);
+  assert.match(index, /app-loading__mark/);
+  assert.doesNotMatch(index, /app-loading__bar/);
+  assert.doesNotMatch(index, /app-loading__steps/);
+});
+
+test("help popovers dismiss on outside interaction and layer above nearby triggers", async () => {
+  const handlers = await readFile(new URL("../public/app/cashflow/handlers.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles/cashflow.css", import.meta.url), "utf8");
+
+  assert.match(handlers, /function closeHelpPopovers/);
+  assert.match(handlers, /document\.addEventListener\("click"/);
+  assert.match(handlers, /document\.addEventListener\("keydown"/);
+  assert.match(handlers, /\.cashflow-help-popover\[open\]/);
+  assert.match(css, /\.cashflow-help-popover\[open\]\s*{[^}]*z-index:\s*90;/s);
+  assert.match(css, /\.cashflow-help-popover__body\s*{[^}]*z-index:\s*91;/s);
+});
+
+test("UI preferences normalize and apply theme and density attributes", () => {
+  assert.deepEqual(
+    normalizeUiPreferences({ theme: "bad", density: "wide", defaultTab: "missing" }),
+    { theme: "system", density: "comfortable", defaultTab: "ledger" }
+  );
+
+  const attrs = {};
+  const target = {
+    style: {},
+    setAttribute(name, value) {
+      attrs[name] = value;
+    }
+  };
+
+  const preferences = applyUiPreferences({
+    theme: "light",
+    density: "compact",
+    defaultTab: "settings"
+  }, target);
+
+  assert.deepEqual(preferences, {
+    theme: "light",
+    density: "compact",
+    defaultTab: "settings"
+  });
+  assert.equal(attrs["data-cashflow-theme"], "light");
+  assert.equal(attrs["data-cashflow-density"], "compact");
+  assert.equal(target.style.colorScheme, "light");
+
+  applyUiPreferences({ theme: "system", density: "comfortable" }, target);
+  assert.equal(attrs["data-cashflow-theme"], "system");
+  assert.equal(target.style.colorScheme, "light dark");
 });
 
 test("session and setup pages render auth-ready controls", async () => {
@@ -302,6 +356,11 @@ test("page keeps transient errors visible and hides admin controls for non-admin
     today: "2026-06-03",
     session: { userId: "regular", permissions: [] },
     settings: { locale: "en", ledger_currency: "PLN" },
+    availableLocales: [
+      { id: "en", label: "English" },
+      { id: "pl", label: "Polski" }
+    ],
+    app: { version: "1.0.0" },
     pendingTransactions: [],
     confirmedTransactions: [],
     futureTransactions: [],
@@ -316,10 +375,23 @@ test("page keeps transient errors visible and hides admin controls for non-admin
   const html = renderCashflowPage({
     cashflow,
     activeTab: "admin",
-    error: "Action failed"
+    error: "Action failed",
+    uiPreferences: { theme: "light", density: "compact", defaultTab: "settings" },
+    versionCheck: { status: "available", latestVersion: "1.0.1", htmlUrl: "https://example.com/release" }
   });
 
   assert.match(html, /data-cashflow-error-banner/);
+  assert.match(html, /data-cashflow-language-select/);
+  assert.match(html, /data-cashflow-ui-preferences[\s\S]*data-cashflow-language-select/);
+  assert.match(html, /cashflow-chip--menu/);
+  assert.match(html, /data-cashflow-ui-preferences/);
+  assert.match(html, /data-cashflow-ui-preference="theme"/);
+  assert.match(html, /value="light" selected/);
+  assert.match(html, /data-cashflow-ui-preference="density"/);
+  assert.match(html, /value="compact" selected/);
+  assert.match(html, /data-cashflow-ui-preference="defaultTab"/);
+  assert.match(html, /data-cashflow-version-status-root/);
+  assert.match(html, /Update v1\.0\.1 available/);
   assert.match(html, /role="tablist"/);
   assert.match(html, /role="tab"/);
   assert.match(html, /aria-selected="true"/);
@@ -531,16 +603,23 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
       holiday_country: "PL",
       minimum_reserve_enabled: 1,
       minimum_reserve_amount: 250,
+      ledger_history_compaction_months: 24,
       future_periods: 11,
       fx_provider: "manual",
       fx_used_currencies: ["EUR"],
       manual_fx_rates: { EUR: 4.2 },
+      notification_channel: "discord",
+      ntfy_auth_token: "tk_example",
+      discord_webhook_url: "https://discord.example.com/api/webhooks/test",
       notification_delivery_time: "08:00"
     },
     availableLocales: [
       { id: "en", label: "English" },
       { id: "pl", label: "Polski" }
     ],
+    session: {
+      capabilities: ["budget:maintain"]
+    },
     recurringIncomes: []
   });
 
@@ -549,9 +628,20 @@ test("settings render uses localized Polish labels and no mojibake", async () =>
   assert.match(html, />Waluta i kurs</);
   assert.match(html, />Strefa czasowa</);
   assert.match(html, />Przenoszenie danych</);
+  assert.match(html, /name="notification_channel"/);
+  assert.match(html, /value="discord" selected/);
+  assert.match(html, /name="discord_webhook_url"/);
+  assert.match(html, /name="ntfy_auth_token" value="tk_example"/);
+  assert.match(html, /Token dostępu ntfy/);
+  assert.match(html, /Godzina sprawdzania księgi i powiadomień/);
   assert.match(html, /name="holiday_country"/);
   assert.match(html, /name="minimum_reserve_enabled"/);
   assert.match(html, /name="minimum_reserve_amount" value="250"/);
+  assert.match(html, /name="ledger_history_compaction_months" value="24"/);
+  assert.match(html, /data-cashflow-compact-ledger-history/);
+  assert.match(html, /cashflow-field-label/);
+  assert.match(html, /aria-label="Pomoc: Waluta księgi"/);
+  assert.match(html, /Waluta księgi jest używana do sald/);
   assert.match(html, /data-cashflow-download-full-export/);
   assert.match(html, /data-cashflow-export-operational-settings/);
   assert.match(html, /data-cashflow-import-full/);
@@ -657,6 +747,34 @@ test("transaction table renders localized labels and ledger-currency equivalents
   assert.match(html, /\(44\.00 PLN\)/);
   assert.match(html, /956\.00 PLN/);
   assertNoMojibake(html);
+
+  const compactHtml = renderTransactionTable([
+    {
+      id: "tx-compact",
+      entityType: "future",
+      date: "2026-06-01",
+      name: "Compact expense",
+      type: "expense",
+      status: "partial",
+      amount: 10,
+      currency: "PLN"
+    }
+  ], "en", {
+    entityType: "future",
+    compactLedgerColumns: true,
+    canEdit: false
+  });
+  assert.match(compactHtml, /cashflow-table--ledger-compact/);
+  assert.match(compactHtml, /<colgroup>[\s\S]*width: 32%/);
+  assert.match(compactHtml, /<colgroup>[\s\S]*width: 12%/);
+  assert.match(compactHtml, /cashflow-row-stack--identity[\s\S]*Compact expense[\s\S]*2026-06-01/);
+  assert.match(compactHtml, /cashflow-row-stack--type[\s\S]*Expense[\s\S]*Partial/);
+  assert.doesNotMatch(compactHtml, /<th>Date<\/th>/);
+  assert.doesNotMatch(compactHtml, /<th>Status<\/th>/);
+  assert.doesNotMatch(compactHtml, /<th>Ledger amount<\/th>/);
+
+  const css = await readFile(new URL("../public/styles/cashflow.css", import.meta.url), "utf8");
+  assert.match(css, /table\.cashflow-table\.cashflow-table--ledger-compact,\s*\.cashflow-group-content table\.cashflow-table--ledger-compact\s*{[^}]*width:\s*100%\s*!important;[^}]*min-width:\s*0\s*!important;[^}]*table-layout:\s*fixed\s*!important;/s);
 });
 
 test("ledger future rows can move to pending from every generated period", async () => {
@@ -796,6 +914,9 @@ test("ledger summaries and targets render the active ledger currency", async () 
 
   assert.match(ledgerHtml, /1,000\.00 USD/);
   assert.match(ledgerHtml, /100\.00 USD/);
+  assert.match(ledgerHtml, /cashflow-help-popover/);
+  assert.match(ledgerHtml, /aria-label="Help: Period start"/);
+  assert.match(ledgerHtml, /The first date in the currently displayed budget period\./);
   assert.match(goalsHtml, /Target in ledger currency/);
   assert.match(goalsHtml, /120\.00 USD/);
   assert.doesNotMatch(goalsHtml, /Target in PLN/);

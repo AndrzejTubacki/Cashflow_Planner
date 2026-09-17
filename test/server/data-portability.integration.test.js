@@ -112,7 +112,10 @@ test("full export omits operational settings by default and includes them by opt
   await harness.api("/api/settings", {
     method: "PUT",
     body: {
+      notification_channel: "discord",
       ntfy_url: "https://ntfy.example.com/cashflow-test",
+      ntfy_auth_token: "tk_export_test",
+      discord_webhook_url: "https://discord.example.com/api/webhooks/export-test",
       auto_backup_enabled: 1,
       backup_interval_minutes: 30,
       notify_income_missing: 0
@@ -123,13 +126,19 @@ test("full export omits operational settings by default and includes them by opt
   const defaultSettings = defaultExport.planning.settings[0];
   assert.equal(defaultExport.operationalSettingsIncluded, false);
   assert.equal(Object.prototype.hasOwnProperty.call(defaultSettings, "ntfy_url"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(defaultSettings, "ntfy_auth_token"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(defaultSettings, "notification_channel"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(defaultSettings, "discord_webhook_url"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(defaultSettings, "auto_backup_enabled"), false);
   assert.equal(Object.prototype.hasOwnProperty.call(defaultSettings, "notify_income_missing"), false);
 
   const optInExport = await harness.api("/api/export/full?includeOperationalSettings=1");
   const optInSettings = optInExport.planning.settings[0];
   assert.equal(optInExport.operationalSettingsIncluded, true);
+  assert.equal(optInSettings.notification_channel, "discord");
   assert.equal(optInSettings.ntfy_url, "https://ntfy.example.com/cashflow-test");
+  assert.equal(optInSettings.ntfy_auth_token, "tk_export_test");
+  assert.equal(optInSettings.discord_webhook_url, "https://discord.example.com/api/webhooks/export-test");
   assert.equal(optInSettings.auto_backup_enabled, 1);
   assert.equal(optInSettings.notify_income_missing, 0);
 }));
@@ -212,7 +221,9 @@ test("full import ignores operational settings by default and restores them by o
   await harness.api("/api/settings", {
     method: "PUT",
     body: {
+      notification_channel: "discord",
       ntfy_url: "https://ntfy.example.com/exported",
+      discord_webhook_url: "https://discord.example.com/api/webhooks/exported",
       auto_backup_enabled: 1,
       notify_income_missing: 0
     }
@@ -222,7 +233,9 @@ test("full import ignores operational settings by default and restores them by o
   await harness.api("/api/settings", {
     method: "PUT",
     body: {
+      notification_channel: "ntfy",
       ntfy_url: "",
+      discord_webhook_url: "",
       auto_backup_enabled: 0,
       notify_income_missing: 1
     }
@@ -236,13 +249,17 @@ test("full import ignores operational settings by default and restores them by o
     }
   });
   assert.equal(defaultImport.settings.ntfy_url, null);
+  assert.equal(defaultImport.settings.notification_channel, "ntfy");
+  assert.equal(defaultImport.settings.discord_webhook_url, null);
   assert.equal(defaultImport.settings.auto_backup_enabled, 0);
   assert.equal(defaultImport.settings.notify_income_missing, 1);
 
   await harness.api("/api/settings", {
     method: "PUT",
     body: {
+      notification_channel: "ntfy",
       ntfy_url: "",
+      discord_webhook_url: "",
       auto_backup_enabled: 0,
       notify_income_missing: 1
     }
@@ -256,7 +273,9 @@ test("full import ignores operational settings by default and restores them by o
       includeOperationalSettings: true
     }
   });
+  assert.equal(optInImport.settings.notification_channel, "discord");
   assert.equal(optInImport.settings.ntfy_url, "https://ntfy.example.com/exported");
+  assert.equal(optInImport.settings.discord_webhook_url, "https://discord.example.com/api/webhooks/exported");
   assert.equal(optInImport.settings.auto_backup_enabled, 1);
   assert.equal(optInImport.settings.notify_income_missing, 0);
 }));
@@ -264,14 +283,18 @@ test("full import ignores operational settings by default and restores them by o
 test("default replace and sample imports preserve target operational settings", async () => withHarness(async harness => {
   const exported = await harness.api("/api/export/full?includeOperationalSettings=1");
   exported.planning.settings[0].future_periods = 3;
+  exported.planning.settings[0].notification_channel = "discord";
   exported.planning.settings[0].ntfy_url = "https://ntfy.example.com/source";
+  exported.planning.settings[0].discord_webhook_url = "https://discord.example.com/api/webhooks/source";
   exported.planning.settings[0].auto_backup_enabled = 0;
   exported.planning.settings[0].backup_retention_count = 3;
 
   await harness.api("/api/settings", {
     method: "PUT",
     body: {
+      notification_channel: "ntfy",
       ntfy_url: "https://ntfy.example.com/target",
+      discord_webhook_url: "https://discord.example.com/api/webhooks/target",
       auto_backup_enabled: 1,
       backup_interval_minutes: 120,
       backup_retention_count: 7,
@@ -356,7 +379,9 @@ test("full replace import validates functional settings before creating a backup
     ["backup_interval_minutes", 0],
     ["backup_retention_count", 0],
     ["backup_location", "relative/path"],
+    ["notification_channel", "sms"],
     ["ntfy_url", "ftp://example.com/topic"],
+    ["discord_webhook_url", "ftp://example.com/webhook"],
     ["notification_delivery_time", "25:00"],
     ["notify_income_missing", "yes"],
     ["ntfy_priority_income_missing", "extreme"],
@@ -409,6 +434,7 @@ test("full import accepts older exports missing recent settings fields", async (
   assert.equal(imported.settings.holiday_country, "PL");
   assert.equal(imported.settings.minimum_reserve_enabled, 0);
   assert.equal(imported.settings.minimum_reserve_amount, 0);
+  assert.equal(imported.settings.ledger_history_compaction_months, 0);
 }));
 
 test("full import accepts older rows that omit current schema-default fields", async () => withHarness(async harness => {

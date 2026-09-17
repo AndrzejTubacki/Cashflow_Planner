@@ -12,7 +12,14 @@ const publishedRouteFiles = [
   path.join(repoRoot, "server.mjs"),
   path.join(repoRoot, "src/server/cashflow-routes.js")
 ];
-const openApiPath = path.join(repoRoot, "docs/openapi.yaml");
+// dev/ holds the technical/developer docs (API reference, OpenAPI spec,
+// architecture notes) and is gitignored — private working reference, not
+// part of the published repository. These contract checks only run when it
+// exists locally (skip gracefully on a fresh checkout that never had it).
+const devDocsDir = path.join(repoRoot, "dev");
+const devDocsPresent = fs.existsSync(devDocsDir);
+const devDocsSkipReason = "dev/ is gitignored and not present in this checkout";
+const openApiPath = path.join(devDocsDir, "openapi.yaml");
 const privateRoutes = [
   "POST /api/restart",
   "POST /api/local/tests/run",
@@ -71,7 +78,7 @@ function openApiOperations(source) {
   return operations;
 }
 
-test("OpenAPI covers every published route with scope metadata", () => {
+test("OpenAPI covers every published route with scope metadata", { skip: devDocsPresent ? false : devDocsSkipReason }, () => {
   const published = expressRoutes(publishedRouteFiles);
   const source = fs.readFileSync(openApiPath, "utf8");
   const operations = openApiOperations(source);
@@ -89,7 +96,7 @@ test("OpenAPI covers every published route with scope metadata", () => {
   }
 });
 
-test("OpenAPI version follows package.json", () => {
+test("OpenAPI version follows package.json", { skip: devDocsPresent ? false : devDocsSkipReason }, () => {
   const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   const source = fs.readFileSync(openApiPath, "utf8");
   const version = source.match(/^  version: ([^\s]+)$/m)?.[1];
@@ -97,8 +104,8 @@ test("OpenAPI version follows package.json", () => {
   assert.equal(version, packageJson.version);
 });
 
-test("private deployment routes are documented outside the published contract", () => {
-  const apiGuide = fs.readFileSync(path.join(repoRoot, "docs/api.md"), "utf8");
+test("private deployment routes are documented outside the published contract", { skip: devDocsPresent ? false : devDocsSkipReason }, () => {
+  const apiGuide = fs.readFileSync(path.join(devDocsDir, "api.md"), "utf8");
 
   for (const route of privateRoutes) {
     assert.match(apiGuide, new RegExp(route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
@@ -110,7 +117,14 @@ test("documentation links resolve", () => {
     path.join(repoRoot, "README.md"),
     ...fs.readdirSync(path.join(repoRoot, "docs"))
       .filter(name => name.endsWith(".md") && !name.includes("sync-conflict"))
-      .map(name => path.join(repoRoot, "docs", name))
+      .map(name => path.join(repoRoot, "docs", name)),
+    // dev/ is gitignored and may not exist in every checkout, but check its
+    // own internal links too whenever it is present locally.
+    ...(devDocsPresent
+      ? fs.readdirSync(devDocsDir)
+        .filter(name => name.endsWith(".md") && !name.includes("sync-conflict"))
+        .map(name => path.join(devDocsDir, name))
+      : [])
   ];
   const missing = [];
 

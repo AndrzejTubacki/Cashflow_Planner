@@ -1,16 +1,30 @@
 {
   "name": "cashflow",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node server.mjs",
     "test": "npm run test:node && npm run test:browser",
     "test:node": "node --test \"test/**/*.test.js\" \"test/**/*.integration.test.js\"",
+    "test:postgres": "node scripts/run-postgres-tests.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
     "smoke": "node scripts/smoke.mjs",
     "smoke:browser": "npm run test:browser",
     "rollout:check": "node scripts/rollout-check.mjs",
+    "db:audit": "node scripts/storage-migration-audit.mjs",
+    "db:snapshot": "node scripts/create-sqlite-migration-snapshot.mjs",
+    "db:global:export": "node scripts/export-sqlite-global-metadata.mjs",
+    "db:budget:export": "node scripts/export-sqlite-budget-storage.mjs",
+    "db:global:import-postgres": "node scripts/import-global-metadata-to-postgres.mjs",
+    "db:budget:import-postgres": "node scripts/import-budget-storage-to-postgres.mjs",
+    "db:migrate:sqlite-to-postgres": "node scripts/migrate-sqlite-to-postgres.mjs",
+    "db:postgres:verify": "node scripts/verify-postgres-migration.mjs",
+    "db:postgres:export": "node scripts/export-postgres-storage.mjs",
+    "db:postgres:import-sqlite": "node scripts/import-postgres-storage-to-sqlite.mjs",
+    "db:migrate:postgres-to-sqlite": "node scripts/migrate-postgres-to-sqlite.mjs",
+    "db:sqlite:verify": "node scripts/verify-sqlite-migration.mjs",
+    "db:postgres:schema": "node scripts/print-postgres-schema.mjs",
     "docs:screenshots": "node scripts/generate-readme-screenshots.mjs",
     "operator:grant-admin": "node scripts/operator-admin.mjs"
   },
@@ -21,7 +35,8 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
-    "openid-client": "^6.8.4"
+    "openid-client": "^6.8.4",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "playwright": "^1.60.0"
