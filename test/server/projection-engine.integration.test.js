@@ -1682,3 +1682,293 @@ test("regenerateProjectionsAsync produces the same funding outcome as the SQLite
   assert.equal(asyncSnapshot.available_balance, syncSnapshot.available_balance);
   assert.equal(asyncSnapshot.warning_count, syncSnapshot.warning_count);
 }));
+
+test("regenerateProjections reserves surplus from an earlier period for a later period's necessity shortfall, via real SQLite regeneration", async () => withHarness(async harness => {
+  await configureManualFx(harness, { future_periods: 3, fx_buffer_percent: 0 });
+
+  await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      period_setting: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      prediction_strategy: "fixed",
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const periods = [...new Set(snapshot.futureTransactions.map(tx => tx.period))].sort();
+  const [periodOneKey, periodTwoKey] = periods;
+
+  // A goal due inside period one gives that period local demand, so its
+  // surplus is retained rather than auto-carried forward by the
+  // pre-existing carrySurplusToNextPeriod mechanism (see the unit tests in
+  // projection-engine-service.test.js for why that distinction matters).
+  await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Gadget",
+      currency: "PLN",
+      amount: 300,
+      due_date: periodOneKey,
+      priority: 1,
+      active: 1
+    }
+  });
+
+  // Due inside period two and larger than period two can afford on its own
+  // (1000 income - 700 rent = 300 < 500), forcing a cross-period reserve
+  // claim against period one's retained surplus.
+  await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Insurance",
+      currency: "PLN",
+      amount: 500,
+      type: "expense",
+      date: periodTwoKey
+    }
+  });
+
+  snapshot = await harness.api("/api");
+
+  const reserveOut = snapshot.futureTransactions.find(tx =>
+    String(tx.occurrence_key || "").startsWith(`reserve_transfer:${periodOneKey}:${periodTwoKey}:out`)
+  );
+  const reserveIn = snapshot.futureTransactions.find(tx =>
+    String(tx.occurrence_key || "").startsWith(`reserve_transfer:${periodOneKey}:${periodTwoKey}:in`)
+  );
+
+  assert.ok(reserveOut, "expected a synthetic reserve-transfer expense in the source period");
+  assert.ok(reserveIn, "expected a synthetic reserve-transfer income in the target period");
+  assert.equal(reserveOut.period, periodOneKey);
+  assert.equal(reserveIn.period, periodTwoKey);
+  assert.equal(reserveOut.type, "expense");
+  assert.equal(reserveIn.type, "income");
+  assert.equal(reserveOut.ledger_amount, 200);
+  assert.equal(reserveIn.ledger_amount, 200);
+
+  const insuranceRow = snapshot.futureTransactions.find(tx => tx.name === "Insurance");
+  assert.equal(insuranceRow.status, "funded");
+  assert.equal(insuranceRow.funded_amount, 500);
+
+  const rentRows = snapshot.futureTransactions.filter(tx => tx.name === "Rent");
+  assert.ok(rentRows.every(row => row.status === "funded"));
+
+  const goalRow = snapshot.goals.find(g => g.name === "Gadget");
+  // Total income across both periods (2000) minus total necessities (Rent
+  // x2 = 1400, Insurance 500) leaves exactly 100 for the goal.
+  assert.equal(goalRow.future_allocated_ledger, 100);
+}));
+
+async function buildReserveClaimScenario(harness) {
+  await configureManualFx(harness, { future_periods: 3, fx_buffer_percent: 0 });
+
+  await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      period_setting: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      prediction_strategy: "fixed",
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1
+    }
+  });
+
+  let snapshot = await harness.api("/api");
+  const periods = [...new Set(snapshot.futureTransactions.map(tx => tx.period))].sort();
+  const [periodOneKey, periodTwoKey] = periods;
+
+  await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Gadget",
+      currency: "PLN",
+      amount: 300,
+      due_date: periodOneKey,
+      priority: 1,
+      active: 1
+    }
+  });
+
+  await harness.api("/api/one-off", {
+    method: "POST",
+    body: {
+      name: "Insurance",
+      currency: "PLN",
+      amount: 500,
+      type: "expense",
+      date: periodTwoKey
+    }
+  });
+
+  snapshot = await harness.api("/api");
+
+  const reserveOut = snapshot.futureTransactions.find(tx =>
+    String(tx.occurrence_key || "").startsWith(`reserve_transfer:${periodOneKey}:${periodTwoKey}:out`)
+  );
+  const reserveIn = snapshot.futureTransactions.find(tx =>
+    String(tx.occurrence_key || "").startsWith(`reserve_transfer:${periodOneKey}:${periodTwoKey}:in`)
+  );
+
+  return { periodOneKey, periodTwoKey, reserveIn, reserveOut, snapshot };
+}
+
+test("a reserve-transfer expense can be manually moved to pending, same as any other future row", async () => withHarness(async harness => {
+  const { reserveOut } = await buildReserveClaimScenario(harness);
+  assert.ok(reserveOut, "expected a synthetic reserve-transfer expense in the source period");
+
+  const moved = await harness.api(`/api/future/${encodeURIComponent(reserveOut.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: reserveOut.occurrence_key }
+  });
+
+  const pending = moved.pendingTransactions.find(tx => tx.occurrence_key === reserveOut.occurrence_key);
+  assert.ok(pending, "expected the reserve-transfer expense to appear as a pending row");
+  assert.equal(pending.type, "expense");
+  assert.equal(pending.name, reserveOut.name);
+  assert.equal(pending.ledger_amount, 200);
+  assert.equal(pending.pending_origin, "manual");
+
+  assert.equal(
+    moved.futureTransactions.some(tx => tx.occurrence_key === reserveOut.occurrence_key),
+    false,
+    "the future row should be gone once it's moved to pending"
+  );
+}));
+
+test("a manually pending-then-confirmed reserve-transfer expense is not regenerated as a duplicate", async () => withHarness(async harness => {
+  const { reserveOut } = await buildReserveClaimScenario(harness);
+  assert.ok(reserveOut);
+
+  // Confirming a pending expense requires real cash already in the ledger
+  // (confirming can't be the thing that first makes the balance negative),
+  // so seed enough confirmed income to cover the reserved amount.
+  await seedConfirmedIncome(harness, 500);
+
+  const moved = await harness.api(`/api/future/${encodeURIComponent(reserveOut.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: reserveOut.occurrence_key }
+  });
+  const pending = moved.pendingTransactions.find(tx => tx.occurrence_key === reserveOut.occurrence_key);
+  assert.ok(pending);
+
+  await harness.api(`/api/pending/${encodeURIComponent(pending.id)}/confirm`, {
+    method: "POST",
+    body: {
+      amount: pending.amount,
+      confirmed_date: pending.date
+    }
+  });
+
+  // Force a full regeneration, the same way the daily job would, and make
+  // sure the now-confirmed reserve transfer isn't recreated as a future or
+  // pending row alongside the real ledger entry.
+  await harness.api("/api/run-jobs", { method: "POST", body: {} });
+  const snapshot = await harness.api("/api");
+
+  const matchingRows = [
+    ...snapshot.futureTransactions,
+    ...snapshot.pendingTransactions,
+    ...snapshot.confirmedTransactions
+  ].filter(tx => tx.occurrence_key === reserveOut.occurrence_key);
+
+  assert.equal(matchingRows.length, 1, "the reserve-transfer expense should exist exactly once, as a confirmed row");
+  assert.equal(matchingRows[0].type, "expense");
+
+  // Insurance (the one-off the reserve claim exists to protect) should
+  // still be fully funded now that the reserved money is real, confirmed
+  // spend rather than a still-projected placeholder.
+  const insuranceRow = snapshot.futureTransactions.find(tx => tx.name === "Insurance");
+  assert.equal(insuranceRow.status, "funded");
+  assert.equal(insuranceRow.funded_amount, 500);
+}));
+
+test("a reserve-transfer expense already pending keeps its claim amount fixed across a later regeneration, instead of shrinking", async () => withHarness(async harness => {
+  const { periodOneKey, periodTwoKey, reserveOut } = await buildReserveClaimScenario(harness);
+  assert.ok(reserveOut);
+
+  // Move only the expense (source-period) side to pending, deliberately
+  // leaving the income (target-period) side untouched as a future row —
+  // this is exactly the asymmetric state a user creates by manually
+  // pressing "to pending" on one half of a reserve transfer. A regeneration
+  // now has to re-derive the target period's deficit and the source
+  // period's remaining surplus from scratch; without locking the claim, the
+  // already-pending -200 gets subtracted from May once (correctly, for its
+  // own balance) but *also* shrinks the freshly re-computed claim itself
+  // down to whatever's left (100), leaving June short.
+  await harness.api(`/api/future/${encodeURIComponent(reserveOut.id)}/move-to-pending`, {
+    method: "POST",
+    body: { occurrenceKey: reserveOut.occurrence_key }
+  });
+
+  await harness.api("/api/run-jobs", { method: "POST", body: {} });
+  const snapshot = await harness.api("/api");
+
+  const pendingOut = snapshot.pendingTransactions.find(tx => tx.occurrence_key === reserveOut.occurrence_key);
+  assert.ok(pendingOut, "the pending reserve-transfer expense should still be there, untouched");
+  assert.equal(pendingOut.ledger_amount, 200);
+  assert.equal(
+    snapshot.futureTransactions.some(tx => tx.occurrence_key === reserveOut.occurrence_key),
+    false,
+    "the pending expense should not be regenerated as a duplicate future row"
+  );
+
+  const reserveIn = snapshot.futureTransactions.find(tx =>
+    String(tx.occurrence_key || "").startsWith(`reserve_transfer:${periodOneKey}:${periodTwoKey}:in`)
+  );
+  assert.ok(reserveIn, "the still-untouched income side should be (re)generated to match the locked expense");
+  assert.equal(reserveIn.ledger_amount, 200, "the claim amount must stay fixed at what's already pending, not shrink");
+
+  const insuranceRow = snapshot.futureTransactions.find(tx => tx.name === "Insurance");
+  assert.equal(insuranceRow.status, "funded");
+  assert.equal(insuranceRow.funded_amount, 500);
+
+  const goalRow = snapshot.goals.find(g => g.name === "Gadget");
+  assert.equal(goalRow.future_allocated_ledger, 100);
+}));

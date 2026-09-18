@@ -224,7 +224,18 @@ export function calculateNextDate(anchor, year, month) {
 
   let date;
 
-  if (anchor.anchor_type === "day_of_month") {
+  if (anchor.anchor_income_id && anchor.anchor_income) {
+    // Income-anchored: ride the referenced income's own occurrence date for
+    // this cycle instead of a fixed day-of-month/month-end. Falls through
+    // to the normal anchor_type branches below when anchor_income wasn't
+    // resolved by the caller (e.g. a dangling reference), so a missing
+    // income never silently drops the expense.
+    const incomeDate = calculateNextDate(anchor.anchor_income, year, month);
+    if (!incomeDate) return null;
+
+    date = new Date(`${incomeDate}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + (Number(anchor.anchor_offset_days) || 0));
+  } else if (anchor.anchor_type === "day_of_month") {
     const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
     const day = Math.min(Number(anchor.anchor_day_of_month) || 1, lastDay);
     date = new Date(Date.UTC(year, month - 1, day));
@@ -233,6 +244,9 @@ export function calculateNextDate(anchor, year, month) {
     date.setUTCDate(date.getUTCDate() + (Number(anchor.anchor_offset_days) || 0));
   }
 
+  // Business-day adjustment always uses the expense's own settings, even
+  // when income-anchored — the referenced income already applied its own
+  // adjustment when landing on its date.
   const adjustment = anchor.anchor_business_day_adjustment || "none";
   const country = anchor.anchor_holiday_country || "PL";
 

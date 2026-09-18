@@ -575,6 +575,210 @@ test("deleting recurring income preserves confirmed historical source IDs", asyn
   assert.equal(history.source_recurring_income_id, income.id);
 }));
 
+test("a recurring expense anchored to a recurring income lands N days after each of its occurrences", async () => withHarness(async harness => {
+  await configure(harness);
+
+  const salary = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      period_setting: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      repeat_every_months: 1
+    }
+  });
+
+  const rent = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_income_id: salary.id,
+      anchor_offset_days: 1,
+      repeat_every_months: 1
+    }
+  });
+  assert.equal(rent.anchor_income_id, salary.id);
+
+  const snapshot = await harness.api("/api");
+  const salaryDates = snapshot.futureTransactions
+    .filter(tx => tx.source_recurring_income_id === salary.id)
+    .map(tx => tx.date)
+    .sort();
+  const rentDates = snapshot.futureTransactions
+    .filter(tx => tx.source_recurring_expense_id === rent.id)
+    .map(tx => tx.date)
+    .sort();
+
+  assert.ok(salaryDates.length > 0);
+  assert.deepEqual(
+    rentDates,
+    salaryDates.map(d => {
+      const next = new Date(`${d}T00:00:00Z`);
+      next.setUTCDate(next.getUTCDate() + 1);
+      return next.toISOString().slice(0, 10);
+    })
+  );
+}));
+
+test("deleting a recurring income that anchors other expenses is rejected without a reassignment choice", async () => withHarness(async harness => {
+  await configure(harness);
+
+  const salary = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      repeat_every_months: 1
+    }
+  });
+
+  const rent = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_income_id: salary.id,
+      anchor_offset_days: 1,
+      repeat_every_months: 1
+    }
+  });
+
+  const rejected = await harness.request(`/api/recurring-incomes/${encodeURIComponent(salary.id)}`, {
+    method: "DELETE"
+  });
+  assert.equal(rejected.response.status, 409);
+  assert.deepEqual(rejected.body.details?.anchorDependents, [{ id: rent.id, name: "Rent" }]);
+
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.recurringIncomes.some(row => row.id === salary.id), true, "delete should not have gone through");
+}));
+
+test("deleting a recurring income can reassign its anchored expenses to a different income", async () => withHarness(async harness => {
+  await configure(harness);
+
+  const salary = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      repeat_every_months: 1
+    }
+  });
+  const bonus = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Bonus",
+      currency: "PLN",
+      amount: 200,
+      prediction_strategy: "fixed",
+      active: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 5,
+      repeat_every_months: 1
+    }
+  });
+
+  const rent = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_income_id: salary.id,
+      anchor_offset_days: 1,
+      repeat_every_months: 1
+    }
+  });
+
+  const deleted = await harness.request(`/api/recurring-incomes/${encodeURIComponent(salary.id)}`, {
+    method: "DELETE",
+    body: { reassignAnchorsToIncomeId: bonus.id }
+  });
+  assert.equal(deleted.response.status, 200);
+
+  const snapshot = await harness.api("/api");
+  const rentAfter = snapshot.recurringExpenses.find(row => row.id === rent.id);
+  assert.equal(rentAfter.anchor_income_id, bonus.id);
+
+  const rentDates = snapshot.futureTransactions
+    .filter(tx => tx.source_recurring_expense_id === rent.id)
+    .map(tx => tx.date);
+  assert.ok(rentDates.length > 0);
+  assert.ok(rentDates.every(d => Number(d.slice(8, 10)) === 6), `expected every Rent occurrence on day 6 (Bonus day 5 + 1), got ${rentDates}`);
+}));
+
+test("deleting a recurring income can fall back its anchored expenses to a fixed day-of-month", async () => withHarness(async harness => {
+  await configure(harness);
+
+  const salary = await harness.api("/api/recurring-incomes", {
+    method: "POST",
+    body: {
+      name: "Salary",
+      currency: "PLN",
+      amount: 1000,
+      prediction_strategy: "fixed",
+      active: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 25,
+      repeat_every_months: 1
+    }
+  });
+
+  const rent = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_income_id: salary.id,
+      anchor_offset_days: 1,
+      repeat_every_months: 1
+    }
+  });
+
+  const deleted = await harness.request(`/api/recurring-incomes/${encodeURIComponent(salary.id)}`, {
+    method: "DELETE",
+    body: { fallbackAnchorsToFixedDay: true }
+  });
+  assert.equal(deleted.response.status, 200);
+
+  const snapshot = await harness.api("/api");
+  const rentAfter = snapshot.recurringExpenses.find(row => row.id === rent.id);
+  assert.equal(rentAfter.anchor_income_id, null);
+  assert.equal(rentAfter.anchor_type, "day_of_month");
+  assert.equal(rentAfter.anchor_day_of_month, 26);
+}));
+
 test("failed confirmed one-off deletion restores planning source and ledger attribution", async () => {
   let failDelete = false;
   await withHarness(async harness => {

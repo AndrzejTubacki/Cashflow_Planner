@@ -782,6 +782,22 @@ export function applyPlanningMigrations(db, {
       }
       db.pragma("user_version = 19");
     }
+
+    if (currentVersion < 20) {
+      beforeStep(20, db);
+      // Lets a recurring expense anchor to a recurring income's own
+      // occurrence date instead of a fixed day-of-month/month-end anchor
+      // (e.g. "Rent, 1 day after Salary lands"). Deliberately a plain
+      // nullable column rather than a new anchor_type enum value — the
+      // CHECK(anchor_type IN (...)) constraint would need a full table
+      // rebuild to extend, while this only needs the existing
+      // anchor_offset_days (reused as "days after the income") and
+      // anchor_business_day_adjustment/anchor_holiday_country columns.
+      // When set, it takes precedence over anchor_type/anchor_day_of_month
+      // in calculateNextDate() — see cashflow-date-utils.js.
+      addColumnIfMissing("recurring_expenses", "anchor_income_id", "anchor_income_id TEXT");
+      db.pragma("user_version = 20");
+    }
   })();
 
   if (tableExists("future_transactions")) {

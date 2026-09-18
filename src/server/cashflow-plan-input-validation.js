@@ -63,6 +63,19 @@ function validateRecurring(next, kind) {
   if (kind === "recurring-expense") {
     if (hasOwn(next, "necessary")) next.necessary = requireBoolean(next.necessary, "necessary");
     normalizeIfPresent(next, "priority", (value, field) => requireNumber(value, field, { min: 1, integer: true }));
+    normalizeIfPresent(next, "anchor_income_id", value => (value === null || value === "" ? null : String(value).trim()));
+
+    // Anchoring to an income overrides anchor_type/anchor_day_of_month for
+    // date calculation (see calculateNextDate()), but those columns stay
+    // NOT NULL / CHECK-constrained in the DB — default them to a harmless
+    // placeholder so callers that only send anchor_income_id still produce
+    // a valid row.
+    if (next.anchor_income_id && !hasOwn(next, "anchor_type")) {
+      next.anchor_type = "day_of_month";
+    }
+    if (next.anchor_income_id && next.anchor_type === "day_of_month" && !hasOwn(next, "anchor_day_of_month")) {
+      next.anchor_day_of_month = 1;
+    }
   } else if (hasOwn(next, "period_setting")) {
     next.period_setting = requireBoolean(next.period_setting, "period_setting");
   }

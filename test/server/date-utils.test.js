@@ -110,6 +110,91 @@ test("business-day adjustment can move to next business day over weekends and ho
   );
 });
 
+test("income-anchored schedules land N days after the referenced income's own date", () => {
+  const salary = { anchor_type: "day_of_month", anchor_day_of_month: 25 };
+
+  assert.equal(
+    calculateNextDate({
+      anchor_income_id: "inc-1",
+      anchor_income: salary,
+      anchor_offset_days: 1
+    }, 2026, 5),
+    "2026-05-26"
+  );
+
+  assert.equal(
+    calculateNextDate({
+      anchor_income_id: "inc-1",
+      anchor_income: salary,
+      anchor_offset_days: 0
+    }, 2026, 5),
+    "2026-05-25"
+  );
+});
+
+test("income-anchored schedules can cross a month boundary via their own offset", () => {
+  const monthEndIncome = { anchor_type: "month_end", anchor_offset_days: 0 };
+
+  assert.equal(
+    calculateNextDate({
+      anchor_income_id: "inc-1",
+      anchor_income: monthEndIncome,
+      anchor_offset_days: 3
+    }, 2026, 4),
+    "2026-05-03"
+  );
+});
+
+test("income-anchored schedules apply the dependent's own business-day adjustment, not the income's", () => {
+  const salary = {
+    anchor_type: "day_of_month",
+    anchor_day_of_month: 1,
+    anchor_business_day_adjustment: "none"
+  };
+
+  assert.equal(
+    calculateNextDate({
+      anchor_income_id: "inc-1",
+      anchor_income: salary,
+      anchor_offset_days: 0,
+      anchor_business_day_adjustment: "next",
+      anchor_holiday_country: "PL"
+    }, 2026, 5),
+    "2026-05-04"
+  );
+});
+
+test("income-anchored schedules with an unresolved anchor_income fall back to their own anchor_type", () => {
+  // A dangling anchor_income_id (caller didn't attach anchor_income, e.g. a
+  // stale reference) must never silently drop the expense.
+  assert.equal(
+    calculateNextDate({
+      anchor_income_id: "inc-missing",
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 10
+    }, 2026, 5),
+    "2026-05-10"
+  );
+});
+
+test("income-anchored schedules return null for a month the referenced income doesn't occur in", () => {
+  const quarterlyIncome = {
+    anchor_type: "day_of_month",
+    anchor_day_of_month: 1,
+    repeat_every_months: 3,
+    start_month_year: "2026-01"
+  };
+
+  assert.equal(
+    calculateNextDate({
+      anchor_income_id: "inc-1",
+      anchor_income: quarterlyIncome,
+      anchor_offset_days: 2
+    }, 2026, 2),
+    null
+  );
+});
+
 test("PL holiday calendar includes fixed and Easter-derived holidays", () => {
   const holidays = holidaySetForCountry("PL", 2026);
 

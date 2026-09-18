@@ -203,8 +203,12 @@ export function buildProjectionInputRowsFromPlanningTables({
     return planned ? { ...row, priority: planned.goal_priority } : null;
   };
 
+  const incomeByIdForAnchoring = new Map((tables.recurring_incomes || []).map(row => [row.id, row]));
   const recurringExpenses = (tables.recurring_expenses || [])
     .filter(row => isActiveValue(row.active))
+    .map(row => row.anchor_income_id
+      ? { ...row, anchor_income: incomeByIdForAnchoring.get(row.anchor_income_id) || null }
+      : row)
     .map(withOperatingPriority)
     .filter(Boolean)
     .sort(compareByFields([
@@ -453,6 +457,147 @@ export function computeGoalAndFlexTargetLedgerAmounts({ goals = [], flexes = [],
   return { goalTargetLedger, flexTargetLedger };
 }
 
+const RESERVE_TRANSFER_OCCURRENCE_KEY_PATTERN = /^reserve_transfer:(.+):(.+):(in|out)$/;
+
+/**
+ * Scans pending/confirmed rows for reserve-transfer occurrence keys
+ * (`reserve_transfer:{source}:{target}:in`/`:out`) and returns one entry per
+ * distinct source/target pair already committed on at least one side. Once
+ * either the expense or the income half of a reserve transfer is pending or
+ * confirmed, that half is a real transaction the engine can no longer
+ * silently resize or delete — computeReserveClaims uses this to treat the
+ * pair's amount as fixed instead of re-deriving it from scratch every
+ * regeneration (which would shrink, grow, or duplicate it — see the
+ * "locked" reserve-claim tests in projection-engine-service.test.js for the
+ * failure this prevents).
+ */
+export function findLockedReserveClaims(rows = []) {
+  const bySourceAndTarget = new Map();
+
+  for (const row of rows || []) {
+    const match = RESERVE_TRANSFER_OCCURRENCE_KEY_PATTERN.exec(String(row?.occurrence_key || ""));
+    if (!match) continue;
+
+    const [, sourcePeriodKey, targetPeriodKey, lockedSide] = match;
+    const amountLedger = roundMoneyAmount(row.ledger_amount);
+    if (!(amountLedger > 0)) continue;
+
+    const pairKey = `${sourcePeriodKey}:${targetPeriodKey}`;
+    // If both halves are already committed, either one's amount is
+    // authoritative (the second was generated to match the first) — keep
+    // whichever is found first.
+    if (bySourceAndTarget.has(pairKey)) continue;
+
+    bySourceAndTarget.set(pairKey, { sourcePeriodKey, targetPeriodKey, amountLedger, lockedSide });
+  }
+
+  return [...bySourceAndTarget.values()];
+}
+
+/**
+ * Turns a discoveryOnly computeProjectionPlan() result into a set of
+ * period-to-period reserve claims: how much of an earlier period's retained
+ * surplus (available after its own necessities, but withheld from carrying
+ * forward because hasLocalLowerPriorityDemand saw local goal/flex/
+ * discretionary demand) should instead go toward a later period's necessity
+ * shortfall.
+ *
+ * Deficits are resolved in chronological order, nearest-prior-period-first,
+ * spilling to the next-nearest prior period if one period's surplus isn't
+ * enough — never touching a period's surplus more than once across multiple
+ * deficits (remainingByKey tracks what's left as claims are made). A deficit
+ * that can't be fully covered even after exhausting every earlier period's
+ * surplus is left partially or fully unclaimed — that's a genuine shortfall,
+ * same as today, not something this function papers over.
+ *
+ * `lockedClaims` (from findLockedReserveClaims) are already-committed
+ * source/target pairs: their amount is emitted as-is, never recomputed, and
+ * they adjust the inputs to the free-claim search below so it doesn't
+ * double-count money a locked claim already accounts for — a locked "out"
+ * reduces the target's remaining deficit (the income side just hasn't
+ * landed yet, but it will, this pass), and a locked "in" reduces the
+ * source's remaining spendable surplus (the expense side hasn't left yet,
+ * but it will). A source/target pair that already has a locked claim is
+ * also excluded from the free-claim search for that same pair, since its
+ * occurrence key — and therefore its amount — can't be changed once either
+ * half exists as a real transaction; any additional shortfall has to come
+ * from a different, earlier period instead.
+ *
+ * Deliberately shared between the SQLite and Postgres engines (see the
+ * "differs from SQLite" comment on regenerateProjections for the one place
+ * that isn't shared yet) so the claiming rule can't drift between backends.
+ */
+export function computeReserveClaims({
+  periods = [],
+  periodsAvailable = [],
+  deficitsByPeriod = new Map(),
+  lockedClaims = []
+}) {
+  const claims = [];
+  const periodIndexByKey = new Map(periods.map((p, i) => [p.key, i]));
+  const availableByKey = new Map(periodsAvailable.map(p => [p.key, p.available]));
+  const adjustedDeficitByKey = new Map(deficitsByPeriod);
+  const lockedPairKeys = new Set();
+
+  for (const locked of lockedClaims) {
+    if (!(locked.amountLedger > 0)) continue;
+
+    lockedPairKeys.add(`${locked.sourcePeriodKey}:${locked.targetPeriodKey}`);
+    claims.push({
+      sourcePeriodKey: locked.sourcePeriodKey,
+      targetPeriodKey: locked.targetPeriodKey,
+      amountLedger: locked.amountLedger
+    });
+
+    if (locked.lockedSide === "out") {
+      adjustedDeficitByKey.set(
+        locked.targetPeriodKey,
+        Math.max(0, subtractMoneyAmounts(adjustedDeficitByKey.get(locked.targetPeriodKey) || 0, locked.amountLedger))
+      );
+    } else if (locked.lockedSide === "in") {
+      availableByKey.set(
+        locked.sourcePeriodKey,
+        Math.max(0, subtractMoneyAmounts(availableByKey.get(locked.sourcePeriodKey) || 0, locked.amountLedger))
+      );
+    }
+  }
+
+  if (!adjustedDeficitByKey.size) return claims;
+
+  const remainingByKey = new Map(
+    periods.map(p => [p.key, Math.max(0, roundMoneyAmount(availableByKey.get(p.key) || 0))])
+  );
+
+  const deficitEntries = [...adjustedDeficitByKey.entries()]
+    .map(([key, amount]) => ({ key, amount: roundMoneyAmount(amount), index: periodIndexByKey.get(key) }))
+    .filter(entry => entry.index !== undefined && entry.amount > 0.0001)
+    .sort((a, b) => a.index - b.index);
+
+  for (const deficit of deficitEntries) {
+    let stillNeeded = deficit.amount;
+
+    for (let sourceIndex = deficit.index - 1; sourceIndex >= 0 && stillNeeded > 0.0001; sourceIndex -= 1) {
+      const sourceKey = periods[sourceIndex].key;
+      if (lockedPairKeys.has(`${sourceKey}:${deficit.key}`)) continue;
+
+      const remaining = remainingByKey.get(sourceKey) || 0;
+      if (remaining <= 0.0001) continue;
+
+      const claimed = roundMoneyAmount(Math.min(remaining, stillNeeded));
+      remainingByKey.set(sourceKey, subtractMoneyAmounts(remaining, claimed));
+      stillNeeded = subtractMoneyAmounts(stillNeeded, claimed);
+
+      claims.push({
+        sourcePeriodKey: sourceKey,
+        targetPeriodKey: deficit.key,
+        amountLedger: claimed
+      });
+    }
+  }
+
+  return claims;
+}
+
 function toOriginalAmount(ledgerAmount, bufferedRate) {
   return roundMoneyAmount(Number(ledgerAmount || 0) / Number(bufferedRate || 1));
 }
@@ -475,6 +620,7 @@ function toOriginalAmount(ledgerAmount, bufferedRate) {
 export function computeProjectionPlan({
   confirmedRowsAfterToday = [],
   convert,
+  discoveryOnly = false,
   flexes = [],
   flexTargetLedger,
   fundingState,
@@ -492,6 +638,7 @@ export function computeProjectionPlan({
   periods = [],
   predictionRows = [],
   previousSnapshot = null,
+  reserveClaims = [],
   recurringExpenses = [],
   recurringIncomes = [],
   reserveFloor = 0,
@@ -524,6 +671,35 @@ export function computeProjectionPlan({
   const eventRows = [];
   const notificationRows = [];
   const deleteOccurrenceKeys = new Set();
+
+  // Populated only when discoveryOnly is true: one entry per period where a
+  // necessary recurring expense or one-off came up short, aggregated to a
+  // single ledger-currency amount per period. See findReserveClaims() below
+  // for how this feeds the second (real) generation pass.
+  const discoveryDeficitsByPeriod = new Map();
+  function recordDiscoveryDeficit(periodKey, missingLedgerAmount) {
+    if (!discoveryOnly || missingLedgerAmount <= 0) return;
+    discoveryDeficitsByPeriod.set(
+      periodKey,
+      addMoneyAmounts(discoveryDeficitsByPeriod.get(periodKey) || 0, missingLedgerAmount)
+    );
+  }
+
+  // reserveClaims (populated by the caller from a prior discoveryOnly run)
+  // move ledger-currency amounts from an earlier period's retained surplus
+  // to a later period's necessities, materialized as an ordinary paired
+  // income/expense so they show up like any other projected transaction
+  // instead of as an invisible adjustment. Grouped by period key for O(1)
+  // lookup as the per-period loop below runs.
+  const reserveClaimsBySourcePeriod = new Map();
+  const reserveClaimsByTargetPeriod = new Map();
+  for (const claim of reserveClaims) {
+    if (!(claim.amountLedger > 0)) continue;
+    if (!reserveClaimsBySourcePeriod.has(claim.sourcePeriodKey)) reserveClaimsBySourcePeriod.set(claim.sourcePeriodKey, []);
+    reserveClaimsBySourcePeriod.get(claim.sourcePeriodKey).push(claim);
+    if (!reserveClaimsByTargetPeriod.has(claim.targetPeriodKey)) reserveClaimsByTargetPeriod.set(claim.targetPeriodKey, []);
+    reserveClaimsByTargetPeriod.get(claim.targetPeriodKey).push(claim);
+  }
 
   function periodForDate(date) {
     return periods.find(p => date >= p.start && date <= p.end);
@@ -855,6 +1031,25 @@ export function computeProjectionPlan({
       }
     }
 
+    // Reserve top-ups land before one-offs/necessities are funded, since the
+    // amount being claimed was sized (during the discoveryOnly run) to cover
+    // this period's *entire* necessities-tier shortfall, one-offs included.
+    for (const claim of reserveClaimsByTargetPeriod.get(period.key) || []) {
+      const inserted = insertTx({
+        name: `Reserved from ${claim.sourcePeriodKey}`,
+        currency: ledgerCurrency,
+        requestedAmount: claim.amountLedger,
+        fundedAmount: claim.amountLedger,
+        type: "income",
+        date: period.start,
+        period: period.key,
+        note: "Held back from an earlier period so this period's necessary expenses could be funded.",
+        occurrenceKeyOverride: `reserve_transfer:${claim.sourcePeriodKey}:${claim.targetPeriodKey}:in`
+      });
+
+      addPeriodAvailable(period, inserted.ledgerAmount);
+    }
+
     for (const oneOff of oneOffs) {
       const progressKey = `${oneOff.id}:${oneOff.type}:${String(oneOff.currency || "").toUpperCase()}`;
       const progress = oneOffProgress.get(progressKey) || null;
@@ -951,6 +1146,16 @@ export function computeProjectionPlan({
           `${oneOff.name} could not be fully funded in ${period.key}`
         );
 
+        // A blocked period skips necessary-recurring-expense funding below
+        // entirely (see the `if (period.blocked)` check after this loop), so
+        // any necessity shortfall those would have hit is invisible to this
+        // discovery run. Reserving just the one-off's shortfall unblocks the
+        // period on the real pass; if that then reveals a *further* necessity
+        // shortfall behind it, this run's discovery pass has no way to see
+        // that — it self-corrects on the next regeneration (which runs on
+        // almost every mutation already) rather than this same one.
+        recordDiscoveryDeficit(period.key, subtractMoneyAmounts(requestedLedger, availableForExpense));
+
         period.blocked = true;
         continue;
       }
@@ -1004,6 +1209,7 @@ export function computeProjectionPlan({
             `${expense.name} could not be funded in ${period.key}`
           );
 
+          recordDiscoveryDeficit(period.key, requestedLedger);
           continue;
         }
 
@@ -1035,8 +1241,31 @@ export function computeProjectionPlan({
             "Funding shortfall",
             `${expense.name} was only partially funded in ${period.key}`
           );
+
+          recordDiscoveryDeficit(period.key, subtractMoneyAmounts(requestedLedger, fundedLedger));
         }
       }
+    }
+
+    // Donate this period's retained surplus toward any later period's
+    // necessity shortfall *before* the local-demand check below decides
+    // whether goals/flex get to spend it — this is the actual fix: without
+    // this, hasLocalLowerPriorityDemand only ever asks "does *this* period
+    // want the surplus," never "does a later period *need* it instead."
+    for (const claim of reserveClaimsBySourcePeriod.get(period.key) || []) {
+      const inserted = insertTx({
+        name: `Reserved for ${claim.targetPeriodKey}`,
+        currency: ledgerCurrency,
+        requestedAmount: claim.amountLedger,
+        fundedAmount: claim.amountLedger,
+        type: "expense",
+        date: period.end,
+        period: period.key,
+        note: "Held back for a later period's necessary expenses instead of funding goals/flex/discretionary spending here.",
+        occurrenceKeyOverride: `reserve_transfer:${claim.sourcePeriodKey}:${claim.targetPeriodKey}:out`
+      });
+
+      subtractPeriodAvailable(period, inserted.ledgerAmount);
     }
 
     if (!hasLocalLowerPriorityDemand(period)) {
@@ -1044,6 +1273,18 @@ export function computeProjectionPlan({
     }
 
     carryDebtToNextPeriod(periodIndex);
+  }
+
+  if (discoveryOnly) {
+    return {
+      // spendableBalance(), not raw .available: a period's *donatable*
+      // surplus already excludes the user's configured minimum-reserve
+      // floor, the same way necessity funding itself does. Reporting raw
+      // .available here would let a reserve claim dip a source period
+      // below its own floor.
+      periodsAvailable: periods.map(p => ({ key: p.key, available: spendableBalance(p) })),
+      deficitsByPeriod: discoveryDeficitsByPeriod
+    };
   }
 
   for (const goal of goals) {
@@ -1436,7 +1677,7 @@ export function createCashflowProjectionEngineService({
       confirmedBalanceAsOfAsync(budgetId, today, settings)
     ]);
 
-    const plan = computeProjectionPlan({
+    const sharedPlanInputs = {
       confirmedRowsAfterToday,
       convert,
       flexes,
@@ -1451,7 +1692,6 @@ export function createCashflowProjectionEngineService({
       oneOffs,
       openingBalance,
       pendingRows: tables.pending_transactions || [],
-      periods,
       predictionRows,
       previousSnapshot,
       recurringExpenses,
@@ -1459,6 +1699,42 @@ export function createCashflowProjectionEngineService({
       reserveFloor,
       settings,
       today
+    };
+
+    // Two passes: the first (discoveryOnly) runs the real necessities-only
+    // logic — unmodified, so it reflects the same local-demand retention
+    // that would otherwise cause the bug — purely to find which periods end
+    // up short and which earlier periods are holding surplus that could
+    // cover it. That result feeds reserveClaims into the second, real pass.
+    // Both passes need their own untouched `periods` array since .available
+    // is mutated in place; everything else here is read-only within
+    // computeProjectionPlan and safe to share across both calls.
+    const discoveryPeriods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods, {
+      anchorOverrides: periodAnchorOverrides
+    });
+    const discovery = computeProjectionPlan({
+      ...sharedPlanInputs,
+      discoveryOnly: true,
+      periods: discoveryPeriods
+    });
+    // Reserve transfers already pending/confirmed on one side (e.g. a user
+    // manually moved the expense half to pending) must not be re-derived
+    // from scratch — see computeReserveClaims and findLockedReserveClaims.
+    const lockedReserveClaims = findLockedReserveClaims([
+      ...(tables.pending_transactions || []),
+      ...confirmedRowsAfterToday
+    ]);
+    const reserveClaims = computeReserveClaims({
+      periods: discoveryPeriods,
+      periodsAvailable: discovery.periodsAvailable,
+      deficitsByPeriod: discovery.deficitsByPeriod,
+      lockedClaims: lockedReserveClaims
+    });
+
+    const plan = computeProjectionPlan({
+      ...sharedPlanInputs,
+      periods,
+      reserveClaims
     });
 
     const applyResult = await applyProjectionGenerationPlanToBudgetStore({ budgetId, budgetStore, plan });
@@ -1506,13 +1782,41 @@ export function createCashflowProjectionEngineService({
         period.available = subtractMoneyAmounts(period.available, amount);
       };
 
+      // See computeProjectionPlan()'s identical-in-spirit (but separately
+      // maintained — see the note above runGenerationTransactionBody) reserve
+      // mechanism for the full explanation. discoveryOnly/reserveClaims are
+      // reassigned by the two-pass orchestration below, after this function
+      // is defined but before either db.transaction(runGenerationTransactionBody)()
+      // call.
+      let discoveryOnly = false;
+      let reserveClaimsBySourcePeriod = new Map();
+      let reserveClaimsByTargetPeriod = new Map();
+      const discoveryDeficitsByPeriod = new Map();
+      function recordDiscoveryDeficit(periodKey, missingLedgerAmount) {
+        if (!discoveryOnly || !(missingLedgerAmount > 0)) return;
+        discoveryDeficitsByPeriod.set(
+          periodKey,
+          addMoneyAmounts(discoveryDeficitsByPeriod.get(periodKey) || 0, missingLedgerAmount)
+        );
+      }
+      class DiscoveryPassResult {
+        constructor(payload) {
+          this.payload = payload;
+        }
+      }
+
+      const incomeByIdForAnchoring = new Map(
+        db.prepare("SELECT * FROM recurring_incomes").all().map(row => [row.id, row])
+      );
       const recurringExpenses = db.prepare(`
         SELECT r.*, pt.operating_priority AS priority
         FROM recurring_expenses r
         JOIN planned_transactions pt ON pt.id = r.planned_transaction_id
         WHERE r.active = 1
         ORDER BY pt.operating_priority ASC, r.created_at ASC, r.id ASC
-      `).all();
+      `).all().map(row => row.anchor_income_id
+        ? { ...row, anchor_income: incomeByIdForAnchoring.get(row.anchor_income_id) || null }
+        : row);
 
       const recurringIncomes = db.prepare(`
         SELECT *
@@ -1567,7 +1871,11 @@ export function createCashflowProjectionEngineService({
           ...pendingPeriodIncomeRows
         ]
       );
-      const periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods, {
+      // Reassigned between the discoveryOnly and real transaction attempts
+      // below (buildBudgetPeriods() called again for a fresh, unmutated
+      // array) — SQLite transaction rollback undoes DB writes, not in-memory
+      // mutations to these period objects' .available/.blocked.
+      let periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods, {
         anchorOverrides: periodAnchorOverrides
       });
       const handledOccurrenceKeys = confirmedOccurrenceKeys(userId);
@@ -1971,7 +2279,11 @@ export function createCashflowProjectionEngineService({
         currentPeriod.available = 0;
       }
 
-      db.transaction(() => {
+      // Named (not an inline arrow) so the two-pass orchestration after this
+      // function's closing brace can invoke it twice via db.transaction():
+      // once as a discoveryOnly dry run that always throws (so SQLite rolls
+      // back every write it made), once for real.
+      function runGenerationTransactionBody() {
         db.prepare("DELETE FROM future_transactions").run();
 
         for (const occurrenceKey of handledOccurrenceKeys) {
@@ -2021,6 +2333,22 @@ export function createCashflowProjectionEngineService({
 
               addPeriodAvailable(period, inserted.ledgerAmount);
             }
+          }
+
+          for (const claim of reserveClaimsByTargetPeriod.get(period.key) || []) {
+            const inserted = insertTx({
+              name: `Reserved from ${claim.sourcePeriodKey}`,
+              currency: ledgerCurrency,
+              requestedAmount: claim.amountLedger,
+              fundedAmount: claim.amountLedger,
+              type: "income",
+              date: period.start,
+              period: period.key,
+              note: "Held back from an earlier period so this period's necessary expenses could be funded.",
+              occurrenceKeyOverride: `reserve_transfer:${claim.sourcePeriodKey}:${claim.targetPeriodKey}:in`
+            });
+
+            addPeriodAvailable(period, inserted.ledgerAmount);
           }
 
           for (const oneOff of oneOffs) {
@@ -2122,6 +2450,12 @@ export function createCashflowProjectionEngineService({
                 `${oneOff.name} could not be fully funded in ${period.key}`
               );
 
+              // See the identical comment in computeProjectionPlan() for why
+              // this only captures the one-off's own shortfall, not any
+              // necessary-recurring-expense shortfall hiding behind the
+              // block this period is about to take.
+              recordDiscoveryDeficit(period.key, subtractMoneyAmounts(requestedLedger, availableForExpense));
+
               period.blocked = true;
               continue;
             }
@@ -2181,6 +2515,7 @@ export function createCashflowProjectionEngineService({
                   `${expense.name} could not be funded in ${period.key}`
                 );
 
+                recordDiscoveryDeficit(period.key, requestedLedger);
                 continue;
               }
 
@@ -2212,8 +2547,31 @@ export function createCashflowProjectionEngineService({
                   "Funding shortfall",
                   `${expense.name} was only partially funded in ${period.key}`
                 );
+
+                recordDiscoveryDeficit(period.key, subtractMoneyAmounts(requestedLedger, fundedLedger));
               }
             }
+          }
+
+          // Donate this period's retained surplus toward a later period's
+          // necessity shortfall before the local-demand check below decides
+          // whether goals/flex/discretionary spending gets to keep it — see
+          // the identical comment in computeProjectionPlan() for the full
+          // explanation of why this is the actual fix.
+          for (const claim of reserveClaimsBySourcePeriod.get(period.key) || []) {
+            const inserted = insertTx({
+              name: `Reserved for ${claim.targetPeriodKey}`,
+              currency: ledgerCurrency,
+              requestedAmount: claim.amountLedger,
+              fundedAmount: claim.amountLedger,
+              type: "expense",
+              date: period.end,
+              period: period.key,
+              note: "Held back for a later period's necessary expenses instead of funding goals/flex/discretionary spending here.",
+              occurrenceKeyOverride: `reserve_transfer:${claim.sourcePeriodKey}:${claim.targetPeriodKey}:out`
+            });
+
+            subtractPeriodAvailable(period, inserted.ledgerAmount);
           }
 
           if (!hasLocalLowerPriorityDemand(period)) {
@@ -2221,6 +2579,15 @@ export function createCashflowProjectionEngineService({
           }
 
           carryDebtToNextPeriod(periodIndex);
+        }
+
+        if (discoveryOnly) {
+          // spendableBalance(), not raw .available — see the identical
+          // comment in computeProjectionPlan().
+          throw new DiscoveryPassResult({
+            periodsAvailable: periods.map(p => ({ key: p.key, available: spendableBalance(p) })),
+            deficitsByPeriod: discoveryDeficitsByPeriod
+          });
         }
 
         for (const goal of goals) {
@@ -2531,7 +2898,61 @@ export function createCashflowProjectionEngineService({
           ledgerCurrency,
           warningCount
         );
-      })();
+      }
+
+      // Two-pass generation: discover shortfalls under today's real
+      // local-retention rule (unmodified — see runGenerationTransactionBody
+      // above), turn them into reserve claims, then run for real. The
+      // discoveryOnly transaction always throws DiscoveryPassResult at the
+      // point noted inside runGenerationTransactionBody, so SQLite rolls
+      // back every write the dry run made; only the real pass below commits.
+      let discoveryResult = null;
+      discoveryOnly = true;
+      try {
+        db.transaction(runGenerationTransactionBody)();
+        throw new Error("discoveryOnly pass completed without throwing DiscoveryPassResult — the throw site may have been removed");
+      } catch (err) {
+        if (!(err instanceof DiscoveryPassResult)) throw err;
+        discoveryResult = err.payload;
+      }
+
+      // See the identical comment in regenerateProjectionsAsync() for why
+      // already pending/confirmed reserve-transfer rows must be locked
+      // rather than re-derived on this regeneration.
+      const pendingReserveRows = db.prepare(`
+        SELECT occurrence_key, ledger_amount
+        FROM pending_transactions
+        WHERE occurrence_key LIKE 'reserve_transfer:%'
+      `).all();
+      const confirmedReserveRows = typeof confirmedRowsAfterDate === "function"
+        ? confirmedRowsAfterDate(db, userId, today).filter(row =>
+          String(row?.occurrence_key || "").startsWith("reserve_transfer:")
+        )
+        : [];
+      const lockedReserveClaims = findLockedReserveClaims([...pendingReserveRows, ...confirmedReserveRows]);
+
+      const reserveClaims = computeReserveClaims({
+        periods,
+        periodsAvailable: discoveryResult.periodsAvailable,
+        deficitsByPeriod: discoveryResult.deficitsByPeriod,
+        lockedClaims: lockedReserveClaims
+      });
+      reserveClaimsBySourcePeriod = new Map();
+      reserveClaimsByTargetPeriod = new Map();
+      for (const claim of reserveClaims) {
+        if (!(claim.amountLedger > 0)) continue;
+        if (!reserveClaimsBySourcePeriod.has(claim.sourcePeriodKey)) reserveClaimsBySourcePeriod.set(claim.sourcePeriodKey, []);
+        reserveClaimsBySourcePeriod.get(claim.sourcePeriodKey).push(claim);
+        if (!reserveClaimsByTargetPeriod.has(claim.targetPeriodKey)) reserveClaimsByTargetPeriod.set(claim.targetPeriodKey, []);
+        reserveClaimsByTargetPeriod.get(claim.targetPeriodKey).push(claim);
+      }
+
+      periods = buildBudgetPeriods(settings, recurringIncomes, today, futurePeriods, {
+        anchorOverrides: periodAnchorOverrides
+      });
+      discoveryOnly = false;
+
+      db.transaction(runGenerationTransactionBody)();
 
       logServerEvent("cashflow_projections_regenerated", {
         userId,

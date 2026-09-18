@@ -15,6 +15,7 @@ import {
   normalizeManualFxRates
 } from "./cashflow-fx-provider-utils.js";
 import { periodAnchorOverridesForIncome } from "./cashflow-period-utils.js";
+import { computeReservedBalanceByRowId } from "./cashflow-planning-balance-plan.js";
 
 export function createCashflowSnapshotService({
   budgetStore = null,
@@ -313,7 +314,12 @@ export function createCashflowSnapshotService({
         ORDER BY pt.operating_priority ASC
       `).all();
 
-      const recurringExpenses = recurringExpensesRaw.map(expense => {
+      const incomeByIdForAnchoring = new Map(recurringIncomesRaw.map(income => [income.id, income]));
+
+      const recurringExpenses = recurringExpensesRaw.map(expenseRaw => {
+        const expense = expenseRaw.anchor_income_id
+          ? { ...expenseRaw, anchor_income: incomeByIdForAnchoring.get(expenseRaw.anchor_income_id) || null }
+          : expenseRaw;
         const currentPrediction = roundMoneyAmount(predictedAmountForRecurringExpense(
           userId,
           expense,
@@ -566,6 +572,22 @@ export function createCashflowSnapshotService({
         LIMIT 1
       `).get();
 
+      const reservedBalanceById = computeReservedBalanceByRowId({
+        confirmedRows: rawConfirmedTransactions,
+        futureRows: futureTransactions,
+        pendingRows: pendingTransactions,
+        settings,
+        today
+      });
+      const pendingTransactionsWithReserved = (pendingTransactions || []).map(row => ({
+        ...row,
+        reserved_balance: reservedBalanceById.get(row.id) ?? null
+      }));
+      const futureTransactionsWithReserved = (futureTransactions || []).map(row => ({
+        ...row,
+        reserved_balance: reservedBalanceById.get(row.id) ?? null
+      }));
+
       return {
         today,
         settings: {
@@ -590,8 +612,8 @@ export function createCashflowSnapshotService({
           repeat_every_months: income.repeat_every_months
         })),
         confirmedTransactions,
-        pendingTransactions: pendingTransactions || [],
-        futureTransactions: futureTransactions || [],
+        pendingTransactions: pendingTransactionsWithReserved,
+        futureTransactions: futureTransactionsWithReserved,
         oneOffs: oneOffs || [],
         goals: goalSummaries || [],
         flexTransactions: flexSummaries || [],
@@ -731,7 +753,11 @@ export function createCashflowSnapshotService({
       plannedTransactions,
       "operating_priority"
     ).sort(sortByPriority);
-    const recurringExpenses = await Promise.all(recurringExpensesRaw.map(async expense => {
+    const incomeByIdForAnchoring = new Map(recurringIncomesRaw.map(income => [income.id, income]));
+    const recurringExpenses = await Promise.all(recurringExpensesRaw.map(async expenseRaw => {
+      const expense = expenseRaw.anchor_income_id
+        ? { ...expenseRaw, anchor_income: incomeByIdForAnchoring.get(expenseRaw.anchor_income_id) || null }
+        : expenseRaw;
       const confirmedRowsForExpense = expense.prediction_strategy === "12month_max"
         ? predictionRowsForRun()
         : null;
@@ -945,6 +971,22 @@ export function createCashflowSnapshotService({
       .sort(desc("snapshot_timestamp"))
       .at(0) || null;
 
+    const reservedBalanceById = computeReservedBalanceByRowId({
+      confirmedRows: rawConfirmedTransactions,
+      futureRows: futureTransactions,
+      pendingRows: pendingTransactions,
+      settings,
+      today
+    });
+    const pendingTransactionsWithReserved = (pendingTransactions || []).map(row => ({
+      ...row,
+      reserved_balance: reservedBalanceById.get(row.id) ?? null
+    }));
+    const futureTransactionsWithReserved = (futureTransactions || []).map(row => ({
+      ...row,
+      reserved_balance: reservedBalanceById.get(row.id) ?? null
+    }));
+
     return {
       today,
       settings: {
@@ -969,8 +1011,8 @@ export function createCashflowSnapshotService({
         repeat_every_months: income.repeat_every_months
       })),
       confirmedTransactions,
-      pendingTransactions: pendingTransactions || [],
-      futureTransactions: futureTransactions || [],
+      pendingTransactions: pendingTransactionsWithReserved,
+      futureTransactions: futureTransactionsWithReserved,
       oneOffs: oneOffs || [],
       goals: goalSummaries || [],
       flexTransactions: flexSummaries || [],

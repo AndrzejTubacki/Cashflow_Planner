@@ -16,7 +16,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(6, 10, 17, 0.72);
+  background: rgba(16, 20, 28, 0.72);
 }
 
 .ui-blocker__panel {
@@ -107,9 +107,9 @@
   display: grid;
   gap: 0.35rem;
   padding: 0.7rem 0.85rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.48);
+  background: rgba(23, 27, 36, 0.48);
 }
 
 .cashflow-notice {
@@ -118,14 +118,14 @@
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.7rem 0.85rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.72);
+  background: rgba(23, 27, 36, 0.72);
   font-size: 0.88rem;
 }
 
 .cashflow-notice--error {
-  border-color: rgba(239, 111, 134, 0.44);
+  border-color: rgba(224, 140, 104, 0.44);
   color: var(--bad);
 }
 
@@ -145,7 +145,7 @@
 }
 
 .cashflow-validation--ok {
-  border-color: rgba(111, 208, 132, 0.34);
+  border-color: rgba(107, 184, 145, 0.34);
 }
 
 .cashflow-validation--ok strong {
@@ -153,7 +153,7 @@
 }
 
 .cashflow-validation--warning {
-  border-color: rgba(244, 178, 103, 0.38);
+  border-color: rgba(220, 172, 95, 0.38);
 }
 
 .cashflow-validation--warning strong {
@@ -184,9 +184,9 @@
   align-items: center;
   min-width: 0;
   padding: 0.7rem 0.8rem;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid rgba(130, 138, 158, 0.18);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.42);
+  background: rgba(23, 27, 36, 0.42);
 }
 
 .cashflow-budget-row__main,
@@ -226,9 +226,9 @@
   gap: 0.85rem;
   min-width: 0;
   padding: 0.9rem;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid rgba(130, 138, 158, 0.18);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.42);
+  background: rgba(23, 27, 36, 0.42);
 }
 
 .cashflow-admin-account-card__header {
@@ -269,10 +269,10 @@
 
 .cashflow-admin-account-card__badges span {
   padding: 0.24rem 0.48rem;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 999px;
-  background: rgba(30, 41, 59, 0.58);
-  color: rgba(226, 232, 240, 0.92);
+  background: rgba(29, 34, 45, 0.58);
+  color: rgba(236, 238, 242, 0.92);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -316,6 +316,17 @@
 
 .cashflow-inline-form input {
   min-width: min(280px, 100%);
+}
+
+.cashflow-amount-cell {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.cashflow-amount-cell small {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
 
 .cashflow-table--compact {
@@ -420,10 +431,10 @@
   align-items: center;
   min-width: 0;
   padding: 0.46rem 0.54rem;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(130, 138, 158, 0.16);
   border-radius: 8px;
-  background: rgba(15, 23, 42, 0.5);
-  box-shadow: 0 6px 14px rgba(2, 6, 23, 0.12);
+  background: rgba(23, 27, 36, 0.5);
+  box-shadow: 0 6px 14px rgba(16, 20, 28, 0.12);
 }
 
 .cashflow-donut-wrap {
@@ -439,7 +450,7 @@
 }
 
 .cashflow-donut__track {
-  stroke: rgba(51, 65, 85, 0.78);
+  stroke: rgba(88, 94, 108, 0.78);
 }
 
 .cashflow-donut__segment {
@@ -469,7 +480,7 @@
   place-items: center;
   text-align: center;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.88);
+  background: rgba(23, 27, 36, 0.88);
 }
 
 .cashflow-donut__center strong {
@@ -623,15 +634,15 @@
 
 .cashflow-group-panel {
   margin-bottom: 0.5rem;
-  border: 1px solid rgba(127, 144, 166, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 12px;
-  background: rgba(20, 28, 42, 0.5);
+  background: rgba(23, 27, 36, 0.5);
   overflow: hidden;
 }
 
 .cashflow-group-header {
-  background: rgba(32, 44, 64, 0.4);
-  border-bottom: 1px solid rgba(127, 144, 166, 0.15);
+  background: rgba(29, 34, 45, 0.4);
+  border-bottom: 1px solid rgba(130, 138, 158, 0.15);
 }
 
 .cashflow-group-toggle {
@@ -651,7 +662,7 @@
 }
 
 .cashflow-group-toggle:hover {
-  background: rgba(32, 44, 64, 0.6);
+  background: rgba(29, 34, 45, 0.6);
 }
 
 .toggle-arrow {
@@ -710,7 +721,7 @@
 .cashflow-settings-form select,
 .cashflow-settings-form textarea {
   width: 100%;
-  background: rgba(8, 10, 14, 0.55);
+  background: rgba(16, 20, 28, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0.7rem;
   color: inherit;
@@ -743,10 +754,10 @@
 .cashflow-readonly-field > strong {
   width: fit-content;
   padding: 0.42rem 0.68rem;
-  border: 1px solid rgba(125, 211, 252, 0.28);
+  border: 1px solid rgba(138, 163, 224, 0.28);
   border-radius: 999px;
-  background: rgba(14, 165, 233, 0.12);
-  color: rgba(224, 242, 254, 0.98);
+  background: rgba(31, 47, 80, 0.12);
+  color: rgba(241, 230, 208, 0.98);
   font-size: 0.86rem;
 }
 
@@ -821,9 +832,9 @@
   gap: 0.55rem;
   min-height: 42px;
   padding: 0.7rem 0.85rem;
-  border: 1px solid rgba(120, 138, 161, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 14px;
-  background: rgba(20, 28, 42, 0.7);
+  background: rgba(23, 27, 36, 0.7);
 }
 
 .cashflow-inline-checkbox input {
@@ -841,9 +852,9 @@
   gap: 0.38rem;
   min-height: 100%;
   padding: 0.85rem 0.95rem;
-  border: 1px solid rgba(120, 138, 161, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 16px;
-  background: rgba(20, 28, 42, 0.7);
+  background: rgba(23, 27, 36, 0.7);
 }
 
 .cashflow-toggle-card input {
@@ -886,9 +897,9 @@
 }
 
 .cashflow-recurring-card {
-  border: 1px solid rgba(120, 138, 161, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 16px;
-  background: rgba(20, 28, 42, 0.7);
+  background: rgba(23, 27, 36, 0.7);
   overflow: hidden;
 }
 
@@ -921,9 +932,9 @@
 
 .cashflow-user-row {
   padding: 14px;
-  border: 1px solid rgba(120, 138, 161, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 16px;
-  background: rgba(20, 28, 42, 0.7);
+  background: rgba(23, 27, 36, 0.7);
 }
 
 @media (max-width: 1100px) {
@@ -951,13 +962,13 @@
   flex-wrap: wrap;
   gap: 0.6rem;
   padding-bottom: 0.75rem;
-  border-bottom: 1px solid rgba(127, 144, 166, 0.2);
+  border-bottom: 1px solid rgba(130, 138, 158, 0.2);
 }
 
 .tab-button {
   padding: 0.65rem 1.2rem;
-  background: rgba(125, 211, 252, 0.08);
-  border: 1px solid rgba(125, 211, 252, 0.2);
+  background: rgba(138, 163, 224, 0.08);
+  border: 1px solid rgba(138, 163, 224, 0.2);
   border-radius: 0.8rem;
   color: var(--muted);
   font-size: 0.88rem;
@@ -968,13 +979,13 @@
 }
 
 .tab-button:hover {
-  background: rgba(125, 211, 252, 0.12);
-  border-color: rgba(125, 211, 252, 0.4);
+  background: rgba(138, 163, 224, 0.12);
+  border-color: rgba(138, 163, 224, 0.4);
   color: var(--accent);
 }
 
 .tab-button.active {
-  background: rgba(125, 211, 252, 0.18);
+  background: rgba(138, 163, 224, 0.18);
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -993,9 +1004,9 @@
 
 .cashflow-tab-content .panel {
   min-width: 0;
-  border: 1px solid rgba(127, 144, 166, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 0.8rem;
-  background: rgba(20, 28, 42, 0.5);
+  background: rgba(23, 27, 36, 0.5);
   padding: 1rem;
 }
 
@@ -1031,7 +1042,7 @@
 }
 
 fieldset {
-  border: 1px solid rgba(127, 144, 166, 0.15);
+  border: 1px solid rgba(130, 138, 158, 0.15);
   border-radius: 0.6rem;
   padding: 1rem;
   margin-bottom: 1rem;
@@ -1061,7 +1072,7 @@ fieldset legend {
   align-items: center;
   gap: 0.55rem;
   padding: 0.8rem 0.95rem;
-  color: rgba(248, 250, 252, 0.96);
+  color: var(--text);
   font-size: 0.92rem;
   font-weight: 700;
   cursor: pointer;
@@ -1080,8 +1091,8 @@ fieldset legend {
   width: 1.25rem;
   height: 1.25rem;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.75);
-  color: rgba(203, 213, 225, 0.92);
+  background: rgba(23, 27, 36, 0.75);
+  color: rgba(162, 168, 182, 0.92);
   font-size: 1rem;
   line-height: 1;
   transition: transform 140ms ease, background 140ms ease;
@@ -1089,17 +1100,17 @@ fieldset legend {
 
 .cashflow-settings-section[open] > summary:not(.cashflow-details-panel__summary)::before {
   transform: rotate(90deg);
-  background: rgba(37, 99, 235, 0.35);
-  color: rgba(239, 246, 255, 1);
+  background: rgba(31, 47, 80, 0.35);
+  color: rgba(244, 244, 239, 1);
 }
 
 .cashflow-settings-section > fieldset {
   margin: 0;
   padding: 0.85rem 0.95rem 1rem;
   border: 0;
-  border-top: 1px solid rgba(127, 144, 166, 0.14);
+  border-top: 1px solid rgba(130, 138, 158, 0.14);
   border-radius: 0;
-  background: rgba(2, 6, 23, 0.16);
+  background: rgba(16, 20, 28, 0.16);
 }
 
 .cashflow-settings-section .cashflow-details-panel__body > fieldset {
@@ -1134,16 +1145,16 @@ fieldset legend {
 .cashflow-shell-panel {
   min-width: 0;
   padding: 1rem;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 16px;
-  background: linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.72));
-  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+  background: linear-gradient(180deg, rgba(29, 34, 45, 0.72), rgba(23, 27, 36, 0.72));
+  box-shadow: 0 12px 28px rgba(16, 20, 28, 0.18);
 }
 
 .cashflow-shell-panel h3 {
   margin: 0 0 0.85rem;
   font-size: 1rem;
-  color: rgba(248, 250, 252, 0.96);
+  color: var(--text);
 }
 
 .cashflow-shell-form,
@@ -1160,14 +1171,14 @@ fieldset legend {
 .cashflow-shell-panel label span {
   font-size: 0.82rem;
   font-weight: 700;
-  color: rgba(203, 213, 225, 0.9);
+  color: rgba(162, 168, 182, 0.9);
 }
 
 .cashflow-shell-panel input,
 .cashflow-shell-panel select {
   width: 100%;
   padding: 0.58rem 0.72rem;
-  background: rgba(8, 10, 14, 0.55);
+  background: rgba(16, 20, 28, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0.6rem;
   color: var(--text);
@@ -1184,25 +1195,25 @@ fieldset legend {
   gap: 0.2rem;
   width: 100%;
   padding: 0.75rem 0.85rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 8px;
-  background: rgba(30, 41, 59, 0.62);
-  color: rgba(226, 232, 240, 0.96);
+  background: rgba(29, 34, 45, 0.62);
+  color: rgba(236, 238, 242, 0.96);
   text-align: left;
   cursor: pointer;
 }
 
 .cashflow-user-card:hover {
-  border-color: rgba(125, 211, 252, 0.52);
-  background: rgba(51, 65, 85, 0.78);
+  border-color: rgba(138, 163, 224, 0.52);
+  background: rgba(88, 94, 108, 0.78);
 }
 
 .cashflow-user-card strong {
-  color: rgba(248, 250, 252, 0.98);
+  color: var(--text);
 }
 
 .cashflow-user-card span {
-  color: rgba(148, 163, 184, 0.92);
+  color: rgba(130, 138, 158, 0.92);
   font-size: 0.8rem;
 }
 
@@ -1228,12 +1239,12 @@ fieldset legend {
   gap: 1.25rem;
   padding: 1rem 1.1rem;
   margin-bottom: 1rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 18px;
   background:
-    radial-gradient(circle at top left, rgba(96, 165, 250, 0.14), transparent 32rem),
-    rgba(15, 23, 42, 0.72);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.24);
+    radial-gradient(circle at top left, rgba(138, 163, 224, 0.14), transparent 32rem),
+    rgba(23, 27, 36, 0.72);
+  box-shadow: 0 18px 45px rgba(23, 27, 36, 0.24);
   backdrop-filter: blur(12px);
 }
 
@@ -1250,7 +1261,7 @@ fieldset legend {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: rgba(148, 163, 184, 0.95);
+  color: rgba(130, 138, 158, 0.95);
 }
 
 .cashflow-title-line + .cashflow-eyebrow {
@@ -1259,9 +1270,11 @@ fieldset legend {
 
 .cashflow-header h2 {
   margin: 0;
-  font-size: 1.35rem;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 600;
   line-height: 1.1;
-  color: rgba(248, 250, 252, 0.98);
+  color: var(--text);
 }
 
 .cashflow-title-line {
@@ -1272,7 +1285,7 @@ fieldset legend {
 
 .cashflow-version {
   margin: 0;
-  color: rgba(148, 163, 184, 0.82);
+  color: rgba(130, 138, 158, 0.82);
   font-size: 0.76rem;
   font-weight: 600;
   white-space: nowrap;
@@ -1283,7 +1296,7 @@ fieldset legend {
   align-items: center;
   min-height: 1.45rem;
   padding: 0.16rem 0.44rem;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 999px;
   font-size: 0.68rem;
   font-weight: 700;
@@ -1293,20 +1306,20 @@ fieldset legend {
 }
 
 .cashflow-version-status--muted {
-  color: rgba(148, 163, 184, 0.82);
-  background: rgba(15, 23, 42, 0.38);
+  color: rgba(130, 138, 158, 0.82);
+  background: rgba(23, 27, 36, 0.38);
 }
 
 .cashflow-version-status--current {
-  color: rgba(187, 247, 208, 0.95);
-  background: rgba(22, 101, 52, 0.22);
-  border-color: rgba(74, 222, 128, 0.28);
+  color: rgba(107, 184, 145, 0.95);
+  background: rgba(43, 107, 77, 0.22);
+  border-color: rgba(107, 184, 145, 0.28);
 }
 
 .cashflow-version-status--available {
-  color: rgba(224, 242, 254, 0.98);
-  background: rgba(14, 165, 233, 0.18);
-  border-color: rgba(56, 189, 248, 0.42);
+  color: rgba(241, 230, 208, 0.98);
+  background: rgba(31, 47, 80, 0.18);
+  border-color: rgba(138, 163, 224, 0.42);
 }
 
 .cashflow-header__chips {
@@ -1325,16 +1338,16 @@ fieldset legend {
   align-items: center;
   gap: 0.3rem;
   padding: 0.38rem 0.62rem;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border: 1px solid rgba(130, 138, 158, 0.24);
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.55);
-  color: rgba(226, 232, 240, 0.92);
+  background: rgba(23, 27, 36, 0.55);
+  color: rgba(236, 238, 242, 0.92);
   font-size: 0.78rem;
   white-space: nowrap;
 }
 
 .cashflow-chip strong {
-  color: rgba(248, 250, 252, 1);
+  color: var(--text);
 }
 
 .cashflow-header__chips--ticker {
@@ -1383,7 +1396,7 @@ fieldset legend {
 }
 
 .cashflow-chip--muted {
-  color: rgba(203, 213, 225, 0.72);
+  color: rgba(162, 168, 182, 0.72);
 }
 
 .cashflow-chip--menu {
@@ -1393,7 +1406,7 @@ fieldset legend {
 
 .cashflow-chip--menu::after {
   content: "v";
-  color: rgba(148, 163, 184, 0.9);
+  color: rgba(130, 138, 158, 0.9);
   font-size: 0.68rem;
 }
 
@@ -1423,10 +1436,10 @@ fieldset legend {
   gap: 0.25rem;
   width: min(300px, calc(100vw - 2rem));
   padding: 0.45rem;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border: 1px solid rgba(130, 138, 158, 0.24);
   border-radius: 12px;
-  background: rgba(15, 23, 42, 0.96);
-  box-shadow: 0 18px 42px rgba(2, 6, 23, 0.38);
+  background: rgba(23, 27, 36, 0.96);
+  box-shadow: 0 18px 42px rgba(16, 20, 28, 0.38);
 }
 
 .cashflow-user-menu__section {
@@ -1438,17 +1451,25 @@ fieldset legend {
 .cashflow-user-menu__section + .cashflow-user-menu__section {
   margin-top: 0.35rem;
   padding-top: 0.55rem;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  border-top: 1px solid rgba(130, 138, 158, 0.18);
 }
 
-.cashflow-user-menu__panel button {
+.cashflow-user-menu__panel button,
+.cashflow-beta-link {
   width: 100%;
   padding: 0.55rem 0.65rem;
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: rgba(226, 232, 240, 0.94);
+  color: rgba(236, 238, 242, 0.94);
   text-align: left;
+}
+
+.cashflow-beta-link {
+  display: block;
+  box-sizing: border-box;
+  color: var(--brass);
+  font-weight: 600;
 }
 
 .cashflow-user-menu__preferences {
@@ -1474,9 +1495,9 @@ fieldset legend {
 .cashflow-user-menu__preferences select {
   width: 100%;
   padding: 0.42rem 0.55rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 8px;
-  background: rgba(8, 10, 14, 0.55);
+  background: rgba(16, 20, 28, 0.55);
   color: var(--text);
 }
 
@@ -1487,8 +1508,8 @@ fieldset legend {
 .cashflow-user-menu__panel button:hover,
 .cashflow-user-menu__panel button:focus-visible {
   outline: none;
-  background: rgba(56, 189, 248, 0.14);
-  color: rgba(240, 249, 255, 1);
+  background: rgba(138, 163, 224, 0.14);
+  color: rgba(244, 244, 239, 1);
 }
 
 .cashflow-header__actions {
@@ -1520,19 +1541,19 @@ fieldset legend {
 }
 
 .cashflow-action--primary {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 1), rgba(37, 99, 235, 1));
+  background: linear-gradient(135deg, rgba(138, 163, 224, 1), rgba(31, 47, 80, 1));
   color: white;
-  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.3);
+  box-shadow: 0 10px 24px rgba(31, 47, 80, 0.3);
 }
 
 .cashflow-action--secondary {
-  background: rgba(30, 41, 59, 0.88);
-  color: rgba(226, 232, 240, 0.96);
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(29, 34, 45, 0.88);
+  color: rgba(236, 238, 242, 0.96);
+  border: 1px solid rgba(130, 138, 158, 0.2);
 }
 
 .cashflow-action--secondary:hover {
-  background: rgba(51, 65, 85, 0.95);
+  background: rgba(88, 94, 108, 0.95);
 }
 
 @media (max-width: 820px) {
@@ -1580,7 +1601,7 @@ fieldset legend {
 .cashflow-tab-content select {
   width: 100%;
   padding: var(--cashflow-control-padding);
-  background: rgba(8, 10, 14, 0.55);
+  background: rgba(16, 20, 28, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0.6rem;
   color: var(--text);
@@ -1591,7 +1612,7 @@ fieldset legend {
 .cashflow-tab-content select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: inset 0 0 0 2px rgba(125, 211, 252, 0.1);
+  box-shadow: inset 0 0 0 2px rgba(138, 163, 224, 0.1);
 }
 
 .settings-actions {
@@ -1602,10 +1623,10 @@ fieldset legend {
 
 .btn-primary {
   padding: 0.65rem 1.2rem;
-  background: rgba(111, 208, 132, 0.15);
-  border: 1px solid rgba(111, 208, 132, 0.3);
+  background: rgba(107, 184, 145, 0.15);
+  border: 1px solid rgba(107, 184, 145, 0.3);
   border-radius: 0.8rem;
-  color: #6fd084;
+  color: var(--ok);
   font-size: 0.88rem;
   font-weight: 600;
   cursor: pointer;
@@ -1613,8 +1634,8 @@ fieldset legend {
 }
 
 .btn-primary:hover {
-  background: rgba(111, 208, 132, 0.25);
-  border-color: rgba(111, 208, 132, 0.6);
+  background: rgba(107, 184, 145, 0.25);
+  border-color: rgba(107, 184, 145, 0.6);
 }
 
 .cashflow-modal-root {
@@ -1626,7 +1647,7 @@ fieldset legend {
 .cashflow-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(2, 6, 23, 0.72);
+  background: rgba(16, 20, 28, 0.72);
   backdrop-filter: blur(8px);
 }
 
@@ -1636,10 +1657,10 @@ fieldset legend {
   max-height: calc(100vh - 2rem);
   overflow: auto;
   margin: 1rem auto;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border: 1px solid rgba(130, 138, 158, 0.24);
   border-radius: 18px;
-  background: rgba(15, 23, 42, 0.96);
-  color: rgba(248, 250, 252, 0.98);
+  background: rgba(23, 27, 36, 0.96);
+  color: rgba(244, 244, 239, 0.98);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
 }
 
@@ -1649,7 +1670,7 @@ fieldset legend {
   justify-content: space-between;
   gap: 1rem;
   padding: 1rem 1.1rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  border-bottom: 1px solid rgba(130, 138, 158, 0.18);
 }
 
 .cashflow-modal__header h3 {
@@ -1669,7 +1690,7 @@ fieldset legend {
 }
 
 .cashflow-modal__form label span {
-  color: rgba(203, 213, 225, 0.88);
+  color: rgba(162, 168, 182, 0.88);
   font-size: 0.78rem;
   font-weight: 700;
 }
@@ -1677,11 +1698,11 @@ fieldset legend {
 .cashflow-modal__form input,
 .cashflow-modal__form select {
   width: 100%;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 12px;
   padding: 0.55rem 0.65rem;
-  background: rgba(15, 23, 42, 0.72);
-  color: rgba(248, 250, 252, 0.96);
+  background: rgba(23, 27, 36, 0.72);
+  color: rgba(244, 244, 239, 0.96);
 }
 
 .cashflow-modal__form .cashflow-checkbox {
@@ -1696,10 +1717,10 @@ fieldset legend {
 
 .cashflow-modal__error {
   padding: 0.65rem 0.75rem;
-  border: 1px solid rgba(248, 113, 113, 0.35);
+  border: 1px solid rgba(224, 140, 104, 0.35);
   border-radius: 12px;
-  background: rgba(127, 29, 29, 0.35);
-  color: rgba(254, 226, 226, 0.98);
+  background: rgba(162, 71, 42, 0.35);
+  color: rgba(244, 244, 239, 0.98);
 }
 
 .cashflow-modal__actions {
@@ -1713,15 +1734,15 @@ fieldset legend {
   min-width: 0;
   overflow: hidden;
   margin: 0.75rem 0;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 16px;
   background:
-    linear-gradient(180deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.72));
-  box-shadow: 0 12px 28px rgba(2, 6, 23, 0.18);
+    linear-gradient(180deg, rgba(29, 34, 45, 0.72), rgba(23, 27, 36, 0.72));
+  box-shadow: 0 12px 28px rgba(16, 20, 28, 0.18);
 }
 
 .cashflow-details-panel[open] {
-  border-color: rgba(96, 165, 250, 0.26);
+  border-color: rgba(138, 163, 224, 0.26);
 }
 
 .cashflow-details-panel__summary {
@@ -1744,7 +1765,7 @@ fieldset legend {
   align-items: center;
   gap: 0.55rem;
   min-width: 0;
-  color: rgba(248, 250, 252, 0.96);
+  color: var(--text);
 }
 
 .cashflow-details-panel__title strong {
@@ -1759,8 +1780,8 @@ fieldset legend {
   width: 1.25rem;
   height: 1.25rem;
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.75);
-  color: rgba(203, 213, 225, 0.92);
+  background: rgba(23, 27, 36, 0.75);
+  color: rgba(162, 168, 182, 0.92);
   font-size: 1rem;
   line-height: 1;
   transition: transform 140ms ease, background 140ms ease;
@@ -1768,15 +1789,15 @@ fieldset legend {
 
 .cashflow-details-panel[open] .cashflow-details-panel__chevron {
   transform: rotate(90deg);
-  background: rgba(37, 99, 235, 0.35);
-  color: rgba(239, 246, 255, 1);
+  background: rgba(31, 47, 80, 0.35);
+  color: rgba(244, 244, 239, 1);
 }
 
 .cashflow-details-panel__extra {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  color: rgba(203, 213, 225, 0.72);
+  color: rgba(162, 168, 182, 0.72);
   font-size: 0.78rem;
   white-space: nowrap;
 }
@@ -1785,8 +1806,8 @@ fieldset legend {
   min-width: 0;
   max-width: 100%;
   padding: 0.85rem 0.95rem 1rem;
-  border-top: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(2, 6, 23, 0.16);
+  border-top: 1px solid rgba(130, 138, 158, 0.14);
+  background: rgba(16, 20, 28, 0.16);
 }
 
 .cashflow-details-panel__body > .cashflow-details-panel:first-child {
@@ -1806,7 +1827,7 @@ fieldset legend {
   justify-content: center;
   gap: 0.4rem;
   min-height: 36px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid rgba(130, 138, 158, 0.22);
   border-radius: 8px;
   font-size: 0.84rem;
   font-weight: 700;
@@ -1835,8 +1856,8 @@ fieldset legend {
 .btn-small:focus-visible,
 .tab-button:focus-visible {
   outline: none;
-  border-color: rgba(125, 211, 252, 0.72);
-  box-shadow: 0 0 0 3px rgba(125, 211, 252, 0.16);
+  border-color: rgba(138, 163, 224, 0.72);
+  box-shadow: 0 0 0 3px rgba(138, 163, 224, 0.16);
 }
 
 .cashflow-action:disabled,
@@ -1846,55 +1867,43 @@ fieldset legend {
   transform: none;
 }
 
-.cashflow-action--primary,
-.btn-primary {
-  padding: 0.6rem 0.95rem;
-  background: rgba(56, 189, 248, 0.18);
-  border-color: rgba(56, 189, 248, 0.42);
-  color: rgba(224, 242, 254, 0.98);
-  box-shadow: 0 10px 24px rgba(14, 165, 233, 0.14);
-}
-
-.cashflow-action--primary:hover,
-.btn-primary:hover {
-  background: rgba(56, 189, 248, 0.26);
-  border-color: rgba(125, 211, 252, 0.62);
-  color: rgba(240, 249, 255, 1);
+.cashflow-action--primary:hover {
+  filter: brightness(1.08);
 }
 
 .cashflow-action--secondary,
 .btn-small {
   padding: 0.48rem 0.72rem;
-  background: rgba(30, 41, 59, 0.72);
-  border-color: rgba(148, 163, 184, 0.22);
-  color: rgba(226, 232, 240, 0.94);
+  background: rgba(29, 34, 45, 0.72);
+  border-color: rgba(130, 138, 158, 0.22);
+  color: rgba(236, 238, 242, 0.94);
   box-shadow: none;
 }
 
 .cashflow-action--secondary:hover,
 .btn-small:hover {
-  background: rgba(51, 65, 85, 0.86);
-  border-color: rgba(148, 163, 184, 0.36);
-  color: rgba(248, 250, 252, 1);
+  background: rgba(88, 94, 108, 0.86);
+  border-color: rgba(130, 138, 158, 0.36);
+  color: rgba(244, 244, 239, 1);
 }
 
 .tab-button {
   min-height: 38px;
   padding: 0.58rem 0.95rem;
-  background: rgba(30, 41, 59, 0.58);
-  border-color: rgba(148, 163, 184, 0.18);
-  color: rgba(203, 213, 225, 0.86);
+  background: rgba(29, 34, 45, 0.58);
+  border-color: rgba(130, 138, 158, 0.18);
+  color: rgba(162, 168, 182, 0.86);
 }
 
 .tab-button:hover,
 .tab-button.active {
-  background: rgba(56, 189, 248, 0.14);
-  border-color: rgba(56, 189, 248, 0.44);
-  color: rgba(224, 242, 254, 0.98);
+  background: rgba(138, 163, 224, 0.14);
+  border-color: rgba(138, 163, 224, 0.44);
+  color: rgba(241, 230, 208, 0.98);
 }
 
 .tab-button.active {
-  box-shadow: inset 0 -2px 0 rgba(125, 211, 252, 0.62);
+  box-shadow: inset 0 -2px 0 rgba(138, 163, 224, 0.62);
 }
 
 .cashflow-table .btn-small,
@@ -1939,16 +1948,16 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
 
 [data-cashflow-delete-tx],
 [data-cashflow-modal-close].btn-small {
-  background: rgba(239, 111, 134, 0.1);
-  border-color: rgba(239, 111, 134, 0.24);
-  color: rgba(254, 202, 202, 0.94);
+  background: rgba(224, 140, 104, 0.1);
+  border-color: rgba(224, 140, 104, 0.24);
+  color: rgba(224, 140, 104, 0.94);
 }
 
 [data-cashflow-delete-tx]:hover,
 [data-cashflow-modal-close].btn-small:hover {
-  background: rgba(239, 111, 134, 0.18);
-  border-color: rgba(239, 111, 134, 0.42);
-  color: rgba(254, 226, 226, 1);
+  background: rgba(224, 140, 104, 0.18);
+  border-color: rgba(224, 140, 104, 0.42);
+  color: rgba(244, 244, 239, 1);
 }
 
 .metric-grid {
@@ -1963,9 +1972,9 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
   display: grid;
   gap: 0.4rem;
   padding: var(--cashflow-metric-padding);
-  border: 1px solid rgba(127, 144, 166, 0.2);
+  border: 1px solid rgba(130, 138, 158, 0.2);
   border-radius: 0.8rem;
-  background: rgba(20, 28, 42, 0.5);
+  background: rgba(23, 27, 36, 0.5);
 }
 
 .metric-tile span,
@@ -2005,9 +2014,9 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
   width: 1.18rem;
   height: 1.18rem;
   place-items: center;
-  border: 1px solid rgba(125, 211, 252, 0.38);
+  border: 1px solid rgba(138, 163, 224, 0.38);
   border-radius: 999px;
-  background: rgba(15, 23, 42, 0.92);
+  background: rgba(23, 27, 36, 0.92);
   color: var(--accent);
   cursor: pointer;
   font-size: 0.72rem;
@@ -2021,8 +2030,8 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
 }
 
 .cashflow-help-popover[open] > summary {
-  border-color: rgba(111, 208, 132, 0.58);
-  color: #6fd084;
+  border-color: rgba(107, 184, 145, 0.58);
+  color: var(--ok);
 }
 
 .cashflow-help-popover__body {
@@ -2033,9 +2042,9 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
   min-width: min(18rem, calc(100vw - 2rem));
   max-width: 22rem;
   padding: 0.8rem;
-  border: 1px solid rgba(125, 211, 252, 0.28);
+  border: 1px solid rgba(138, 163, 224, 0.28);
   border-radius: 0.8rem;
-  background: rgba(8, 13, 24, 0.98);
+  background: rgba(16, 20, 28, 0.98);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36);
   color: var(--text);
   text-transform: none;
@@ -2054,9 +2063,12 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
 }
 
 .metric-tile strong {
-  color: var(--accent);
-  font-size: 1.1rem;
-  font-weight: 700;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.3rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 .metric-tile small {
@@ -2074,10 +2086,23 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
 :root[data-cashflow-theme="light"] .cashflow-user-menu__panel,
 :root[data-cashflow-theme="light"] .cashflow-action--secondary,
 :root[data-cashflow-theme="light"] .btn-small,
-:root[data-cashflow-theme="light"] .tab-button {
-  border-color: rgba(71, 85, 105, 0.22);
+:root[data-cashflow-theme="light"] .tab-button,
+:root[data-cashflow-theme="light"] .cashflow-tab-content .panel,
+:root[data-cashflow-theme="light"] .cashflow-shell-panel,
+:root[data-cashflow-theme="light"] .cashflow-details-panel[open] .cashflow-details-panel__body,
+:root[data-cashflow-theme="light"] .cashflow-modal,
+:root[data-cashflow-theme="light"] .cashflow-modal__form select,
+:root[data-cashflow-theme="light"] .cashflow-list .cashflow-budget-row,
+:root[data-cashflow-theme="light"] .cashflow-admin-account-card__badges span,
+:root[data-cashflow-theme="light"] .cashflow-user-card,
+:root[data-cashflow-theme="light"] .cashflow-chip,
+:root[data-cashflow-theme="light"] .cashflow-header,
+:root[data-cashflow-theme="light"] .cashflow-help-popover > summary,
+:root[data-cashflow-theme="light"] .cashflow-help-popover__body {
+  border-color: rgba(130, 138, 158, 0.22);
   background: rgba(255, 255, 255, 0.76);
-  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 10px 26px rgba(23, 27, 36, 0.08);
+  color: var(--text);
 }
 
 :root[data-cashflow-theme="light"] .cashflow-tab-content input,
@@ -2086,7 +2111,7 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
 :root[data-cashflow-theme="light"] .cashflow-settings-form select,
 :root[data-cashflow-theme="light"] .cashflow-settings-form textarea,
 :root[data-cashflow-theme="light"] .cashflow-user-menu__preferences select {
-  border-color: rgba(71, 85, 105, 0.24);
+  border-color: rgba(130, 138, 158, 0.24);
   background: rgba(255, 255, 255, 0.82);
   color: var(--text);
 }
@@ -2101,8 +2126,8 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
 :root[data-cashflow-theme="light"] .btn-small:hover,
 :root[data-cashflow-theme="light"] .tab-button:hover,
 :root[data-cashflow-theme="light"] .tab-button.active {
-  background: rgba(14, 165, 233, 0.13);
-  color: #0f172a;
+  background: rgba(31, 47, 80, 0.13);
+  color: var(--accent-strong);
 }
 
 @media (prefers-color-scheme: light) {
@@ -2116,10 +2141,23 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
   :root[data-cashflow-theme="system"] .cashflow-user-menu__panel,
   :root[data-cashflow-theme="system"] .cashflow-action--secondary,
   :root[data-cashflow-theme="system"] .btn-small,
-  :root[data-cashflow-theme="system"] .tab-button {
-    border-color: rgba(71, 85, 105, 0.22);
+  :root[data-cashflow-theme="system"] .tab-button,
+  :root[data-cashflow-theme="system"] .cashflow-tab-content .panel,
+  :root[data-cashflow-theme="system"] .cashflow-shell-panel,
+  :root[data-cashflow-theme="system"] .cashflow-details-panel[open] .cashflow-details-panel__body,
+  :root[data-cashflow-theme="system"] .cashflow-modal,
+  :root[data-cashflow-theme="system"] .cashflow-modal__form select,
+  :root[data-cashflow-theme="system"] .cashflow-list .cashflow-budget-row,
+  :root[data-cashflow-theme="system"] .cashflow-admin-account-card__badges span,
+  :root[data-cashflow-theme="system"] .cashflow-user-card,
+  :root[data-cashflow-theme="system"] .cashflow-chip,
+  :root[data-cashflow-theme="system"] .cashflow-header,
+  :root[data-cashflow-theme="system"] .cashflow-help-popover > summary,
+  :root[data-cashflow-theme="system"] .cashflow-help-popover__body {
+    border-color: rgba(130, 138, 158, 0.22);
     background: rgba(255, 255, 255, 0.76);
-    box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+    box-shadow: 0 10px 26px rgba(23, 27, 36, 0.08);
+    color: var(--text);
   }
 
   :root[data-cashflow-theme="system"] .cashflow-tab-content input,
@@ -2128,7 +2166,7 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
   :root[data-cashflow-theme="system"] .cashflow-settings-form select,
   :root[data-cashflow-theme="system"] .cashflow-settings-form textarea,
   :root[data-cashflow-theme="system"] .cashflow-user-menu__preferences select {
-    border-color: rgba(71, 85, 105, 0.24);
+    border-color: rgba(130, 138, 158, 0.24);
     background: rgba(255, 255, 255, 0.82);
     color: var(--text);
   }
@@ -2143,8 +2181,8 @@ table.cashflow-table.cashflow-table--ledger-compact .btn-small,
   :root[data-cashflow-theme="system"] .btn-small:hover,
   :root[data-cashflow-theme="system"] .tab-button:hover,
   :root[data-cashflow-theme="system"] .tab-button.active {
-    background: rgba(14, 165, 233, 0.13);
-    color: #0f172a;
+    background: rgba(31, 47, 80, 0.13);
+    color: var(--accent-strong);
   }
 }
 

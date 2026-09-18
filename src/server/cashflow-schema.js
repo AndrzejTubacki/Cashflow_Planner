@@ -4,7 +4,7 @@ import {
   NOTIFICATION_DELIVERY_TIME
 } from "./cashflow-constants.js";
 
-export const PLANNING_SCHEMA_VERSION = 19;
+export const PLANNING_SCHEMA_VERSION = 20;
 export const LEDGER_SCHEMA_VERSION = 5;
 export const PLANNING_TABLE_NAMES = [
   "settings",
@@ -150,6 +150,10 @@ export function initializePlanningSchema(db) {
       anchor_business_day_adjustment TEXT DEFAULT 'none'
         CHECK (anchor_business_day_adjustment IN ('none', 'previous', 'next')),
       anchor_holiday_country TEXT DEFAULT 'PL',
+      -- When set, overrides anchor_type/anchor_day_of_month: this expense
+      -- occurs anchor_offset_days after the referenced recurring income's
+      -- own occurrence date each cycle. See calculateNextDate().
+      anchor_income_id TEXT,
       planned_transaction_id TEXT NOT NULL UNIQUE,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,

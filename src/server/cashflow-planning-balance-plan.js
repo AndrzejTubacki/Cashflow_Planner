@@ -145,6 +145,85 @@ export function createPlanningRunningBalancePlan({
   };
 }
 
+const RESERVE_TRANSFER_OCCURRENCE_KEY_PATTERN = /^reserve_transfer:.+:.+:(in|out)$/;
+
+/**
+ * Walks pending/future rows in the same chronological order as
+ * createPlanningRunningBalancePlan() and tracks a second running total
+ * alongside the balance: money already moved out of its source period via
+ * a reserve-transfer "out" row but whose "in" counterpart (in a later
+ * period) hasn't happened yet. This is what the ledger UI shows as
+ * "+X reserved" under a row's balance — how much of that balance is
+ * already earmarked for a future period rather than freely spendable now.
+ *
+ * Confirmed rows are intentionally excluded, same as running_balance: their
+ * balance comes from ledger history, computed at confirm-time, not from
+ * this forward-looking planning walk.
+ */
+export function computeReservedBalanceByRowId({
+  confirmedRows = [],
+  futureRows = [],
+  pendingRows = [],
+  settings = {},
+  today = null
+} = {}) {
+  const ledgerCurrency = activeLedgerCurrency(settings);
+  const currentDate = today || todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
+  const activeConfirmedRows = sortConfirmedRowsForBalance(confirmedRows)
+    .filter(row => rowLedgerCurrency(row) === ledgerCurrency);
+
+  const planningRows = [
+    ...activeConfirmedRows
+      .filter(row => String(row.date || "") > currentDate)
+      .map(row => ({
+        bucket: "confirmed",
+        created_at: row.created_at,
+        date: row.date,
+        id: row.id,
+        ledger_amount: storedOrComputedConfirmedLedgerAmount(row),
+        occurrence_key: row.occurrence_key
+      })),
+    ...pendingRows
+      .filter(row => rowLedgerCurrency(row) === ledgerCurrency)
+      .map(row => ({
+        bucket: "pending",
+        created_at: row.created_at,
+        date: row.date,
+        id: row.id,
+        ledger_amount: row.ledger_amount,
+        occurrence_key: row.occurrence_key
+      })),
+    ...futureRows
+      .filter(row => rowLedgerCurrency(row) === ledgerCurrency)
+      .map(row => ({
+        bucket: "future",
+        created_at: row.created_at,
+        date: row.date,
+        id: row.id,
+        ledger_amount: row.ledger_amount,
+        occurrence_key: row.occurrence_key
+      }))
+  ].sort(comparePlanningBalanceRows);
+
+  const reservedById = new Map();
+  let reserved = 0;
+
+  for (const row of planningRows) {
+    const match = RESERVE_TRANSFER_OCCURRENCE_KEY_PATTERN.exec(String(row.occurrence_key || ""));
+    if (match) {
+      const ledgerAmount = roundMoneyAmount(row.ledger_amount);
+      reserved = match[1] === "out"
+        ? addMoneyAmounts(reserved, ledgerAmount)
+        : subtractMoneyAmounts(reserved, ledgerAmount);
+    }
+
+    if (row.bucket === "confirmed") continue;
+    reservedById.set(row.id, roundMoneyAmount(reserved));
+  }
+
+  return reservedById;
+}
+
 export async function applyPlanningRunningBalancePlan({
   budgetId,
   budgetStore,

@@ -7,7 +7,7 @@ import {
 import { escapeHtml } from "../utils.js";
 import { DEFAULT_LEDGER_CURRENCY, FX_PROVIDER_NOTES } from "./constants.js";
 import { normalizeCashflowNumericInput, openCashflowModal } from "./modal.js";
-import { localeOf, t } from "./shared.js";
+import { formatMessage, localeOf, t } from "./shared.js";
 
 function selectedOptionValues(select) {
   return [...(select?.options || [])]
@@ -215,6 +215,37 @@ async function withBusyButton(button, busyLabel, fn) {
     button.disabled = false;
     button.textContent = oldText;
   }
+}
+
+function describeFullImportPreview(locale, preview) {
+  const tables = Object.values(preview?.tables || {});
+  const exportRows = tables.reduce((sum, table) => sum + (table.exportRowCount || 0), 0);
+  const currentRows = tables.reduce((sum, table) => sum + (table.currentRowCount || 0), 0);
+  const settingsChangeCount = preview?.settingsChanges?.length || 0;
+  const exportYears = preview?.ledgerYears?.export || [];
+
+  const lines = [
+    t(locale, "Import preview"),
+    "",
+    formatMessage(locale, "Mode: {mode}", { mode: preview?.mode || "replace" }),
+    formatMessage(locale, "Planning rows: {exportRows} in the file, {currentRows} currently in this budget", {
+      currentRows,
+      exportRows
+    }),
+    formatMessage(locale, "Settings fields that will change: {count}", { count: settingsChangeCount }),
+    formatMessage(locale, "Ledger years in the file: {years}", {
+      years: exportYears.length ? exportYears.join(", ") : t(locale, "none")
+    })
+  ];
+
+  if (preview?.conflicts?.length) {
+    lines.push(formatMessage(locale, "Merge conflicts found: {count} (the import will be rejected until these are resolved)", {
+      count: preview.conflicts.length
+    }));
+  }
+
+  lines.push("", t(locale, "Continue with this import?"));
+  return lines.join("\n");
 }
 
 export function attachCashflowHandlers(root, props = {}) {
@@ -648,11 +679,16 @@ export function attachCashflowHandlers(root, props = {}) {
         const exportData = JSON.parse(text);
         const mode = settingsForm.querySelector("[data-cashflow-full-import-mode]")?.value || "replace";
         const includeOperationalSettings = settingsForm.querySelector("[data-cashflow-import-operational-settings]")?.checked;
-        const result = await postCashflowJson(apiClient, "/api/import/full", {
+        const requestBody = {
           mode,
           export: exportData,
           includeOperationalSettings
-        });
+        };
+
+        const preview = await postCashflowJson(apiClient, "/api/import/full/preview", requestBody);
+        if (!window.confirm(describeFullImportPreview(locale, preview))) return;
+
+        const result = await postCashflowJson(apiClient, "/api/import/full", requestBody);
 
         window.dispatchEvent(new CustomEvent("cashflow-refresh", { detail: result }));
       });

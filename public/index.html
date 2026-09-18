@@ -4,9 +4,40 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Cashflow</title>
+<script>
+  // Remember an explicit choice to use the beta UI so returning here
+  // doesn't bounce the user back to legacy every time. ?ui=legacy always
+  // wins (a way back even with a stored preference), and ?ui=beta jumps to
+  // beta immediately even on a first visit with nothing stored yet.
+  (function () {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var override = params.get("ui");
+      if (override === "legacy") return;
+      if (override === "beta" || localStorage.getItem("cashflow_preferred_ui") === "beta") {
+        window.location.replace("/beta/");
+      }
+    } catch (err) {
+      // Storage can be unavailable in private contexts; just stay on legacy.
+    }
+  })();
+</script>
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="stylesheet" href="/styles/base.css">
 <link rel="stylesheet" href="/styles/cashflow.css">
+<!--
+  Fonts load non-blocking: the app must paint with its fallback stack
+  immediately, not wait on a round-trip to Google's CDN, which is exactly
+  what a plain <link rel="stylesheet"> to fonts.googleapis.com forces (it's
+  render-blocking by default). preload fetches it in parallel; the
+  media="print" + onload swap applies it once it arrives without blocking
+  first paint. <noscript> covers browsers with JS disabled.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"></noscript>
 </head>
 <body>
   <div class="page-shell">

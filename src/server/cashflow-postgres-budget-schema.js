@@ -86,6 +86,7 @@ export const POSTGRES_BUDGET_COLUMNS = {
     "anchor_offset_days",
     "anchor_business_day_adjustment",
     "anchor_holiday_country",
+    "anchor_income_id",
     "planned_transaction_id",
     "created_at",
     "updated_at"
@@ -398,6 +399,10 @@ CREATE TABLE IF NOT EXISTS recurring_expenses (
   anchor_business_day_adjustment TEXT DEFAULT 'none'
     CHECK (anchor_business_day_adjustment IN ('none', 'previous', 'next')),
   anchor_holiday_country TEXT DEFAULT 'PL',
+  -- When set, overrides anchor_type/anchor_day_of_month: this expense
+  -- occurs anchor_offset_days after the referenced recurring income's own
+  -- occurrence date each cycle. See calculateNextDate().
+  anchor_income_id TEXT,
   planned_transaction_id TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
@@ -723,6 +728,8 @@ BEGIN
   END IF;
 END;
 $$;
+
+ALTER TABLE recurring_expenses ADD COLUMN IF NOT EXISTS anchor_income_id TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_future_budget_date ON future_transactions(budget_id, date);
 CREATE INDEX IF NOT EXISTS idx_future_budget_period ON future_transactions(budget_id, period);

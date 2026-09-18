@@ -70,7 +70,7 @@ saved in the current browser for the selected account, not in budget exports.
 | Control | What it does |
 | --- | --- |
 | Download full export | Downloads a JSON export of functional budget data. Operational settings are excluded unless explicitly included. |
-| Import full export | Restores or merges a Cashflow JSON export after validation and a safety backup. |
+| Import full export | Shows a preview of row counts, settings changes, and merge conflicts, then restores or merges a Cashflow JSON export after validation and a safety backup. |
 | Import one-off CSV | Imports one-off transactions from strict columns: `name,type,amount,currency,date`. |
 | Download confirmed ledger CSV | Downloads confirmed ledger rows for review or external analysis. |
 | Sample dataset | Downloads or loads fictitious demo data. Loading the sample replaces the current budget after a safety backup. |

@@ -1,0 +1,1083 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100dvh;
+}
+
+.beta-loading {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.beta-loading-mark {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  animation: beta-spin 0.9s linear infinite;
+  margin: 0 auto 12px;
+}
+
+@keyframes beta-spin {
+  to { transform: rotate(360deg); }
+}
+
+.beta-error-card {
+  max-width: 420px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m, 10px);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.beta-error-card h2 {
+  font-family: var(--font-display);
+  margin: 0 0 8px;
+}
+
+.beta-error-card a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- shell ---- */
+.beta-shell {
+  display: grid;
+  grid-template-columns: 216px 1fr;
+  min-height: 100dvh;
+}
+
+.beta-rail {
+  /* Deliberately not theme-driven: this stays a fixed dark navy brand
+     anchor in both light and dark mode, the same way the artifact
+     direction used it. --accent-strong swaps meaning between themes
+     (light text-accent vs. dark fill), which is wrong for a solid panel
+     fill, so it's not used here. */
+  background: #16213a;
+  color: #f4f5fa;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 14px;
+  gap: 22px;
+}
+
+.beta-wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 6px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 19px;
+}
+
+.beta-mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--brass, var(--warn));
+  color: #16213a;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 13px;
+  flex: none;
+}
+
+.beta-badge {
+  margin-left: auto;
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.14);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.beta-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.beta-section-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.72);
+  font: inherit;
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.beta-section-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.beta-section-btn.active {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-weight: 500;
+}
+
+.beta-soon {
+  margin-left: auto;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.beta-rail-footer {
+  margin-top: auto;
+  padding: 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  line-height: 1.45;
+}
+
+.beta-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.beta-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 28px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.beta-topbar-title {
+  font-weight: 600;
+}
+
+.beta-topbar-spacer {
+  flex: 1;
+}
+
+.beta-user-menu {
+  position: relative;
+}
+
+.beta-user-menu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 14px 6px 10px;
+  font-size: 12.5px;
+  cursor: pointer;
+  max-width: 220px;
+}
+
+.beta-user-menu-trigger:hover {
+  border-color: var(--accent);
+}
+
+.beta-user-menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.beta-user-menu-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  min-width: 240px;
+  /* --panel is intentionally translucent for panels that sit directly on
+     the page background; a floating menu with page content right behind
+     it (no backdrop dimming) needs something close to fully opaque or
+     that content shows through. */
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.25);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.beta-user-menu-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 4px;
+}
+
+.beta-user-menu-section:not(:last-child) {
+  border-bottom: 1px solid var(--line);
+}
+
+.beta-user-menu-section .beta-field-inline {
+  justify-content: space-between;
+  padding: 4px 4px;
+}
+
+.beta-user-menu-panel button[role="menuitem"] {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.beta-user-menu-panel button[role="menuitem"]:hover {
+  background: var(--panel-strong);
+}
+
+.beta-user-menu-panel button[role="menuitem"]:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.beta-view {
+  padding: 26px 28px 48px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 1040px;
+}
+
+.beta-view-head h1 {
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 600;
+  margin: 0 0 3px;
+}
+
+.beta-view-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.beta-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.beta-tile {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m, 10px);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.beta-tile-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.beta-tile-value {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.beta-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m, 10px);
+  padding: 16px 18px;
+}
+
+.beta-panel h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.beta-panel-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.beta-panel-table th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.beta-panel-table th.beta-num,
+.beta-panel-table td.beta-num {
+  text-align: right;
+}
+
+.beta-panel-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.beta-panel-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.beta-date-cell {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.beta-amt {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.beta-amt.pos {
+  color: var(--ok);
+}
+
+.beta-amt.neg {
+  color: var(--bad);
+}
+
+.beta-reserved-note {
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.beta-pill {
+  display: inline-flex;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.beta-pill-confirmed {
+  background: var(--panel-strong);
+  color: var(--muted);
+}
+
+.beta-pill-pending {
+  background: rgba(220, 172, 95, 0.16);
+  color: var(--brass, var(--warn));
+}
+
+/* A stable blue that reads the same way in both themes, unlike --accent
+   (which intentionally inverts light/dark for text contrast reasons but
+   would look like two different colors if used as a badge fill). Used for
+   badges that need to stand out as notable, not just "neutral/done". */
+.beta-pill-accent {
+  background: rgba(91, 127, 209, 0.16);
+  color: #5b7fd1;
+}
+
+.beta-btn-small {
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.beta-btn-small:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.beta-empty {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.beta-error {
+  padding: 10px 14px;
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+  background: rgba(224, 140, 104, 0.1);
+  color: var(--bad);
+  font-size: 13px;
+}
+
+.beta-placeholder {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-m, 10px);
+  padding: 34px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.beta-placeholder strong {
+  display: block;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 17px;
+  margin-bottom: 6px;
+}
+
+.beta-placeholder a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.beta-success {
+  padding: 10px 14px;
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+  background: rgba(107, 184, 145, 0.12);
+  color: var(--ok);
+  font-size: 13px;
+}
+
+.beta-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.beta-field select,
+.beta-field input {
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.beta-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.beta-btn-primary {
+  border: 1px solid rgba(107, 184, 145, 0.4);
+  background: rgba(107, 184, 145, 0.15);
+  color: var(--ok);
+  border-radius: 8px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.beta-btn-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.beta-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.beta-panel-head h3 {
+  margin: 0;
+}
+
+.beta-pill-muted {
+  background: var(--panel-strong);
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.beta-row-inactive {
+  opacity: 0.55;
+}
+
+.beta-row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.beta-btn-danger {
+  border-color: rgba(224, 140, 104, 0.4);
+  color: var(--bad);
+}
+
+.beta-inline-form {
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.beta-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.beta-field-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.beta-field-checkbox input {
+  width: auto;
+}
+
+.beta-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.beta-hint a {
+  color: var(--accent);
+}
+
+.beta-priority-input {
+  width: 60px;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.beta-inline-error {
+  display: block;
+  color: var(--bad);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.beta-progress {
+  width: 100px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--panel-strong);
+  overflow: hidden;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.beta-progress-bar {
+  height: 100%;
+  background: var(--ok);
+  border-radius: 999px;
+}
+
+.beta-progress-label {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.beta-budget-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.beta-budget-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.beta-budget-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+
+.beta-budget-meta {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.beta-budget-name-input {
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  max-width: 260px;
+}
+
+.beta-budget-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.beta-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 14, 24, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.beta-modal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-m, 10px);
+  width: 100%;
+  max-width: 640px;
+  padding: 20px 22px 22px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.beta-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.beta-modal-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 18px;
+}
+
+.beta-modal-close {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.beta-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.beta-funding-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.beta-funding-row {
+  display: grid;
+  /* The date column is a fixed width, not auto: goals always show a real
+     ISO date ("2026-10-14") while flex items (which have no due date)
+     always show "No date" — a shorter string. With `auto` sizing, that
+     width difference shifted the 1fr label column and threw off where
+     every bar started, so goal bars and flex bars visibly didn't line up. */
+  grid-template-columns: minmax(0, 1fr) minmax(90px, 160px) 38px 72px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.beta-funding-row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.beta-funding-row-pct {
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.beta-funding-row-date {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.beta-funding-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--panel-strong);
+}
+
+/* future uses the same stable blue as .beta-pill-accent, not --accent —
+   --accent inverts brightness between themes (a light-mode/dark-mode text
+   contrast choice), which would make this segment vivid in dark mode and
+   near-black in light mode instead of a consistent color in both. */
+.beta-funding-seg-confirmed { background: var(--ok); }
+.beta-funding-seg-pending { background: var(--warn, #dcac5f); }
+.beta-funding-seg-future { background: #5b7fd1; }
+.beta-funding-seg-missing { background: var(--bad); }
+
+.beta-details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 12px;
+  margin-bottom: 8px;
+}
+
+.beta-details > summary {
+  cursor: pointer;
+  padding: 8px 0;
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.beta-details-nested {
+  margin: 8px 0 8px 4px;
+  border-color: transparent;
+  border-left: 2px solid var(--line);
+  border-radius: 0;
+  padding-left: 12px;
+}
+
+.beta-details > .beta-panel-table {
+  margin-bottom: 10px;
+}
+
+.beta-details-summary-extra {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.beta-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 10px 2px 6px;
+}
+
+.beta-form-actions-start {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.beta-fx-currency-picker {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.beta-fx-picker-label {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.beta-fx-picker-select {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.beta-fx-picker-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.beta-notification-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.beta-notification-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+
+.beta-field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.beta-field-inline select {
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.beta-admin-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.beta-admin-account-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.beta-admin-account-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  padding: 10px 14px;
+}
+
+.beta-admin-account-head:hover {
+  background: var(--panel-strong);
+}
+
+.beta-admin-account-head-chevron {
+  flex: none;
+  width: 14px;
+  color: var(--muted);
+}
+
+.beta-admin-account-head-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.beta-admin-account-head-main strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.beta-admin-account-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: none;
+}
+
+.beta-admin-account-budgets-count {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.beta-admin-account-body {
+  padding: 4px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.beta-row-actions-wrap {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.beta-admin-fieldset {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0;
+}
+
+.beta-admin-fieldset legend {
+  padding: 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.beta-admin-provider-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+@media (max-width: 720px) {
+  .beta-shell {
+    grid-template-columns: 1fr;
+    /* Single-column layout stacks the rail above main as two implicit grid
+       rows. Without an explicit row template, CSS Grid's default
+       align-content stretches *both* auto rows to fill the shell's
+       min-height:100dvh whenever their combined natural content is shorter
+       than the viewport (e.g. a mostly-empty tab) — inflating the top nav
+       bar to well over 100px of empty padding instead of staying a slim
+       header. Pinning the rail's row to its own content height and letting
+       only the main-content row (1fr) absorb any extra space fixes it.
+       Desktop is unaffected — this rule only exists inside this ≤720px
+       block. */
+    grid-template-rows: auto 1fr;
+  }
+
+  .beta-rail {
+    flex-direction: row;
+    overflow-x: auto;
+    align-items: center;
+    /* The 20px vertical padding above is sized for the full-height desktop
+       sidebar (wordmark + nav + footer stacked). As a slim horizontal top
+       bar it just wastes screen height, so cut it down. */
+    padding: 8px 10px;
+    gap: 6px;
+  }
+
+  .beta-wordmark,
+  .beta-rail-footer {
+    display: none;
+  }
+
+  .beta-sections {
+    flex-direction: row;
+  }
+
+  .beta-section-btn span:not(.beta-soon) {
+    display: none;
+  }
+
+  .beta-user-menu-trigger {
+    padding: 6px;
+    max-width: none;
+  }
+
+  .beta-user-menu-label {
+    display: none;
+  }
+
+  .beta-user-menu-panel {
+    min-width: 220px;
+  }
+
+  .beta-tiles {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .beta-admin-account-head {
+    flex-wrap: wrap;
+  }
+
+  .beta-admin-account-budgets-count {
+    display: none;
+  }
+
+  .beta-funding-row {
+    grid-template-columns: minmax(0, 1fr) 60px 32px;
+  }
+
+  .beta-funding-row-date {
+    display: none;
+  }
+
+  .beta-view {
+    padding: 18px 16px 40px;
+  }
+
+  .beta-panel-table {
+    /* Tables can be wider than the viewport at mobile widths (Date +
+       Description + Amount + Status + action buttons doesn't fit in
+       ~360px of usable width) — scroll the table itself instead of
+       letting it force the whole page wider than the viewport. Scoped
+       to mobile only: at desktop widths the columns just shrink to fit
+       instead, which reads better than a horizontally-scrollable table
+       with no visible scroll affordance. */
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .beta-panel-table table {
+    min-width: 480px;
+  }
+}

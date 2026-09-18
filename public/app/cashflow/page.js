@@ -246,6 +246,9 @@ function renderUserMenu(locale, cashflow = null, canAdmin = false, uiPreferences
           ${renderPreferenceSelect(locale, "defaultTab", "Default landing tab", UI_DEFAULT_TAB_OPTIONS, preferences.defaultTab)}
           <small>${escapeHtml(t(locale, "Saved in this browser for the selected account."))}</small>
         </div>
+        <div class="cashflow-user-menu__section">
+          <a href="/beta/" class="cashflow-beta-link">${escapeHtml(t(locale, "Try the new beta UI"))}</a>
+        </div>
       </div>
     </details>
   `;

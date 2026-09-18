@@ -1741,7 +1741,10 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
         const userId = await resolveRequestUser(req);
-        res.json(await deleteRecurringIncome(userId, req.params.id));
+        res.json(await deleteRecurringIncome(userId, req.params.id, {
+          reassignAnchorsToIncomeId: req.body?.reassignAnchorsToIncomeId || null,
+          fallbackAnchorsToFixedDay: Boolean(req.body?.fallbackAnchorsToFixedDay)
+        }));
       } catch (error) {
         await fail(req, res, error, "Failed to delete recurring income", "cashflow_recurring_income_delete_failed");
       }

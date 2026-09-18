@@ -26,7 +26,10 @@
     "db:sqlite:verify": "node scripts/verify-sqlite-migration.mjs",
     "db:postgres:schema": "node scripts/print-postgres-schema.mjs",
     "docs:screenshots": "node scripts/generate-readme-screenshots.mjs",
-    "operator:grant-admin": "node scripts/operator-admin.mjs"
+    "operator:grant-admin": "node scripts/operator-admin.mjs",
+    "beta:install": "npm --prefix frontend-beta install",
+    "beta:dev": "npm --prefix frontend-beta run dev",
+    "beta:build": "npm --prefix frontend-beta run build"
   },
   "dependencies": {
     "argon2": "^0.44.0",

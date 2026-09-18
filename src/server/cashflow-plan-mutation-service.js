@@ -1,9 +1,9 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
+import { calculateNextDate, requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { addMoneyAmounts, multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
-import { badRequest, notFound } from "./cashflow-user-utils.js";
+import { badRequest, conflict, notFound } from "./cashflow-user-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
 import { validatePlanMutationInput } from "./cashflow-plan-input-validation.js";
 import {
@@ -54,6 +54,28 @@ export function createCashflowPlanMutationService({
       value || existing || settings?.holiday_country || "PL",
       "anchor_holiday_country"
     );
+  }
+
+  function requireExistingAnchorIncomeId(db, anchorIncomeId) {
+    if (!anchorIncomeId) return null;
+
+    const income = db.prepare("SELECT id FROM recurring_incomes WHERE id = ?").get(anchorIncomeId);
+    if (!income) {
+      throw badRequest("Anchor income not found", [{ field: "anchor_income_id", reason: "not_found" }]);
+    }
+
+    return anchorIncomeId;
+  }
+
+  async function requireExistingAnchorIncomeIdWithBudgetStore(writer, userId, anchorIncomeId) {
+    if (!anchorIncomeId) return null;
+
+    const incomes = await writer.listPlanningRows(userId, "recurring_incomes");
+    if (!incomes.some(income => income.id === anchorIncomeId)) {
+      throw badRequest("Anchor income not found", [{ field: "anchor_income_id", reason: "not_found" }]);
+    }
+
+    return anchorIncomeId;
   }
 
   function clearBudgetPeriodIncomeIfSelected(db, incomeId) {
@@ -296,6 +318,7 @@ export function createCashflowPlanMutationService({
         const id = generateId("rec-exp");
         const plannedTxId = insertPlannedTransaction(db, "recurring_expense", input.priority);
         const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
+        const anchorIncomeId = requireExistingAnchorIncomeId(db, input.anchor_income_id);
 
         db.prepare(`
           INSERT INTO recurring_expenses (
@@ -303,8 +326,8 @@ export function createCashflowPlanMutationService({
             prediction_min_recorded_months, necessary, active,
             repeat_every_months, start_month_year, anchor_type, anchor_day_of_month,
             anchor_offset_days, anchor_business_day_adjustment, anchor_holiday_country,
-            planned_transaction_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            anchor_income_id, planned_transaction_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         `).run(
           id,
           input.name || "Unnamed",
@@ -322,6 +345,7 @@ export function createCashflowPlanMutationService({
           input.anchor_offset_days ?? 0,
           input.anchor_business_day_adjustment || "none",
           normalizeAnchorHolidayCountry(db, input.anchor_holiday_country),
+          anchorIncomeId,
           plannedTxId
         );
 
@@ -354,6 +378,7 @@ export function createCashflowPlanMutationService({
       );
       const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
       const timestamp = new Date().toISOString();
+      const anchorIncomeId = await requireExistingAnchorIncomeIdWithBudgetStore(writer, userId, input.anchor_income_id);
 
       await writer.insertPlanningRows(userId, "recurring_expenses", [{
         active: pgBoolean(input.active ?? 1),
@@ -361,6 +386,7 @@ export function createCashflowPlanMutationService({
         anchor_business_day_adjustment: input.anchor_business_day_adjustment || "none",
         anchor_day_of_month: input.anchor_day_of_month ?? null,
         anchor_holiday_country: normalizeAnchorHolidayCountryFromSettings(settings, input.anchor_holiday_country),
+        anchor_income_id: anchorIncomeId,
         anchor_offset_days: input.anchor_offset_days ?? 0,
         anchor_type: ["day_of_month", "month_end"].includes(input.anchor_type) ? input.anchor_type : "month_end",
         created_at: timestamp,
@@ -406,6 +432,7 @@ export function createCashflowPlanMutationService({
         if (!existing) throw notFound("Recurring expense not found");
 
         const merged = normalizeRecurringInput(existing, input || {});
+        const anchorIncomeId = requireExistingAnchorIncomeId(db, merged.anchor_income_id);
 
         if (input.priority !== undefined) {
           updatePlannedPriority(db, existing.planned_transaction_id, "operating", input.priority);
@@ -428,6 +455,7 @@ export function createCashflowPlanMutationService({
             anchor_offset_days = ?,
             anchor_business_day_adjustment = ?,
             anchor_holiday_country = ?,
+            anchor_income_id = ?,
             updated_at = datetime('now')
           WHERE id = ?
         `).run(
@@ -446,6 +474,7 @@ export function createCashflowPlanMutationService({
           merged.anchor_offset_days,
           merged.anchor_business_day_adjustment || "none",
           normalizeAnchorHolidayCountry(db, merged.anchor_holiday_country, existing.anchor_holiday_country),
+          anchorIncomeId,
           id
         );
 
@@ -475,6 +504,7 @@ export function createCashflowPlanMutationService({
 
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
       const merged = normalizeRecurringInput(existing, input || {});
+      const anchorIncomeId = await requireExistingAnchorIncomeIdWithBudgetStore(writer, userId, merged.anchor_income_id);
 
       if (input.priority !== undefined) {
         await updatePlannedPriorityWithBudgetStore(
@@ -496,6 +526,7 @@ export function createCashflowPlanMutationService({
           merged.anchor_holiday_country,
           existing.anchor_holiday_country
         ),
+        anchor_income_id: anchorIncomeId,
         anchor_offset_days: merged.anchor_offset_days,
         anchor_type: ["day_of_month", "month_end"].includes(merged.anchor_type) ? merged.anchor_type : "month_end",
         currency: requireSupportedCurrency(merged.currency || "PLN"),
@@ -817,9 +848,39 @@ export function createCashflowPlanMutationService({
     return withProjectionStatus(userId, result);
   }
 
-  function deleteRecurringIncome(userId, id) {
+  function fallbackAnchorDayForDependent(dependent, referencedIncome, today) {
+    // Preserve roughly where the expense currently lands: use the same
+    // income-anchored calculation calculateNextDate() already does for
+    // real generation, for this cycle (or next, if this cycle's has
+    // already passed), as the new fixed day-of-month — so deleting the
+    // income doesn't silently jump the expense's date around.
+    const [todayYear, todayMonth] = today.split("-").map(Number);
+    const anchored = { ...dependent, anchor_income: referencedIncome };
+    let anchorDate = calculateNextDate(anchored, todayYear, todayMonth);
+    if (!anchorDate || anchorDate < today) {
+      const next = new Date(Date.UTC(todayYear, todayMonth, 1));
+      anchorDate = calculateNextDate(anchored, next.getUTCFullYear(), next.getUTCMonth() + 1);
+    }
+    return anchorDate ? Number(anchorDate.slice(8, 10)) : 1;
+  }
+
+  function reanchorDependentExpenseToFixedDay(db, dependent, referencedIncome, today) {
+    const fallbackDay = fallbackAnchorDayForDependent(dependent, referencedIncome, today);
+
+    db.prepare(`
+      UPDATE recurring_expenses
+      SET anchor_income_id = NULL,
+          anchor_type = 'day_of_month',
+          anchor_day_of_month = ?,
+          anchor_offset_days = 0,
+          updated_at = datetime('now')
+      WHERE id = ?
+    `).run(fallbackDay, dependent.id);
+  }
+
+  function deleteRecurringIncome(userId, id, options = {}) {
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return deleteRecurringIncomeWithBudgetStore(userId, id);
+      return deleteRecurringIncomeWithBudgetStore(userId, id, options);
     }
 
     const db = openPlanningDb(userId);
@@ -827,6 +888,49 @@ export function createCashflowPlanMutationService({
       db.transaction(() => {
         const existing = db.prepare("SELECT * FROM recurring_incomes WHERE id = ?").get(id);
         if (!existing) throw notFound("Recurring income not found");
+
+        const dependents = db.prepare("SELECT * FROM recurring_expenses WHERE anchor_income_id = ?").all(id);
+
+        if (dependents.length) {
+          const reassignToIncomeId = options.reassignAnchorsToIncomeId || null;
+          const fallbackToFixedDay = Boolean(options.fallbackAnchorsToFixedDay);
+
+          if (!reassignToIncomeId && !fallbackToFixedDay) {
+            throw conflict(
+              "This income anchors other recurring expenses; reassign or convert them before deleting",
+              {
+                anchorDependents: dependents.map(dep => ({ id: dep.id, name: dep.name }))
+              }
+            );
+          }
+
+          if (reassignToIncomeId) {
+            if (reassignToIncomeId === id) {
+              throw badRequest("Cannot reassign to the income being deleted", [{
+                field: "reassignAnchorsToIncomeId",
+                reason: "same_as_deleted"
+              }]);
+            }
+            const replacement = db.prepare("SELECT id FROM recurring_incomes WHERE id = ?").get(reassignToIncomeId);
+            if (!replacement) {
+              throw badRequest("Reassignment income not found", [{
+                field: "reassignAnchorsToIncomeId",
+                reason: "not_found"
+              }]);
+            }
+
+            db.prepare(`
+              UPDATE recurring_expenses
+              SET anchor_income_id = ?, updated_at = datetime('now')
+              WHERE anchor_income_id = ?
+            `).run(reassignToIncomeId, id);
+          } else {
+            const today = todayForUser(db);
+            for (const dependent of dependents) {
+              reanchorDependentExpenseToFixedDay(db, dependent, existing, today);
+            }
+          }
+        }
 
         db.prepare("DELETE FROM pending_transactions WHERE source_recurring_income_id = ?").run(id);
         db.prepare("DELETE FROM future_transactions WHERE source_recurring_income_id = ?").run(id);
@@ -1679,7 +1783,7 @@ export function createCashflowPlanMutationService({
     return withProjectionStatus(userId, { ok: true });
   }
 
-  async function deleteRecurringIncomeWithBudgetStore(userId, id) {
+  async function deleteRecurringIncomeWithBudgetStore(userId, id, options = {}) {
     const result = await budgetStore.transaction(async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
@@ -1687,6 +1791,60 @@ export function createCashflowPlanMutationService({
       const existing = (await writer.listPlanningRows(userId, "recurring_incomes"))
         .find(row => row.id === id) || null;
       if (!existing) throw notFound("Recurring income not found");
+
+      const dependents = (await writer.listPlanningRows(userId, "recurring_expenses"))
+        .filter(row => row.anchor_income_id === id);
+
+      if (dependents.length) {
+        const reassignToIncomeId = options.reassignAnchorsToIncomeId || null;
+        const fallbackToFixedDay = Boolean(options.fallbackAnchorsToFixedDay);
+
+        if (!reassignToIncomeId && !fallbackToFixedDay) {
+          throw conflict(
+            "This income anchors other recurring expenses; reassign or convert them before deleting",
+            {
+              anchorDependents: dependents.map(dep => ({ id: dep.id, name: dep.name }))
+            }
+          );
+        }
+
+        if (reassignToIncomeId) {
+          if (reassignToIncomeId === id) {
+            throw badRequest("Cannot reassign to the income being deleted", [{
+              field: "reassignAnchorsToIncomeId",
+              reason: "same_as_deleted"
+            }]);
+          }
+          const replacement = (await writer.listPlanningRows(userId, "recurring_incomes"))
+            .find(row => row.id === reassignToIncomeId);
+          if (!replacement) {
+            throw badRequest("Reassignment income not found", [{
+              field: "reassignAnchorsToIncomeId",
+              reason: "not_found"
+            }]);
+          }
+
+          await writer.updatePlanningRowsById(userId, "recurring_expenses", dependents.map(dep => ({
+            id: dep.id,
+            anchor_income_id: reassignToIncomeId,
+            updated_at: new Date().toISOString()
+          })));
+        } else {
+          const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
+          const today = todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
+
+          const updates = dependents.map(dependent => ({
+            id: dependent.id,
+            anchor_income_id: null,
+            anchor_type: "day_of_month",
+            anchor_day_of_month: fallbackAnchorDayForDependent(dependent, existing, today),
+            anchor_offset_days: 0,
+            updated_at: new Date().toISOString()
+          }));
+
+          await writer.updatePlanningRowsById(userId, "recurring_expenses", updates);
+        }
+      }
 
       const pendingIds = (await writer.listPlanningRows(userId, "pending_transactions"))
         .filter(row => row.source_recurring_income_id === id)

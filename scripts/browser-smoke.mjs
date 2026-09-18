@@ -546,12 +546,14 @@ function mergeExportFrom(fullExport, markerId) {
     updated_at: now
   }];
 
-  return {
+  const merged = {
     ...fullExport,
     exportedAt: now,
     planning,
     ledgers: {}
   };
+  delete merged.checksum;
+  return merged;
 }
 
 async function uploadFile(page, selector, name, mimeType, content) {
@@ -584,6 +586,7 @@ async function assertDataPortability(page, baseUrl, userId, sessionAuth) {
 
   await uploadFile(page, "[data-cashflow-full-import-file]", "smoke-replace.json", "application/json", exportText);
   await page.locator("[data-cashflow-full-import-mode]").selectOption("replace");
+  page.once("dialog", dialog => dialog.accept());
   await waitForApiResponse(page, "/api/import/full", () =>
     page.locator("[data-cashflow-import-full]").click()
   );
@@ -595,6 +598,7 @@ async function assertDataPortability(page, baseUrl, userId, sessionAuth) {
   const mergeExport = mergeExportFrom(fullExport, mergeId);
   await uploadFile(page, "[data-cashflow-full-import-file]", "smoke-merge.json", "application/json", JSON.stringify(mergeExport));
   await page.locator("[data-cashflow-full-import-mode]").selectOption("merge");
+  page.once("dialog", dialog => dialog.accept());
   await waitForApiResponse(page, "/api/import/full", () =>
     page.locator("[data-cashflow-import-full]").click()
   );

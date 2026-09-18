@@ -29,6 +29,7 @@ const mirrorLogsToStdout = enabledByEnv(process.env.CASHFLOW_MIRROR_LOGS_TO_STDO
 const readyzCheckDefaultBudget = enabledByEnv(process.env.CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET);
 const databaseConfig = resolveCashflowDbConfig(process.env);
 const publicDir = path.join(__dirname, "public");
+const publicBetaDir = path.join(__dirname, "public-beta");
 const localeDir = path.join(publicDir, "app", "cashflow", "locales");
 const startedAt = new Date();
 
@@ -299,7 +300,24 @@ app.get("/api/system", (req, res) => {
   });
 });
 
-// Serve the static browser app after API routes so /api/* never falls through to HTML.
+// Serve the static browser apps after API routes so /api/* never falls through to HTML.
+// The React beta lives under /beta, built separately (frontend-beta/) into
+// public-beta/; it's optional (only a `git pull` + build, not always present
+// in every checkout), so its mounts are skipped gracefully if missing.
+const betaBuildExists = fs.existsSync(path.join(publicBetaDir, "index.html"));
+if (betaBuildExists) {
+  app.use("/beta", express.static(publicBetaDir));
+  app.use((req, res, next) => {
+    // SPA fallback for the beta app, mirroring the legacy fallback below.
+    if (req.method !== "GET" || !req.path.startsWith("/beta")) {
+      next();
+      return;
+    }
+
+    res.sendFile(path.join(publicBetaDir, "index.html"));
+  });
+}
+
 app.use(express.static(publicDir));
 
 app.use((req, res, next) => {

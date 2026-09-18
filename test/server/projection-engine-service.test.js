@@ -8,6 +8,8 @@ import {
   buildProjectionInputRowsFromPlanningTables,
   computeGoalAndFlexTargetLedgerAmounts,
   computeProjectionPlan,
+  computeReserveClaims,
+  findLockedReserveClaims,
   loadProjectionFundingStateFromBudgetStore,
   loadProjectionInputRowsFromBudgetStore,
   makeProjectionConverter
@@ -728,4 +730,349 @@ test("computeProjectionPlan queues an fx_changed notification when projection to
   }));
 
   assert.ok(plan.notificationRows.some(n => n.notification_type === "fx_changed"));
+});
+
+// --- Reserve-claim lookahead: a period's retained surplus can no longer be
+// spent on goals/flex/discretionary items while a *later* period is short on
+// necessities. See dev/ui-modernization-notes.md-style reasoning in the
+// projection engine's own comments (search "reserveClaims") for the full
+// mechanism; these tests cover the behavior end to end via the same
+// discovery -> computeReserveClaims -> real two-pass sequence
+// regenerateProjectionsAsync() runs in production.
+
+function twoPeriods() {
+  return [
+    { key: "2026-05", start: "2026-05-01", end: "2026-05-31", available: 0, blocked: false },
+    { key: "2026-06", start: "2026-06-01", end: "2026-06-30", available: 0, blocked: false }
+  ];
+}
+
+function threePeriods() {
+  return [
+    { key: "2026-05", start: "2026-05-01", end: "2026-05-31", available: 0, blocked: false },
+    { key: "2026-06", start: "2026-06-01", end: "2026-06-30", available: 0, blocked: false },
+    { key: "2026-07", start: "2026-07-01", end: "2026-07-31", available: 0, blocked: false }
+  ];
+}
+
+// Runs the exact two-pass sequence the real engine runs: a discoveryOnly dry
+// run to find deficits/claimable surplus under today's unmodified
+// local-retention rule, computeReserveClaims() to turn that into claims, then
+// a real run with those claims injected. Each pass gets its own fresh periods
+// array, matching how the real orchestration rebuilds periods between passes
+// (period.available is mutated in place).
+function runTwoPass(overrides, buildPeriods) {
+  const discovery = computeProjectionPlan(basePlanArgs({
+    ...overrides,
+    discoveryOnly: true,
+    periods: buildPeriods()
+  }));
+  const discoveryPeriods = buildPeriods();
+  const reserveClaims = computeReserveClaims({
+    periods: discoveryPeriods,
+    periodsAvailable: discovery.periodsAvailable,
+    deficitsByPeriod: discovery.deficitsByPeriod
+  });
+
+  const plan = computeProjectionPlan(basePlanArgs({
+    ...overrides,
+    periods: buildPeriods(),
+    reserveClaims
+  }));
+
+  return { discovery, reserveClaims, plan };
+}
+
+test("reserve claim: a later period's necessary shortfall is covered by an earlier period's surplus instead of a same-period goal", () => {
+  const { reserveClaims, plan } = runTwoPass({
+    recurringIncomes: [{ id: "salary", name: "Salary", currency: "PLN", amount: 1000, anchor_day_of_month: 25, prediction_strategy: "fixed" }],
+    recurringExpenses: [{
+      id: "rent",
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: true,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      priority: 1,
+      created_at: "2026-01-01"
+    }],
+    goals: [{ id: "goal-1", name: "Gadget", currency: "PLN", amount: 300, due_date: "2026-05-28", priority: 1, created_at: "2026-01-01" }],
+    goalTargetLedger: new Map([["goal-1", 300]]),
+    oneOffs: [{ id: "oneoff-1", name: "Insurance", type: "expense", currency: "PLN", amount: 500, date: "2026-06-27" }],
+    today: "2026-05-20"
+  }, twoPeriods);
+
+  assert.deepEqual(reserveClaims, [{ sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200 }]);
+
+  const rentJune = plan.futureRows.find(r => r.source_recurring_expense_id === "rent" && r.period === "2026-06");
+  const insurance = plan.futureRows.find(r => r.source_one_off_id === "oneoff-1");
+  const goal = plan.futureRows.find(r => r.source_goal_id === "goal-1");
+
+  // Total income (2000) minus both necessities (700 + 700 + 500 = 1900)
+  // leaves exactly 100 for the discretionary goal — it absorbs the
+  // shortfall instead of June's Rent.
+  assert.equal(rentJune.status, "funded");
+  assert.equal(rentJune.funded_amount, 700);
+  assert.equal(insurance.status, "funded");
+  assert.equal(insurance.funded_amount, 500);
+  assert.equal(goal.status, "partial");
+  assert.equal(goal.funded_amount, 100);
+
+  const reserveOut = plan.futureRows.find(r => r.occurrence_key === "reserve_transfer:2026-05:2026-06:out");
+  const reserveIn = plan.futureRows.find(r => r.occurrence_key === "reserve_transfer:2026-05:2026-06:in");
+  assert.equal(reserveOut.period, "2026-05");
+  assert.equal(reserveOut.ledger_amount, 200);
+  assert.equal(reserveIn.period, "2026-06");
+  assert.equal(reserveIn.ledger_amount, 200);
+});
+
+test("reserve claim: no claims and unchanged behavior when nothing downstream is short", () => {
+  const { reserveClaims, plan } = runTwoPass({
+    recurringIncomes: [{ id: "salary", name: "Salary", currency: "PLN", amount: 1000, anchor_day_of_month: 25, prediction_strategy: "fixed" }],
+    recurringExpenses: [{
+      id: "rent",
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: true,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      priority: 1,
+      created_at: "2026-01-01"
+    }],
+    goals: [{ id: "goal-1", name: "Gadget", currency: "PLN", amount: 300, due_date: "2026-05-28", priority: 1, created_at: "2026-01-01" }],
+    goalTargetLedger: new Map([["goal-1", 300]]),
+    today: "2026-05-20"
+  }, twoPeriods);
+
+  assert.deepEqual(reserveClaims, []);
+  assert.equal(plan.futureRows.some(r => String(r.occurrence_key || "").startsWith("reserve_transfer:")), false);
+
+  const goal = plan.futureRows.find(r => r.source_goal_id === "goal-1");
+  assert.equal(goal.status, "funded");
+  assert.equal(goal.funded_amount, 300);
+});
+
+test("reserve claim: spills over to the next-nearest prior period when one period's surplus isn't enough", () => {
+  const { reserveClaims, plan } = runTwoPass({
+    recurringIncomes: [{ id: "salary", name: "Salary", currency: "PLN", amount: 800, anchor_day_of_month: 25, prediction_strategy: "fixed" }],
+    recurringExpenses: [{
+      id: "rent",
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: true,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      priority: 1,
+      created_at: "2026-01-01"
+    }],
+    // Both May and June need *their own* local demand (a goal due within
+    // each) or their 100 surplus would just auto-carry forward via the
+    // pre-existing, unmodified carrySurplusToNextPeriod mechanism and
+    // never show up as separately claimable surplus in the first place —
+    // the reserve-claim system only has something to reach for when local
+    // demand is what's holding a period's surplus back. July needs 150,
+    // more than either period alone retains.
+    goals: [
+      { id: "goal-may", name: "May goal", currency: "PLN", amount: 10, due_date: "2026-05-28", priority: 1, created_at: "2026-01-01" },
+      { id: "goal-june", name: "June goal", currency: "PLN", amount: 10, due_date: "2026-06-28", priority: 2, created_at: "2026-01-02" }
+    ],
+    goalTargetLedger: new Map([["goal-may", 10], ["goal-june", 10]]),
+    oneOffs: [{ id: "oneoff-1", name: "Big bill", type: "expense", currency: "PLN", amount: 250, date: "2026-07-15" }],
+    today: "2026-05-20"
+  }, threePeriods);
+
+  // June is the nearest prior period to July, so it's claimed first (up to
+  // its full 100 retained surplus); only the remaining 50 reaches back to
+  // May, the next-nearest period.
+  assert.deepEqual(
+    reserveClaims.sort((a, b) => a.sourcePeriodKey.localeCompare(b.sourcePeriodKey)),
+    [
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-07", amountLedger: 50 },
+      { sourcePeriodKey: "2026-06", targetPeriodKey: "2026-07", amountLedger: 100 }
+    ]
+  );
+
+  const bigBill = plan.futureRows.find(r => r.source_one_off_id === "oneoff-1");
+  assert.equal(bigBill.status, "funded");
+  assert.equal(bigBill.funded_amount, 250);
+});
+
+test("reserve claim: a genuinely unaffordable shortfall is left unclaimed, same as today", () => {
+  const { reserveClaims, plan } = runTwoPass({
+    recurringIncomes: [{ id: "salary", name: "Salary", currency: "PLN", amount: 700, anchor_day_of_month: 25, prediction_strategy: "fixed" }],
+    recurringExpenses: [{
+      id: "rent",
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: true,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      priority: 1,
+      created_at: "2026-01-01"
+    }],
+    // No surplus anywhere — every period spends its whole income on Rent,
+    // so there is nothing to reserve toward July's one-off, which is
+    // larger than any single period's income so it can't be fully funded
+    // even with July's own income alone.
+    oneOffs: [{ id: "oneoff-1", name: "Big bill", type: "expense", currency: "PLN", amount: 900, date: "2026-07-15" }],
+    today: "2026-05-20"
+  }, threePeriods);
+
+  assert.deepEqual(reserveClaims, []);
+
+  const bigBill = plan.futureRows.find(r => r.source_one_off_id === "oneoff-1");
+  assert.equal(bigBill.status, "underfunded");
+  assert.equal(bigBill.funded_amount, 0);
+});
+
+test("reserve claim: does not dip a source period below its configured minimum reserve floor", () => {
+  const { reserveClaims, plan } = runTwoPass({
+    recurringIncomes: [{ id: "salary", name: "Salary", currency: "PLN", amount: 1000, anchor_day_of_month: 25, prediction_strategy: "fixed" }],
+    recurringExpenses: [{
+      id: "rent",
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: true,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      priority: 1,
+      created_at: "2026-01-01"
+    }],
+    // May's raw surplus is 300; a local goal keeps it from auto-carrying to
+    // June (see the spillover test above for why that matters), and a 250
+    // floor means only 50 of that 300 is actually donatable.
+    goals: [{ id: "goal-may", name: "May goal", currency: "PLN", amount: 10, due_date: "2026-05-28", priority: 1, created_at: "2026-01-01" }],
+    goalTargetLedger: new Map([["goal-may", 10]]),
+    reserveFloor: 250,
+    oneOffs: [{ id: "oneoff-1", name: "Insurance", type: "expense", currency: "PLN", amount: 800, date: "2026-06-27" }],
+    today: "2026-05-20"
+  }, twoPeriods);
+
+  assert.equal(reserveClaims.length, 1);
+  assert.equal(reserveClaims[0].amountLedger, 50);
+  assert.equal(reserveClaims[0].sourcePeriodKey, "2026-05");
+
+  // June's necessities-tier demand (Insurance 800) only ever gets May's
+  // capped 50 plus June's own 1000 income = 1050, so Insurance (which
+  // requires full funding, processed before Rent) funds, leaving Rent
+  // short — the point of this test isn't which line item absorbs the
+  // remaining shortfall, it's that May's floor held.
+  const insurance = plan.futureRows.find(r => r.source_one_off_id === "oneoff-1");
+  assert.equal(insurance.status, "funded");
+
+  const mayRows = plan.futureRows.filter(r => r.period === "2026-05");
+  const mayNetAvailable = mayRows.reduce(
+    (sum, r) => sum + (r.type === "income" ? r.ledger_amount : -r.ledger_amount),
+    0
+  );
+  assert.ok(mayNetAvailable >= 250 - 0.01, `May should stay at/above its 250 floor, got ${mayNetAvailable}`);
+});
+
+test("findLockedReserveClaims parses reserve-transfer occurrence keys and ignores everything else", () => {
+  const locked = findLockedReserveClaims([
+    { occurrence_key: "reserve_transfer:2026-05:2026-06:out", ledger_amount: 200, type: "expense" },
+    { occurrence_key: "reserve_transfer:2026-06:2026-07:in", ledger_amount: 150, type: "income" },
+    { occurrence_key: "one_off:abc123", ledger_amount: 50, type: "expense" },
+    { occurrence_key: null, ledger_amount: 999, type: "income" }
+  ]);
+
+  assert.deepEqual(
+    locked.sort((a, b) => a.sourcePeriodKey.localeCompare(b.sourcePeriodKey)),
+    [
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200, lockedSide: "out" },
+      { sourcePeriodKey: "2026-06", targetPeriodKey: "2026-07", amountLedger: 150, lockedSide: "in" }
+    ]
+  );
+});
+
+test("computeReserveClaims keeps a locked expense-side claim's amount fixed instead of re-deriving a smaller one", () => {
+  // May's discovery-reported spendable surplus (100) already reflects the
+  // -200 pending/confirmed reserve expense having been subtracted once —
+  // that's correct and expected. The bug this guards against is a *second*,
+  // independent re-derivation of the claim from that already-reduced
+  // number, which would wrongly shrink it to 100 instead of honoring the
+  // 200 that's already a real, committed transaction.
+  const claims = computeReserveClaims({
+    periods: [
+      { key: "2026-05" },
+      { key: "2026-06" }
+    ],
+    periodsAvailable: [
+      { key: "2026-05", available: 100 },
+      { key: "2026-06", available: 0 }
+    ],
+    deficitsByPeriod: new Map([["2026-06", 200]]),
+    lockedClaims: [
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200, lockedSide: "out" }
+    ]
+  });
+
+  assert.deepEqual(claims, [
+    { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200 }
+  ]);
+});
+
+test("computeReserveClaims does not let an overstated source period double-allocate money already promised via a locked income-side claim", () => {
+  // May's discovery-reported spendable surplus (300) does *not* yet reflect
+  // the 200 already promised to June (its expense side hasn't been created
+  // yet, only June's income side is pending/confirmed) — so a fresh claim
+  // search must subtract that locked-but-unmaterialized 200 before deciding
+  // how much of May's surplus is free to give to July's separate deficit.
+  const claims = computeReserveClaims({
+    periods: [
+      { key: "2026-05" },
+      { key: "2026-06" },
+      { key: "2026-07" }
+    ],
+    periodsAvailable: [
+      { key: "2026-05", available: 300 },
+      { key: "2026-06", available: 0 },
+      { key: "2026-07", available: 0 }
+    ],
+    deficitsByPeriod: new Map([["2026-07", 250]]),
+    lockedClaims: [
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200, lockedSide: "in" }
+    ]
+  });
+
+  assert.deepEqual(
+    claims.sort((a, b) => a.targetPeriodKey.localeCompare(b.targetPeriodKey)),
+    [
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200 },
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-07", amountLedger: 100 }
+    ]
+  );
+  // July's remaining 150 stays a genuine, unclaimed shortfall — May only
+  // ever truly had 100 left after its 200 commitment to June.
+});
+
+test("computeReserveClaims never creates a second claim on an already-locked source/target pair, even if the target still needs more", () => {
+  // A pending/confirmed reserve-transfer row's occurrence key encodes only
+  // its source/target pair, not an amount, so a pair can carry exactly one
+  // claim. If June's need grows past what's already locked from May, that
+  // extra can only come from a *different* earlier period — never a second,
+  // colliding claim on the same May-to-June pair.
+  const claims = computeReserveClaims({
+    periods: [
+      { key: "2026-05" },
+      { key: "2026-06" }
+    ],
+    periodsAvailable: [
+      { key: "2026-05", available: 400 },
+      { key: "2026-06", available: 0 }
+    ],
+    deficitsByPeriod: new Map([["2026-06", 300]]),
+    lockedClaims: [
+      { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200, lockedSide: "out" }
+    ]
+  });
+
+  assert.deepEqual(claims, [
+    { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200 }
+  ]);
 });
