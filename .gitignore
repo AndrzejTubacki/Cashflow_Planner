@@ -17,4 +17,5 @@ local/
 *.sqlite-*
 todo.md
 context.md
+review.md
 dev/

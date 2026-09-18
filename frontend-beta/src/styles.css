@@ -273,6 +273,13 @@ body {
   flex-direction: column;
   gap: 20px;
   max-width: 1040px;
+  width: 100%;
+  /* .beta-topbar (a sibling under .beta-main) intentionally spans the
+     full width edge-to-edge; this is the one that's capped for
+     readability, so on wide desktop viewports it needs centering itself
+     rather than sitting flush against the sidebar with all the leftover
+     space dumped on the right. */
+  align-self: center;
 }
 
 .beta-view-head h1 {
