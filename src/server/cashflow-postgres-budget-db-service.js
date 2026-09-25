@@ -34,7 +34,8 @@ export async function createPostgresBudgetDbService({
   databaseUrl,
   logError = () => {},
   logServerEvent = () => {},
-  pgModule = null
+  pgModule = null,
+  poolMax = 10
 } = {}) {
   if (!String(databaseUrl || "").trim()) missingDatabaseUrlError();
 
@@ -47,7 +48,10 @@ export async function createPostgresBudgetDbService({
   }
 
   const pool = new Pool({
-    connectionString: databaseUrl
+    // Bound each owned pool; shared locks use short per-query checkouts.
+    connectionString: databaseUrl,
+    max: poolMax,
+    connectionTimeoutMillis: 10_000
   });
 
   async function withClient(fn) {
@@ -85,12 +89,14 @@ export async function createPostgresBudgetDbService({
     });
   }
 
-  async function checkReadiness() {
+  async function checkReadiness(budgetId = null) {
     return await withClient(async client => {
       const result = await client.query(
         "SELECT planning_version, ledger_version FROM cashflow_budget_schema_version WHERE id = $1",
         [1]
       );
+      // Check additive operational schema without applying migrations at boot.
+      await client.query("SELECT 1 FROM cashflow_backup_artifacts LIMIT 0");
       const planningVersion = Number(result?.rows?.[0]?.planning_version);
       const ledgerVersion = Number(result?.rows?.[0]?.ledger_version);
       if (
@@ -103,9 +109,23 @@ export async function createPostgresBudgetDbService({
         error.code = "CASHFLOW_POSTGRES_BUDGET_SCHEMA_VERSION_MISMATCH";
         throw error;
       }
+
+      if (budgetId) {
+        const settingsResult = await client.query(
+          "SELECT 1 FROM settings WHERE budget_id = $1 AND id = 1",
+          [budgetId]
+        );
+        if (!settingsResult?.rows?.length) {
+          const error = new Error(`Postgres budget "${budgetId}" has no settings row (not initialized)`);
+          error.code = "CASHFLOW_POSTGRES_BUDGET_NOT_FOUND";
+          throw error;
+        }
+      }
+
       return {
         ok: true,
         backend: "postgres",
+        budgetId,
         ledgerSchemaVersion: ledgerVersion,
         planningSchemaVersion: planningVersion
       };

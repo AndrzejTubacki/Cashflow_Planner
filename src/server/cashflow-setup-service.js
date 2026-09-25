@@ -155,8 +155,8 @@ export function createCashflowSetupService({
 
         if (Math.abs(openingBalance) > 0.0001) {
           const id = generateId("pending-opening-balance");
-          const amount = Math.abs(openingBalance);
-          const type = openingBalance >= 0 ? "income" : "expense";
+          const amount = openingBalance;
+          const type = "income";
 
           db.prepare(`
             INSERT INTO pending_transactions (
@@ -249,8 +249,8 @@ export function createCashflowSetupService({
 
       if (Math.abs(values.openingBalance) > 0.0001) {
         const id = generateId("pending-opening-balance");
-        const amount = Math.abs(values.openingBalance);
-        const type = values.openingBalance >= 0 ? "income" : "expense";
+        const amount = values.openingBalance;
+        const type = "income";
 
         await writer.insertPlanningRows(userId, "pending_transactions", [{
           amount,

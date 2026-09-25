@@ -1,3 +1,4 @@
+import { todayIso } from "./format.js";
 import { useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
 import {
@@ -24,9 +25,6 @@ const ENTITY_LABELS = {
   pending: "pending transaction"
 };
 
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
-}
 
 export default function EditModal({ entityType, item = null, onClose, onSaved, recurringIncomes = [] }) {
   const isCreate = !item;

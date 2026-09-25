@@ -223,6 +223,7 @@ test("Postgres schema readiness and runtime locks work against a disposable data
       assert.deepEqual(await budgetDb.checkReadiness(), {
         ok: true,
         backend: "postgres",
+        budgetId: null,
         ledgerSchemaVersion: POSTGRES_LEDGER_SCHEMA_VERSION,
         planningSchemaVersion: POSTGRES_PLANNING_SCHEMA_VERSION
       });
@@ -2134,7 +2135,7 @@ test("importFullDataAsync, createBackupAsync/restoreBackupAsync, and purgeBudget
         });
 
         const backupPath = await backupService.createBackupAsync("household");
-        assert.equal(fs.existsSync(backupPath), true);
+        assert.ok(await budgetStore.readBackupArtifact("household", backupPath.slice("postgres-backup:".length)));
         const backupMetadataRows = await budgetStore.listPlanningRows("household", "backup_metadata");
         const backupRow = backupMetadataRows.find(row => row.backup_path === backupPath);
         assert.ok(backupRow, "expected a backup_metadata row recorded in Postgres");
@@ -2157,6 +2158,13 @@ test("importFullDataAsync, createBackupAsync/restoreBackupAsync, and purgeBudget
           Number(oneOffRowsAfterRestore.find(row => row.id === "oneoff_desk")?.amount),
           321
         );
+
+        // Replacing financial data must preserve existing shared backup IDs,
+        // including safety artifacts created immediately before that import.
+        const existingBackupIds = (await budgetStore.listPlanningRows("household", "backup_metadata")).map(row => row.id);
+        await dataPortability.importFullDataAsync("household", exportedPayload, "replace");
+        const afterImportBackupIds = new Set((await budgetStore.listPlanningRows("household", "backup_metadata")).map(row => row.id));
+        assert.ok(existingBackupIds.every(id => afterImportBackupIds.has(id)));
 
         // "household" already has "legacy-admin" as its owner (inserted by
         // initializeGlobalSchema's migrateLegacyProfiles bootstrap for any
@@ -3111,7 +3119,7 @@ test("two replicas racing createBackupAsync for the same budget are serialized b
         assert.equal(fulfilled.length, 1, "expected exactly one concurrent backup to win the lock");
         assert.equal(rejected.length, 1, "expected exactly one concurrent backup to be rejected by the lock");
         assert.equal(rejected[0].reason.status, 409);
-        assert.equal(fs.existsSync(fulfilled[0].value), true);
+        assert.ok(await budgetStore.readBackupArtifact("household", fulfilled[0].value.slice("postgres-backup:".length)));
 
         const backupMetadataRows = await budgetStore.listPlanningRows("household", "backup_metadata");
         assert.equal(backupMetadataRows.length, 1, "expected exactly one backup_metadata row, not two");
@@ -3382,7 +3390,7 @@ test("two different job types (backup and fx refresh) for the same budget run co
         ]);
 
         assert.equal(
-          fs.existsSync(backupOutcome),
+          Boolean(await budgetStore.readBackupArtifact("household", backupOutcome.slice("postgres-backup:".length))),
           true,
           "expected the concurrent backup to succeed, not be blocked by the unrelated FX-refresh lock"
         );
@@ -3556,7 +3564,7 @@ test("a manual createBackupAsync call racing the real background scheduler's aut
         if (manualOutcome.status === "rejected") {
           assert.equal(manualOutcome.reason.status, 409, "expected the manual call to lose the lock cleanly, not fail some other way");
         } else {
-          assert.equal(fs.existsSync(manualOutcome.value), true, "expected the manual call's backup path to exist if it won the race");
+          assert.ok(await budgetStore.readBackupArtifact("household", manualOutcome.value.slice("postgres-backup:".length)));
         }
 
         // Exactly one of "the manual call" and "the scheduler's own

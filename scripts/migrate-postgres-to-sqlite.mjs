@@ -4,54 +4,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import { exportPostgresStorage } from "./export-postgres-storage.mjs";
 import { importPostgresStorageToSqlite } from "./import-postgres-storage-to-sqlite.mjs";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    budgetIds: "",
-    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    dryRun: true,
-    force: false,
-    outputDir: path.resolve("external-database-exports"),
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--budget-ids") {
-      options.budgetIds = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--database-url") {
-      options.databaseUrl = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--output-dir") {
-      options.outputDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--apply") {
-      options.dryRun = false;
-    } else if (arg === "--dry-run") {
-      options.dryRun = true;
-    } else if (arg === "--force") {
-      options.force = true;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
-  return `Usage: npm run db:migrate:postgres-to-sqlite -- --data-dir PATH [--dry-run|--apply] [--force] [--budget-ids id1,id2] [--output-dir PATH] [--database-url URL] [--pretty]
+  return `Usage: npm run db:migrate:postgres-to-sqlite -- --data-dir PATH [--dry-run|--apply] [--force] [--budget-ids id1,id2] [--output-dir PATH] [--pretty]
 
 Exports account/budget/membership metadata and the given budgets' planning
 and ledger data from Postgres, then writes it into fresh SQLite files under
@@ -106,7 +66,19 @@ export async function migratePostgresToSqliteCli(options = parseArgs()) {
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--budget-ids","--data-dir","--output-dir"],
+    boolean: ["--apply","--force","--pretty"],
+    defaults: {
+    budgetIds: "",
+    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    dryRun: true,
+    force: false,
+    outputDir: path.resolve("external-database-exports"),
+    pretty: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
@@ -116,7 +88,7 @@ async function main() {
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

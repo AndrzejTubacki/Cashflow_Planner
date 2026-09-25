@@ -776,7 +776,8 @@ export function createCashflowPlanMutationService({
 
           db.prepare(`
             UPDATE recurring_incomes
-            SET period_setting = CASE WHEN id = ? THEN 1 ELSE 0 END
+            SET period_setting = CASE WHEN id = ? THEN 1 ELSE 0 END,
+                updated_at = datetime('now')
           `).run(id);
         } else {
           clearBudgetPeriodIncomeIfSelected(db, id);
@@ -1281,6 +1282,14 @@ export function createCashflowPlanMutationService({
           ...(input || {})
         };
 
+        // Confirmed contributions retain their original currency; changing the
+        // goal's currency would hide that history from funding calculations.
+        const nextCurrency = requireSupportedCurrency(merged.currency || "PLN");
+        if (nextCurrency !== requireSupportedCurrency(existing.currency || "PLN")
+          && confirmedGoalRows(userId, id).length) {
+          throw badRequest("Cannot change currency for a goal with confirmed ledger history");
+        }
+
         if (input.priority !== undefined) {
           updatePlannedPriority(db, existing.planned_transaction_id, "goal", input.priority);
         }
@@ -1296,7 +1305,7 @@ export function createCashflowPlanMutationService({
           WHERE id = ?
         `).run(
           merged.name || "Unnamed",
-          requireSupportedCurrency(merged.currency || "PLN"),
+          nextCurrency,
           merged.amount,
           merged.active,
           requireDateOrDefault(merged.due_date, todayForUser(db), "due_date"),
@@ -1333,6 +1342,13 @@ export function createCashflowPlanMutationService({
         ...(input || {})
       };
 
+      // Inspect confirmed history on the same locked writer as this edit.
+      const nextCurrency = requireSupportedCurrency(merged.currency || "PLN");
+      if (nextCurrency !== requireSupportedCurrency(existing.currency || "PLN")
+        && (await confirmedGoalRowsAsync(userId, id, writer)).length) {
+        throw badRequest("Cannot change currency for a goal with confirmed ledger history");
+      }
+
       if (input.priority !== undefined) {
         await updatePlannedPriorityWithBudgetStore(
           writer,
@@ -1346,7 +1362,7 @@ export function createCashflowPlanMutationService({
       await writer.updatePlanningRowsById(userId, "goals", [{
         active: merged.active,
         amount: merged.amount,
-        currency: requireSupportedCurrency(merged.currency || "PLN"),
+        currency: nextCurrency,
         due_date: requireDateOrDefault(
           merged.due_date,
           todayInTimezone(settings.timezone || DEFAULT_TIMEZONE),

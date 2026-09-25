@@ -188,10 +188,10 @@ export function createPostgresGlobalRepository(client, {
           return Boolean(await one(`
             SELECT 1
             FROM accounts
-            WHERE email = $1 AND id != $2
+            WHERE LOWER(email) = LOWER($1) AND id != $2
           `, [email, normalizeUserId(excludeId)]));
         }
-        return Boolean(await one("SELECT 1 FROM accounts WHERE email = $1", [email]));
+        return Boolean(await one("SELECT 1 FROM accounts WHERE LOWER(email) = LOWER($1)", [email]));
       },
       get: getAccount,
       async getStatus(id) {
@@ -355,7 +355,7 @@ export function createPostgresGlobalRepository(client, {
           SELECT *
           FROM auth_providers
           ${publicOnly ? "WHERE enabled = true" : ""}
-          ORDER BY display_name, id
+          ORDER BY LOWER(display_name), id
         `);
       },
       async upsert({
@@ -653,7 +653,7 @@ export function createPostgresGlobalRepository(client, {
         return await one(`
           SELECT *
           FROM budget_invitations
-          WHERE target_email = $1
+          WHERE LOWER(target_email) = LOWER($1)
             AND status = 'pending'
             AND target_account_id IS NULL
           ORDER BY expires_at ASC, created_at ASC
@@ -753,6 +753,16 @@ export function createPostgresGlobalRepository(client, {
               revoked_at = COALESCE(revoked_at, $2),
               updated_at = $2
           WHERE target_account_id = $1
+            AND status = 'pending'
+        `, [normalizeUserId(accountId), nowIso(now)]);
+      },
+      async revokePendingIssuedByAccount(accountId) {
+        await run(`
+          UPDATE budget_invitations
+          SET status = 'revoked',
+              revoked_at = COALESCE(revoked_at, $2),
+              updated_at = $2
+          WHERE invited_by_account_id = $1
             AND status = 'pending'
         `, [normalizeUserId(accountId), nowIso(now)]);
       }
@@ -957,7 +967,7 @@ export function createPostgresGlobalRepository(client, {
             pc.failed_attempts, pc.locked_until
           FROM accounts a
           JOIN password_credentials pc ON pc.account_id = a.id
-          WHERE a.email = $1
+          WHERE LOWER(a.email) = LOWER($1)
         `, [email]);
       },
       async insert({ accountId, passwordHash }) {
@@ -1217,6 +1227,13 @@ export function createPostgresGlobalRepository(client, {
           WHERE selected_budget_id = $1
         `, [normalizeUserId(budgetId), timestamp]);
       },
+      async clearSelectedBudget(sessionId) {
+        return changes(await run(`
+          UPDATE auth_sessions
+          SET selected_budget_id = NULL
+          WHERE id = $1
+        `, [sessionId]));
+      },
       async selectBudgetByTokenHash({
         budgetId,
         lastSeenAt,
@@ -1335,7 +1352,7 @@ export function createPostgresGlobalRepository(client, {
               WHEN EXCLUDED.display_name != EXCLUDED.id THEN EXCLUDED.display_name
               ELSE users.display_name
             END,
-            permissions = users.permissions,
+            permissions = COALESCE(NULLIF(users.permissions, ''), EXCLUDED.permissions),
             updated_at = $4
         `, [normalizedId, name, jsonValue(permissions, '["admin"]'), timestamp]);
         return normalizedId;

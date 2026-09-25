@@ -18,6 +18,7 @@ import {
   validateAndNormalizeSettings
 } from "./cashflow-settings-validation.js";
 import { badRequest } from "./cashflow-user-utils.js";
+import { BUDGET_RUNTIME_LOCK_JOBS, budgetRuntimeLockName } from "./cashflow-runtime-locks.js";
 
 const EXPORT_FORMAT = "cashflow-full-export";
 const EXPORT_VERSION = 1;
@@ -143,7 +144,10 @@ function insertRows(db, tableName, rows) {
 }
 
 function csvEscape(value) {
-  const text = value === null || value === undefined ? "" : String(value);
+  let text = value === null || value === undefined ? "" : String(value);
+  if (/^[=+\-@\t\r]/.test(text)) {
+    text = "'" + text;
+  }
   return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
@@ -623,12 +627,7 @@ function normalizeExportPayload(payload) {
 function sampleExport() {
   const now = "2026-06-01T10:00:00.000Z";
 
-  return {
-    format: EXPORT_FORMAT,
-    version: EXPORT_VERSION,
-    exportedAt: now,
-    sample: true,
-    planning: {
+  const planning = {
       settings: [{
         id: 1,
         ledger_currency: "PLN",
@@ -759,9 +758,10 @@ function sampleExport() {
         { id: "sample-oneoff-bonus", name: "Sample bonus", currency: "PLN", amount: 1200, type: "income", date: "2026-08-10", created_at: now, updated_at: now }
       ],
       pending_transactions: []
-    },
-    ledgers: {
-      "2026": [
+  };
+
+  const ledgers = {
+    "2026": [
         {
           id: "sample-ledger-salary-2026-01",
           name: "Sample salary",
@@ -829,9 +829,19 @@ function sampleExport() {
           updated_at: now
         }
       ]
-    }
+  };
+
+  return {
+    format: EXPORT_FORMAT,
+    version: EXPORT_VERSION,
+    exportedAt: now,
+    sample: true,
+    planning,
+    ledgers,
+    checksum: computeExportChecksum({ planning, ledgers })
   };
 }
+
 
 export function createCashflowDataPortabilityService({
   budgetStore = null,
@@ -843,6 +853,7 @@ export function createCashflowDataPortabilityService({
   mutationHook = null,
   listLedgerYears,
   loadAllConfirmedTransactions,
+  lockService = null,
   openLedgerDb,
   openPlanningDb,
   normalizeLocale = value => String(value || "en").trim().toLowerCase(),
@@ -852,6 +863,91 @@ export function createCashflowDataPortabilityService({
   regenerateProjectionsAfterMutationAsync = null,
   restoreBackupFromPath
 }) {
+
+async function withAsyncRollback({ userId, mode, safetySnapshot, operationName = "Import", onRollbackBatch }, fn) {
+  try {
+    return await fn();
+  } catch (error) {
+    logError(`cashflow_async_import_failed_before_rollback`, {
+      userId,
+      mode: mode || null,
+      error: error.message,
+      safetySnapshot: safeSnapshotSummary(safetySnapshot)
+    });
+    try {
+      await restoreBudgetSafetySnapshotAsync(safetySnapshot, { onBatch: onRollbackBatch });
+      logServerEvent(`cashflow_async_import_rolled_back`, {
+        userId,
+        mode: mode || null,
+        error: error.message,
+        safetySnapshot: safeSnapshotSummary(safetySnapshot)
+      });
+    } catch (rollbackError) {
+      logError(`cashflow_async_import_rollback_failed`, {
+        userId,
+        mode: mode || null,
+        error: error.message,
+        rollbackError: rollbackError.message,
+        safetySnapshot: safeSnapshotSummary(safetySnapshot)
+      });
+      const combined = new Error(`${operationName} failed and rollback also failed`);
+      combined.status = 500;
+      combined.details = {
+        phase: "rollback_failed",
+        safetySnapshot: safeSnapshotSummary(safetySnapshot),
+        originalError: error.message,
+        originalStatus: Number(error?.status) || 500,
+        rollbackError: rollbackError.message
+      };
+      throw combined;
+    }
+    throw rolledBackSnapshotError(error, safetySnapshot, operationName);
+  }
+}
+
+function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName = "Import" }, fn) {
+  try {
+    return fn();
+  } catch (error) {
+    logError("cashflow_import_failed_before_rollback", {
+      userId,
+      mode,
+      safetyBackup,
+      error: error.message
+    });
+    try {
+      runMutationHook(hookName, { userId, safetyBackup, error });
+      restoreBackupFromPath(userId, safetyBackup);
+      logServerEvent("cashflow_import_rolled_back", {
+        userId,
+        mode,
+        safetyBackup,
+        error: error.message
+      });
+    } catch (rollbackError) {
+      logError("cashflow_import_rollback_failed", {
+        userId,
+        mode,
+        safetyBackup,
+        error: error.message,
+        rollbackError: rollbackError.message
+      });
+      const combined = new Error(`${operationName} failed and rollback also failed`);
+      combined.status = 500;
+      combined.details = {
+        phase: "rollback_failed",
+        safetyBackup,
+        originalError: error.message,
+        originalStatus: Number(error?.status) || 500,
+        rollbackError: rollbackError.message
+      };
+      throw combined;
+    }
+    throw rolledBackError(error, safetyBackup, operationName);
+  }
+}
+
+
   function usesPostgresBudgetStoreForFullImport() {
     return budgetStore?.backend === "postgres"
       && typeof budgetStore.transaction === "function"
@@ -1360,6 +1456,7 @@ export function createCashflowDataPortabilityService({
       budgetStore,
       mode,
       onBatch: options.onBatch,
+      preserveBackupMetadata: budgetStore.backend === "postgres",
       plan: preflight.importPlan
     });
   }
@@ -1370,7 +1467,13 @@ export function createCashflowDataPortabilityService({
       options.reason || `full_import_${preflight?.mode || "unknown"}`
     );
 
-    try {
+        return await withAsyncRollback({
+      userId,
+      mode: preflight.mode,
+      safetySnapshot,
+      operationName: "Import",
+      onRollbackBatch: options.onRollbackBatch
+    }, async () => {
       const applyResult = await applyPreparedFullImportPlanAsync(preflight, {
         onBatch: options.onBatch
       });
@@ -1380,44 +1483,7 @@ export function createCashflowDataPortabilityService({
         ok: true,
         safetySnapshot: safeSnapshotSummary(safetySnapshot)
       };
-    } catch (error) {
-      logError("cashflow_async_import_failed_before_rollback", {
-        userId,
-        mode: preflight?.mode || null,
-        error: error.message,
-        safetySnapshot: safeSnapshotSummary(safetySnapshot)
-      });
-      try {
-        await restoreBudgetSafetySnapshotAsync(safetySnapshot, {
-          onBatch: options.onRollbackBatch
-        });
-        logServerEvent("cashflow_async_import_rolled_back", {
-          userId,
-          mode: preflight?.mode || null,
-          error: error.message,
-          safetySnapshot: safeSnapshotSummary(safetySnapshot)
-        });
-      } catch (rollbackError) {
-        logError("cashflow_async_import_rollback_failed", {
-          userId,
-          mode: preflight?.mode || null,
-          error: error.message,
-          rollbackError: rollbackError.message,
-          safetySnapshot: safeSnapshotSummary(safetySnapshot)
-        });
-        const combined = new Error("Import failed and rollback also failed");
-        combined.status = 500;
-        combined.details = {
-          phase: "rollback_failed",
-          safetySnapshot: safeSnapshotSummary(safetySnapshot),
-          originalError: error.message,
-          originalStatus: Number(error?.status) || 500,
-          rollbackError: rollbackError.message
-        };
-        throw combined;
-      }
-      throw rolledBackSnapshotError(error, safetySnapshot, "Import");
-    }
+    });
   }
 
   /**
@@ -1438,10 +1504,17 @@ export function createCashflowDataPortabilityService({
       return importFullData(userId, payload, mode, options);
     }
 
-    const preflight = await prepareFullImportPlanAsync(userId, payload, mode, options);
+    const runImport = async () => {
+      const preflight = await prepareFullImportPlanAsync(userId, payload, mode, options);
     const safetySnapshot = await createBudgetSafetySnapshotAsync(userId, `full_import_${preflight.mode}`);
 
-    try {
+    return await withAsyncRollback({
+      userId,
+      mode: preflight.mode,
+      safetySnapshot,
+      operationName: "Import",
+      onRollbackBatch: options.onRollbackBatch
+    }, async () => {
       const applyResult = await applyPreparedFullImportPlanAsync(preflight, { onBatch: options.onBatch });
       await recalculateLedgerRunningBalanceAsync(userId);
       const projection = await regenerateProjectionsAfterMutationAsync(userId);
@@ -1460,44 +1533,21 @@ export function createCashflowDataPortabilityService({
         _projection: projection,
         apply: applyResult
       };
-    } catch (error) {
-      logError("cashflow_async_import_failed_before_rollback", {
-        userId,
-        mode: preflight.mode,
-        error: error.message,
-        safetySnapshot: safeSnapshotSummary(safetySnapshot)
-      });
+    });
+    };
 
-      try {
-        await restoreBudgetSafetySnapshotAsync(safetySnapshot, { onBatch: options.onRollbackBatch });
-        logServerEvent("cashflow_async_import_rolled_back", {
-          userId,
-          mode: preflight.mode,
-          error: error.message,
-          safetySnapshot: safeSnapshotSummary(safetySnapshot)
-        });
-      } catch (rollbackError) {
-        logError("cashflow_async_import_rollback_failed", {
-          userId,
-          mode: preflight.mode,
-          error: error.message,
-          rollbackError: rollbackError.message,
-          safetySnapshot: safeSnapshotSummary(safetySnapshot)
-        });
-        const combined = new Error("Import failed and rollback also failed");
-        combined.status = 500;
-        combined.details = {
-          phase: "rollback_failed",
-          safetySnapshot: safeSnapshotSummary(safetySnapshot),
-          originalError: error.message,
-          originalStatus: Number(error?.status) || 500,
-          rollbackError: rollbackError.message
-        };
-        throw combined;
+    if (lockService && typeof lockService.withLock === "function") {
+      const lockResult = await lockService.withLock(
+        budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability),
+        runImport,
+        { ttlMs: 300000 }
+      );
+      if (!lockResult?.acquired) {
+        throw new Error("An import or restore is already running for this budget (locked)");
       }
-
-      throw rolledBackSnapshotError(error, safetySnapshot, "Import");
+      return lockResult.result;
     }
+    return await runImport();
   }
 
   function mergePlanningData(userId, exportData) {
@@ -1612,121 +1662,69 @@ export function createCashflowDataPortabilityService({
       const safetyBackup = createBackup(userId, { deferCleanup: true });
 
       try {
-        mergePlanningData(userId, exportData);
-        runMutationHook("after_merge_planning", { userId, safetyBackup });
-        mergeLedgerData(userId, exportData);
-        recalculateLedgerRunningBalance(userId);
-        const projection = regenerateProjectionsAfterMutation(userId);
-        if (projection?.projection_ok === false) {
-          throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
-        }
-        cleanupOperationalData(userId, "merge_import_completed");
-
-        return {
-          ok: true,
-          mode: normalizedMode,
-          safetyBackup,
-          importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings"),
-          importedLedgerYears: Object.keys(exportData.ledgers),
-          _projection: projection
-        };
-      } catch (error) {
-        logError("cashflow_import_failed_before_rollback", {
+        return withSyncRollback({
           userId,
           mode: normalizedMode,
           safetyBackup,
-          error: error.message
-        });
-        try {
-          runMutationHook("before_merge_rollback", { userId, safetyBackup, error });
-          restoreBackupFromPath(userId, safetyBackup);
-          logServerEvent("cashflow_import_rolled_back", {
-            userId,
+          hookName: "before_merge_rollback",
+          operationName: "Import"
+        }, () => {
+          mergeLedgerData(userId, exportData);
+          mergePlanningData(userId, exportData);
+          runMutationHook("after_merge_planning", { userId, safetyBackup });
+          recalculateLedgerRunningBalance(userId);
+          const projection = regenerateProjectionsAfterMutation(userId);
+          if (projection?.projection_ok === false) {
+            throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
+          }
+          cleanupOperationalData(userId, "merge_import_completed");
+
+          return {
+            ok: true,
             mode: normalizedMode,
             safetyBackup,
-            error: error.message
-          });
-        } catch (rollbackError) {
-          logError("cashflow_import_rollback_failed", {
-            userId,
-            mode: normalizedMode,
-            safetyBackup,
-            error: error.message,
-            rollbackError: rollbackError.message
-          });
-          const combined = new Error("Import failed and rollback also failed");
-          combined.status = 500;
-          combined.details = {
-            phase: "rollback_failed",
-            safetyBackup,
-            originalError: error.message,
-            originalStatus: Number(error?.status) || 500,
-            rollbackError: rollbackError.message
+            importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings"),
+            importedLedgerYears: Object.keys(exportData.ledgers),
+            _projection: projection
           };
-          throw combined;
-        }
+        });
+      } catch (error) {
         cleanupOperationalData(userId, "merge_import_rolled_back");
-        throw rolledBackError(error, safetyBackup, "Import");
+        throw error;
       }
     }
 
     const safetyBackup = createBackup(userId, { deferCleanup: true });
 
     try {
-      replacePlanningData(userId, exportData);
-      runMutationHook("after_replace_planning", { userId, safetyBackup });
-      replaceLedgerData(userId, exportData);
-      recalculateLedgerRunningBalance(userId);
-      const projection = regenerateProjectionsAfterMutation(userId);
-      if (projection?.projection_ok === false) {
-        throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
-      }
-      cleanupOperationalData(userId, "replace_import_completed");
-
-      return {
-        ok: true,
-        mode: normalizedMode,
-        safetyBackup,
-        importedLedgerYears: Object.keys(exportData.ledgers),
-        _projection: projection
-      };
-    } catch (error) {
-      logError("cashflow_import_failed_before_rollback", {
+      return withSyncRollback({
         userId,
         mode: normalizedMode,
         safetyBackup,
-        error: error.message
-      });
-      try {
-        runMutationHook("before_replace_rollback", { userId, safetyBackup, error });
-        restoreBackupFromPath(userId, safetyBackup);
-        logServerEvent("cashflow_import_rolled_back", {
-          userId,
+        hookName: "before_replace_rollback",
+        operationName: "Import"
+      }, () => {
+        replaceLedgerData(userId, exportData);
+        replacePlanningData(userId, exportData);
+        runMutationHook("after_replace_planning", { userId, safetyBackup });
+        recalculateLedgerRunningBalance(userId);
+        const projection = regenerateProjectionsAfterMutation(userId);
+        if (projection?.projection_ok === false) {
+          throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
+        }
+        cleanupOperationalData(userId, "replace_import_completed");
+
+        return {
+          ok: true,
           mode: normalizedMode,
           safetyBackup,
-          error: error.message
-        });
-      } catch (rollbackError) {
-        logError("cashflow_import_rollback_failed", {
-          userId,
-          mode: normalizedMode,
-          safetyBackup,
-          error: error.message,
-          rollbackError: rollbackError.message
-        });
-        const combined = new Error("Import failed and rollback also failed");
-        combined.status = 500;
-        combined.details = {
-          phase: "rollback_failed",
-          safetyBackup,
-          originalError: error.message,
-          originalStatus: Number(error?.status) || 500,
-          rollbackError: rollbackError.message
+          importedLedgerYears: Object.keys(exportData.ledgers),
+          _projection: projection
         };
-        throw combined;
-      }
+      });
+    } catch (error) {
       cleanupOperationalData(userId, "replace_import_rolled_back");
-      throw rolledBackError(error, safetyBackup, "Import");
+      throw error;
     }
   }
 
@@ -1874,6 +1872,7 @@ export function createCashflowDataPortabilityService({
     return await restoreBudgetStoreSnapshot({
       budgetStore,
       onBatch: options.onBatch,
+      preserveBackupMetadata: budgetStore.backend === "postgres",
       snapshot
     });
   }

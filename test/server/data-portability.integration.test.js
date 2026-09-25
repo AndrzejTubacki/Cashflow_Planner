@@ -15,6 +15,24 @@ async function withHarness(fn, options = {}) {
   }
 }
 
+test("currency markup is rejected by CSV, full import and direct planner APIs", async () => withHarness(async harness => {
+  const currency = "<img src=x onerror=alert(1)>";
+  const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
+  sample.planning.one_off_transactions[0].currency = currency;
+  const requests = [
+    ["/api/import/one-offs-csv", { csv: `name,type,amount,currency,date\nMarkup,expense,10,${currency},2026-06-10` }],
+    ["/api/import/full", { mode: "replace", export: sample }],
+    ["/api/one-off", { name: "Markup", type: "expense", amount: 10, currency, date: "2026-06-10" }]
+  ];
+  for (const [pathname, body] of requests) {
+    const result = await harness.request(pathname, { method: "POST", body });
+    assert.equal(result.response.status, 400, pathname);
+    assert.match(JSON.stringify(result.body), /currency/i, pathname);
+  }
+  assert.equal((await harness.api("/api")).oneOffs.length, 0);
+}, { userId: "review_import" }));
+
 async function createConfirmedLedgerScenario(harness) {
   await harness.api("/api/settings", {
     method: "PUT",
@@ -444,6 +462,7 @@ test("full import accepts older exports missing recent settings fields", async (
 
 test("full import accepts older rows that omit current schema-default fields", async () => withHarness(async harness => {
   const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
   delete sample.planning.fx_rates_cache[0].quote_currency;
   delete sample.planning.recurring_expenses[0].prediction_substitute_missing;
   delete sample.planning.recurring_expenses[0].prediction_min_recorded_months;
@@ -538,6 +557,7 @@ test("full merge conflicts do not create imported ledger files before the safety
     }
   });
   const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
   sample.planning.one_off_transactions[0].id = existing.id;
   const newLedgerPath = ledgerDbPath(harness.dataDir, harness.userId, "2026");
   const beforeBackups = backupCount(harness);
@@ -758,6 +778,7 @@ test("full import rejects malformed rows before backup or writes", async () => w
 
 test("full import rounds imported money columns before insertion", async () => withHarness(async harness => {
   const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
   sample.planning.one_off_transactions[0].amount = 123.456;
   sample.planning.pending_transactions.push({
     id: "sample-import-pending",
@@ -807,6 +828,7 @@ test("full import rounds imported money columns before insertion", async () => w
 
 test("full import validates table-specific values and relationships before backup", async () => withHarness(async harness => {
   const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
   const beforeBackups = backupCount(harness);
   const timestamp = "2026-06-01T00:00:00.000Z";
   const pendingRow = {
@@ -1145,6 +1167,7 @@ test("sample dataset can be downloaded and loaded", async () => withHarness(asyn
   });
 
   const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
   assert.equal(sample.format, "cashflow-full-export");
   assert.equal(sample.sample, true);
   assert.equal(sample.planning.settings[0].setup_completed, 1);
@@ -1286,6 +1309,7 @@ test("full import preview surfaces merge conflicts without creating a backup", a
     body: { name: "Existing conflict", currency: "PLN", amount: 25, type: "expense", date: "2026-06-03" }
   });
   const sample = await harness.api("/api/export/sample");
+  delete sample.checksum;
   sample.planning.one_off_transactions[0].id = existing.id;
   const beforeBackups = backupCount(harness);
 
@@ -1297,4 +1321,29 @@ test("full import preview surfaces merge conflicts without creating a backup", a
   assert.equal(preview.ok, true);
   assert.ok(preview.conflicts.some(row => row.id === existing.id));
   assert.equal(backupCount(harness), beforeBackups);
+}));
+
+test("the sample export carries a real checksum that both validates and detects tampering", async () => withHarness(async harness => {
+  const sample = await harness.api("/api/export/sample");
+  assert.match(sample.checksum, /^sha256:[0-9a-f]{64}$/);
+
+  // The checksum must be genuinely valid for the untouched sample content,
+  // not just present: importing it as-is must succeed.
+  const accepted = await harness.api("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: sample }
+  });
+  assert.ok(accepted.import);
+
+  // Tampering with the content while keeping the (now stale) checksum must
+  // be rejected — this is the actual security property the checksum exists
+  // to provide, and it only holds if the sample ships a real one.
+  const tampered = structuredClone(sample);
+  tampered.planning.one_off_transactions[0].amount = 999999;
+  const rejected = await harness.request("/api/import/full", {
+    method: "POST",
+    body: { mode: "replace", export: tampered }
+  });
+  assert.equal(rejected.response.status, 400);
+  assert.match(JSON.stringify(rejected.body), /checksum/i);
 }));

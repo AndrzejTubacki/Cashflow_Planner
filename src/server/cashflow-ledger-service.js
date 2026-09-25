@@ -1,4 +1,4 @@
-﻿import { addMonths, todayInTimezone } from "./cashflow-date-utils.js";
+import { addMonths, todayInTimezone } from "./cashflow-date-utils.js";
 import {
   applyLedgerRunningBalancePlan,
   createLedgerRunningBalancePlan
@@ -232,15 +232,24 @@ export function createCashflowLedgerService({
       );
     }
 
-    const yearsToDelete = [...new Set(rows.map(row => String(row.ledger_year)))];
-    for (const year of yearsToDelete) {
+    const rowsByYear = new Map();
+    for (const row of rows) {
+      const ledgerYear = String(row.ledger_year);
+      const ids = rowsByYear.get(ledgerYear) || [];
+      ids.push(row.id);
+      rowsByYear.set(ledgerYear, ids);
+    }
+
+    for (const [year, ids] of rowsByYear.entries()) {
       const ledgerDb = openLedgerDb(userId, year);
       try {
         ledgerDb.transaction(() => {
-          ledgerDb.prepare(`
-            DELETE FROM confirmed_transactions
-            WHERE confirmed_date < ?
-          `).run(cutoffDate);
+          for (const id of ids) {
+            ledgerDb.prepare(`
+              DELETE FROM confirmed_transactions
+              WHERE id = ?
+            `).run(id);
+          }
         })();
       } finally {
         ledgerDb.close();
@@ -654,14 +663,14 @@ export function createCashflowLedgerService({
           if (row.source_flex_id) {
             totals.source_flex_id.set(
               row.source_flex_id,
-              addMoneyAmounts(totals.source_flex_id.get(row.source_flex_id), amount)
+              addMoneyAmounts(totals.source_flex_id.get(row.source_flex_id) || 0, amount)
             );
           }
 
           if (row.source_goal_id) {
             totals.source_goal_id.set(
               row.source_goal_id,
-              addMoneyAmounts(totals.source_goal_id.get(row.source_goal_id), amount)
+              addMoneyAmounts(totals.source_goal_id.get(row.source_goal_id) || 0, amount)
             );
           }
         }
@@ -689,14 +698,14 @@ export function createCashflowLedgerService({
       if (row.source_flex_id) {
         totals.source_flex_id.set(
           row.source_flex_id,
-          addMoneyAmounts(totals.source_flex_id.get(row.source_flex_id), amount)
+          addMoneyAmounts(totals.source_flex_id.get(row.source_flex_id) || 0, amount)
         );
       }
 
       if (row.source_goal_id) {
         totals.source_goal_id.set(
           row.source_goal_id,
-          addMoneyAmounts(totals.source_goal_id.get(row.source_goal_id), amount)
+          addMoneyAmounts(totals.source_goal_id.get(row.source_goal_id) || 0, amount)
         );
       }
     }

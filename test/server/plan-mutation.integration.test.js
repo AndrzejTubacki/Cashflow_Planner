@@ -85,6 +85,36 @@ async function seedConfirmedIncome(harness) {
   });
 }
 
+test("goals with partial or complete confirmed funding retain their currency", async () => withHarness(async harness => {
+  await configure(harness);
+  await seedConfirmedIncome(harness);
+  for (const amount of [30, 60]) {
+    const goal = await harness.api("/api/goals", { method: "POST", body: {
+      name: `Funded ${amount}`, currency: "PLN", amount: 60, due_date: "2026-01-03", priority: 1
+    } });
+    const id = `goal-funding-${amount}`;
+    insertPendingWithSource(harness, { id, name: id, amount, type: "goal_allocation",
+      date: "2026-01-03", sourceGoalId: goal.id, occurrenceKey: id });
+    await harness.api(`/api/pending/${id}/confirm`, { method: "POST", body: {} });
+    const denied = await harness.request(`/api/goals/${goal.id}`, { method: "PUT",
+      body: { currency: "EUR", priority: 7, name: "Should not change" } });
+    assert.equal(denied.response.status, 400);
+    assert.match(denied.body.error, /Cannot change currency.*confirmed ledger history/);
+    const db = harness.openPlanningDb();
+    try {
+      assert.equal(db.prepare("SELECT currency FROM goals WHERE id = ?").get(goal.id).currency, "PLN");
+      assert.equal(db.prepare("SELECT goal_priority FROM planned_transactions WHERE id = ?").get(goal.planned_transaction_id).goal_priority, 1);
+    } finally { db.close(); }
+    const edited = await harness.api(`/api/goals/${goal.id}`, { method: "PUT",
+      body: { currency: "PLN", name: "Renamed funded goal" } });
+    assert.equal(edited.name, "Renamed funded goal");
+  }
+  const unfunded = await harness.api("/api/goals", { method: "POST", body: {
+    name: "Unfunded", currency: "PLN", amount: 10, due_date: "2026-06-01", priority: 2
+  } });
+  assert.equal((await harness.api(`/api/goals/${unfunded.id}`, { method: "PUT", body: { currency: "EUR" } })).currency, "EUR");
+}, { userId: "review_goal" }));
+
 test("flex min_amount greater than max_amount is rejected on create and update", async () => withHarness(async harness => {
   await configure(harness);
 
@@ -832,3 +862,36 @@ test("failed confirmed one-off deletion restores planning source and ledger attr
     }
   });
 });
+
+test("sync snapshot keeps orphaned planning rows without throwing", async () => withHarness(async harness => {
+  await configure(harness);
+
+  const goal = await harness.api("/api/goals", {
+    method: "POST",
+    body: {
+      name: "Orphaned Goal",
+      currency: "PLN",
+      amount: 100,
+      due_date: "2030-01-01",
+      allow_split: 1,
+      priority: 2
+    }
+  });
+
+  // Manually delete the planned_transaction to make it an orphan
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare("PRAGMA foreign_keys = OFF").run();
+    db.prepare("DELETE FROM planned_transactions WHERE id = ?").run(goal.planned_transaction_id);
+    db.prepare("PRAGMA foreign_keys = ON").run();
+  } finally {
+    db.close();
+  }
+
+  // Get sync snapshot (this will hit SQLite directly)
+  const snapshot = await harness.api("/api");
+
+  // The orphaned goal should still be in the snapshot
+  const snapshotGoal = snapshot.goals.find(g => g.id === goal.id);
+  assert.ok(snapshotGoal, "Orphaned goal should not be filtered out by sync snapshot");
+}));

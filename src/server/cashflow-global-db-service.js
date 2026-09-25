@@ -25,23 +25,28 @@ export function createCashflowGlobalDbService({
     logServerEvent
   });
 
+  let migrationRan = false;
+
   function openGlobalDb() {
     fs.mkdirSync(dataDir, { recursive: true });
     const db = new Database(globalDbPath);
     initGlobalPragmas(db);
     try {
-      globalMigration.initializeOrMigrate(db, {
-        beforeStep: beforeGlobalMigrationStep,
-        storageProfileIds: listCashflowUserIds()
-      });
-      db.prepare(`
-        UPDATE global_options
-        SET holiday_country = CASE
-              WHEN UPPER(COALESCE(holiday_country, 'PL')) IN ('PL', 'DE') THEN UPPER(COALESCE(holiday_country, 'PL'))
-              ELSE 'PL'
-            END
-        WHERE id = 1
-      `).run();
+      if (!migrationRan) {
+        globalMigration.initializeOrMigrate(db, {
+          beforeStep: beforeGlobalMigrationStep,
+          storageProfileIds: listCashflowUserIds()
+        });
+        db.prepare(`
+          UPDATE global_options
+          SET holiday_country = CASE
+                WHEN UPPER(COALESCE(holiday_country, 'PL')) IN ('PL', 'DE') THEN UPPER(COALESCE(holiday_country, 'PL'))
+                ELSE 'PL'
+              END
+          WHERE id = 1
+        `).run();
+        migrationRan = true;
+      }
       return db;
     } catch (error) {
       db.close();

@@ -60,7 +60,8 @@ async function createCashflowTestHarness(options = {}) {
     dataDir,
     localeDir,
     getCurrentFxSnapshot: () => fxSnapshot,
-    getFxSnapshotForDate: () => fxSnapshot,
+    // Allow deterministic confirmation barriers while retaining real storage/recovery.
+    getFxSnapshotForDate: options.getFxSnapshotForDate || (() => fxSnapshot),
     lockService: options.lockService || null,
     fetchImpl: options.fetchImpl || fetch,
     portabilityMutationHook: options.portabilityMutationHook || null,

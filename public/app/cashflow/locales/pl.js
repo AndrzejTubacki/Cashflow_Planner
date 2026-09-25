@@ -527,6 +527,7 @@ export default {
     "The first date after this period. Future allocations after this date belong to the next period.": "Pierwsza data po tym okresie. Przyszłe alokacje po tej dacie należą do następnego okresu.",
     "The first date in the currently displayed budget period.": "Pierwsza data aktualnie wyświetlanego okresu budżetowego.",
     "The last date in the currently displayed budget period.": "Ostatnia data aktualnie wyświetlanego okresu budżetowego.",
+    "Cannot change currency for a goal with confirmed ledger history": "Nie można zmienić waluty celu z potwierdzoną historią księgi",
     "Cannot change currency for a one-off transaction with confirmed ledger history": "Nie można zmienić waluty transakcji jednorazowej z potwierdzoną historią księgi",
     "Cannot change type for a one-off transaction with confirmed ledger history": "Nie można zmienić typu transakcji jednorazowej z potwierdzoną historią księgi",
     "One-off transaction amount cannot be lower than the already confirmed amount": "Kwota transakcji jednorazowej nie może być niższa niż już potwierdzona kwota",

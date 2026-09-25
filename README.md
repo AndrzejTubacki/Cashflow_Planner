@@ -106,8 +106,21 @@ The database and its extensions/schema must already exist and be reachable.
 Cashflow does not manage the Postgres server itself, only the tables it owns
 inside the database you give it. `CASHFLOW_RUNTIME_LOCK_BACKEND=postgres`
 coordinates background jobs and projection regeneration across replicas;
-without it, multiple replicas still write safely but can duplicate some
-scheduled work.
+without it, scheduled work can run on multiple replicas at once. Startup
+logs `cashflow_postgres_runtime_locks_disabled` to `error.log` when Postgres
+is configured without runtime locks. A single replica can still run in this
+configuration; enable the locks before scaling out.
+
+The v1.0.1 hardening changes require the operator-run additive
+[Postgres migration](scripts/migrations/postgres-v1.0.1.sql) before rollout.
+New Postgres backups store payloads in the shared database, and internal-login
+throttling is shared across replicas. Normal deployments use at most 20
+connections per replica; a distinct lock database adds 10. See
+[deployment requirements and remaining limits](docs/postgres-runtime.md).
+The runtime image now uses UID/GID 1000; bind-mounted data/log directories must
+be writable by that user. `npm run test:container` verifies first-run setup,
+health/readiness/API and graceful shutdown with a read-only root filesystem
+and only data/log volumes writable.
 
 Moving data between the two backends is a set of dedicated commands, not
 something to flip on a running install without a plan. See

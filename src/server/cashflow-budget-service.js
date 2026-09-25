@@ -78,6 +78,7 @@ export function createCashflowBudgetService({
   globalStore = null,
   initializeBudgetStorage,
   initializeBudgetStorageAsync = null,
+  logError = () => {},
   openGlobalDb
 }) {
   async function withGlobalRepository(fn) {
@@ -307,6 +308,7 @@ export function createCashflowBudgetService({
       await requireActiveAccountForRepo(repo, normalizedAccountId);
     });
 
+    let metadataCreated = false;
     try {
       // The budgets row must exist before initializing storage, not after:
       // in Postgres, settings.budget_id is a real foreign key to
@@ -328,6 +330,7 @@ export function createCashflowBudgetService({
         });
         return await repo.budgets.get(budgetId);
       });
+      metadataCreated = true;
       if (typeof initializeBudgetStorageAsync === "function") {
         await initializeBudgetStorageAsync(budgetId);
       } else {
@@ -339,10 +342,33 @@ export function createCashflowBudgetService({
         role: "owner"
       };
     } catch (error) {
+      logError("cashflow_budget_create_failed", { budgetId, error: error.message });
+      if (metadataCreated) {
+        try {
+          // Storage initialization uses a separate connection and requires a
+          // committed parent budget. Compensate that commit on failure; marking
+          // deleted first permits owner removal, and FK cascades remove partial
+          // settings. Keep the original audit event plus an explicit rollback.
+          await globalStore.transaction(async repo => {
+            await repo.budgets.markDeleted(budgetId);
+            await repo.budgets.delete(budgetId);
+            await repo.audit.insertSecurityEvent({
+              action: "budget_create_rollback",
+              actorAccountId: normalizedAccountId,
+              targetId: budgetId,
+              targetType: "budget",
+              outcome: "failure"
+            });
+          });
+        } catch (cleanupError) {
+          logError("cashflow_budget_create_cleanup_failed", { budgetId, error: cleanupError.message });
+        }
+      }
       try {
-        deleteBudgetStorage(budgetId);
-      } catch {
-        // Preserve the original creation failure.
+        await deleteBudgetStorage(budgetId);
+      } catch (cleanupError) {
+        // Cleanup failures are observable without replacing the initiating error.
+        logError("cashflow_budget_storage_cleanup_failed", { budgetId, error: cleanupError.message });
       }
       throw error;
     }
@@ -377,6 +403,8 @@ export function createCashflowBudgetService({
   async function renameBudgetAsync(actorAccountId, budgetId, input = {}) {
     const name = displayName(input.displayName || input.display_name || input.name, "displayName");
     const normalizedBudgetId = normalizeUserId(budgetId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await requireBudgetForRepo(repo, normalizedBudgetId);
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
@@ -420,6 +448,8 @@ export function createCashflowBudgetService({
 
   async function archiveBudgetAsync(actorAccountId, budgetId) {
     const normalizedBudgetId = normalizeUserId(budgetId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const budget = await requireBudgetForRepo(repo, normalizedBudgetId);
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner"]);
@@ -464,6 +494,8 @@ export function createCashflowBudgetService({
 
   async function restoreBudgetAsync(actorAccountId, budgetId) {
     const normalizedBudgetId = normalizeUserId(budgetId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const budget = await requireBudgetForRepo(repo, normalizedBudgetId);
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner"]);
@@ -639,6 +671,8 @@ export function createCashflowBudgetService({
     const role = memberRole(input.role);
     const normalizedBudgetId = normalizeUserId(budgetId);
     const normalizedTargetAccountId = normalizeUserId(targetAccountId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
       await requireActiveAccountForRepo(repo, normalizedTargetAccountId);
@@ -697,6 +731,8 @@ export function createCashflowBudgetService({
   async function removeMemberAsync(actorAccountId, budgetId, targetAccountId) {
     const normalizedBudgetId = normalizeUserId(budgetId);
     const normalizedTargetAccountId = normalizeUserId(targetAccountId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
       const current = await requireMembershipForRepo(repo, normalizedBudgetId, normalizedTargetAccountId);
@@ -749,6 +785,8 @@ export function createCashflowBudgetService({
   async function leaveBudgetAsync(accountId, budgetId) {
     const normalizedBudgetId = normalizeUserId(budgetId);
     const normalizedAccountId = normalizeUserId(accountId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const current = await requireMembershipForRepo(repo, normalizedBudgetId, normalizedAccountId);
       if (current.role === "owner") throw conflict("Transfer ownership before leaving the budget");
@@ -811,6 +849,8 @@ export function createCashflowBudgetService({
   async function transferOwnershipAsync(actorAccountId, budgetId, targetAccountId) {
     const normalizedBudgetId = normalizeUserId(budgetId);
     const normalizedTargetAccountId = normalizeUserId(targetAccountId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const actorMembership = await repo.memberships.get({
         accountId: actorAccountId,
@@ -925,6 +965,8 @@ export function createCashflowBudgetService({
     }
     const token = crypto.randomBytes(32).toString("base64url");
     const invitationId = `invite_${crypto.randomUUID()}`;
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await requireBudgetForRepo(repo, normalizedBudgetId);
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
@@ -1029,6 +1071,8 @@ export function createCashflowBudgetService({
 
   async function revokeInvitationAsync(actorAccountId, budgetId, invitationId) {
     const normalizedBudgetId = normalizeUserId(budgetId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
       const invitation = await repo.invitations.getForBudget({
@@ -1118,6 +1162,8 @@ export function createCashflowBudgetService({
 
   async function acceptInvitationAsync(accountId, token) {
     const normalizedAccountId = normalizeUserId(accountId);
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await requireActiveAccountForRepo(repo, normalizedAccountId);
       const invitation = await repo.invitations.getByTokenHash(inviteTokenHash(token));

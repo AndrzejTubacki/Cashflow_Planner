@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import Database from "better-sqlite3";
 
 import { GLOBAL_SCHEMA_VERSION } from "../src/server/cashflow-global-schema.js";
@@ -13,32 +15,6 @@ import {
 } from "../src/server/cashflow-schema.js";
 import { normalizeCashflowStorageSnapshot } from "../src/server/cashflow-storage-snapshot.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    input: "",
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--input") {
-      options.input = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
   return `Usage: npm run db:sqlite:verify -- --input PATH --data-dir PATH [--pretty]
@@ -171,7 +147,15 @@ export function verifySqliteMigrationCli(options = parseArgs()) {
 }
 
 function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--input","--data-dir"],
+    boolean: ["--pretty"],
+    defaults: {
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    input: "",
+    pretty: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
@@ -181,6 +165,6 @@ function main() {
   if (!result.ok) process.exitCode = 2;
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main();
 }

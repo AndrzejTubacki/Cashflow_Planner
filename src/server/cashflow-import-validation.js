@@ -42,7 +42,7 @@ const TABLE_COLUMNS = {
     "id", "name", "currency", "amount", "prediction_strategy", "prediction_substitute_missing",
     "prediction_min_recorded_months", "necessary", "active", "repeat_every_months",
     "start_month_year", "anchor_type", "anchor_day_of_month", "anchor_offset_days",
-    "anchor_business_day_adjustment", "anchor_holiday_country", "planned_transaction_id",
+    "anchor_business_day_adjustment", "anchor_holiday_country", "anchor_income_id", "planned_transaction_id",
     "created_at", "updated_at"
   ],
   recurring_incomes: [
@@ -419,7 +419,16 @@ function validateRows(exportData, options = {}) {
     timestampField(details, "planned_transactions", index, row, "updated_at");
   });
 
-  planning.recurring_expenses.forEach((row, index) => validateRecurring(details, "recurring_expenses", index, row, "expense"));
+  const recurringIncomeIds = new Set(planning.recurring_incomes.map(row => row.id));
+  planning.recurring_expenses.forEach((row, index) => {
+    validateRecurring(details, "recurring_expenses", index, row, "expense");
+    // Current exports include this nullable scheduling link. Preserve valid
+    // links on restore, while rejecting malformed or dangling imported anchors.
+    const incomeId = optionalId(details, "recurring_expenses", index, row, "anchor_income_id");
+    if (incomeId && !recurringIncomeIds.has(incomeId)) {
+      details.push(detail("recurring_expenses", index, row, "anchor_income_id", "source_not_found"));
+    }
+  });
   planning.recurring_incomes.forEach((row, index) => validateRecurring(details, "recurring_incomes", index, row, "income"));
   planning.flex_transactions.forEach((row, index) => {
     validateCommonEntity(details, "flex_transactions", index, row);

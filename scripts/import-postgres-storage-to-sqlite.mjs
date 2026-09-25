@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import { createCashflowDbService } from "../src/server/cashflow-db-service.js";
 import { createSqliteBudgetStore } from "../src/server/cashflow-budget-store.js";
 import { createSqliteGlobalStore } from "../src/server/cashflow-sqlite-global-store.js";
@@ -13,40 +15,6 @@ import {
 } from "../src/server/cashflow-storage-snapshot.js";
 import { createCashflowStoragePaths } from "../src/server/cashflow-storage-utils.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    apply: false,
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    force: false,
-    input: "",
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--input") {
-      options.input = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--apply") {
-      options.apply = true;
-    } else if (arg === "--dry-run") {
-      options.apply = false;
-    } else if (arg === "--force") {
-      options.force = true;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
   return `Usage: npm run db:postgres:import-sqlite -- --input PATH --data-dir PATH [--dry-run|--apply] [--force] [--pretty]
@@ -93,7 +61,13 @@ export async function importPostgresStorageToSqlite({
     );
   }
 
-  const paths = createCashflowStoragePaths(resolvedDataDir);
+  const temporaryPath = path.join(resolvedDataDir, ".import-tmp");
+  if (fs.existsSync(temporaryPath)) {
+    fs.rmSync(temporaryPath, { recursive: true, force: true });
+  }
+  fs.mkdirSync(temporaryPath, { recursive: true });
+
+  const paths = createCashflowStoragePaths(temporaryPath);
   const dbService = createCashflowDbService({
     ledgerDbPath: paths.ledgerDbPath,
     planningDbPath: paths.planningDbPath,
@@ -105,15 +79,37 @@ export async function importPostgresStorageToSqlite({
     openPlanningDb: dbService.openPlanningDb
   });
   const globalStore = createSqliteGlobalStore({
-    dataDir: resolvedDataDir,
+    dataDir: temporaryPath,
     listCashflowUserIds: paths.listCashflowUserIds
   });
 
-  const result = await restoreCashflowStorageSnapshot({
-    budgetStore,
-    globalStore,
-    snapshot
-  });
+  let result;
+  try {
+    result = await restoreCashflowStorageSnapshot({
+      budgetStore,
+      globalStore,
+      snapshot
+    });
+
+    if (result.ok) {
+      const files = fs.readdirSync(temporaryPath);
+      for (const file of files) {
+        const dest = path.join(resolvedDataDir, file);
+        if (fs.existsSync(dest)) {
+          fs.rmSync(dest, { recursive: true, force: true });
+        }
+        fs.renameSync(path.join(temporaryPath, file), dest);
+      }
+      fs.rmSync(temporaryPath, { recursive: true, force: true });
+    } else {
+      fs.rmSync(temporaryPath, { recursive: true, force: true });
+    }
+  } catch (err) {
+    if (fs.existsSync(temporaryPath)) {
+      fs.rmSync(temporaryPath, { recursive: true, force: true });
+    }
+    throw err;
+  }
 
   return {
     apply: true,
@@ -134,7 +130,17 @@ export async function importPostgresStorageToSqliteCli(options = parseArgs()) {
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--input","--data-dir"],
+    boolean: ["--apply","--force","--pretty"],
+    defaults: {
+    apply: false,
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    force: false,
+    input: "",
+    pretty: false
+  }
+  });
   const result = await importPostgresStorageToSqliteCli(options);
   if (result.help) {
     console.log(result.help);
@@ -143,7 +149,7 @@ async function main() {
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

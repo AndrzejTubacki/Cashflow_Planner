@@ -2,12 +2,21 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
+/**
+ * Note: Despite the "recovery" naming, this module provides pre-migration backups
+ * (saving a snapshot before global schema migration). It does not currently provide
+ * an automated restore-on-failure path. If a migration failure corrupts the database,
+ * an operator must manually restore from the snapshot created here.
+ */
+
 import {
   applyGlobalMigrations,
   GLOBAL_SCHEMA_VERSION,
   initializeGlobalSchema
 } from "./cashflow-global-schema.js";
 
+
+const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
 const RECOVERY_FORMAT = "cashflow-global-migration-recovery";
 const RECOVERY_VERSION = 1;
 export const DEFAULT_GLOBAL_MIGRATION_RECOVERY_RETENTION_COUNT = 2;
@@ -157,7 +166,14 @@ export function createCashflowGlobalMigrationService({
       });
       return finalPath;
     } catch (error) {
-      fs.rmSync(tempPath, { recursive: true, force: true });
+      try {
+        fs.rmSync(tempPath, { recursive: true, force: true });
+      } catch (rmError) {
+        logError("cashflow_global_migration_recovery_cleanup_failed", {
+          error: rmError.message,
+          tempPath
+        });
+      }
       logError("cashflow_global_migration_recovery_failed", {
         error: error.message,
         sourceVersion,

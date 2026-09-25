@@ -1,11 +1,9 @@
+import { todayIso } from "./format.js";
 import { useState } from "react";
 import { formatMoney } from "./format.js";
 import { apiFetch } from "./api.js";
 import EditModal from "./EditModal.jsx";
 
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
-}
 
 function OneOffTable({ rows, editable, adding, onStopAdding, onChanged }) {
   const [busyId, setBusyId] = useState(null);

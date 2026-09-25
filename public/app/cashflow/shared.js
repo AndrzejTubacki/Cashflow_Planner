@@ -1,5 +1,5 @@
 import { escapeHtml } from "../utils.js";
-import { DEFAULT_TIMEZONE } from "./constants.js";
+import { DEFAULT_TIMEZONE, SUPPORTED_FX_CURRENCIES, TIMEZONE_OPTIONS, HOLIDAY_COUNTRIES } from "./constants.js";
 
 const DEFAULT_LOCALE = "en";
 const loadedLocales = new Map();
@@ -51,7 +51,8 @@ async function loadLocale(locale) {
 
 function t(locale, key, fallback = "") {
   const normalizedKey = String(fallback || key || "");
-  const translated = activeLocale.strings?.[normalizedKey];
+  const targetLocale = loadedLocales.get(locale) || activeLocale;
+  const translated = targetLocale.strings?.[normalizedKey];
   return translated || normalizedKey;
 }
 
@@ -113,6 +114,12 @@ function formatMoney(amount, currency, locale) {
     maximumFractionDigits: 2
   });
   return `${formatted} ${currency}`;
+}
+
+// Keep formatMoney as plain text for notes/stat cards that escape their inputs;
+// direct HTML sinks use this helper so currency labels cannot become markup.
+function formatMoneyHtml(amount, currency, locale) {
+  return escapeHtml(formatMoney(amount, currency, locale));
 }
 
 function renderHelpPopover(locale, title, body) {
@@ -257,10 +264,35 @@ function renderDetailsPanel(title, content, { open = false, extra = "" } = {}) {
   `;
 }
 
+
+function renderCurrencyOptions(selectedCurrency) {
+  return SUPPORTED_FX_CURRENCIES.map(currency => `
+    <option value="${escapeHtml(currency)}"${currency === selectedCurrency ? " selected" : ""}>
+      ${escapeHtml(currency)}
+    </option>
+  `).join("");
+}
+
+function renderTimezoneDatalist() {
+  return TIMEZONE_OPTIONS.map(timezone => `<option value="${escapeHtml(timezone)}"></option>`).join("");
+}
+
+function renderHolidayCountryOptions(locale, selectedHolidayCountry) {
+  return HOLIDAY_COUNTRIES.map(country => `
+    <option value="${escapeHtml(country.code)}"${country.code === selectedHolidayCountry ? " selected" : ""}>
+      ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
+    </option>
+  `).join("");
+}
+
 export {
+  renderCurrencyOptions,
+  renderTimezoneDatalist,
+  renderHolidayCountryOptions,
   asNumber,
   formatMessage,
   formatMoney,
+  formatMoneyHtml,
   formatPercent,
   groupBy,
   hasCapability,

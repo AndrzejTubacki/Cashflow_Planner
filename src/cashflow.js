@@ -100,9 +100,11 @@ async function createCashflowModule({
   backupServiceHook = null,
   dataDir,
   databaseConfig = resolveCashflowDbConfig(),
+  env = process.env,
   globalMigrationHook = null,
   localeDir,
   lockService = null,
+  runtimeLockFactory = null,
   getCurrentFxSnapshot,
   getFxSnapshotForDate = null,
   fetchImpl = fetch,
@@ -179,6 +181,7 @@ async function createCashflowModule({
     beforeGlobalMigrationStep: globalMigrationHook || (() => {}),
     databaseConfig,
     dataDir,
+    env,
     listCashflowUserIds,
     listLedgerYears,
     logError,
@@ -189,6 +192,17 @@ async function createCashflowModule({
   const { budgetStore, globalStore } = storageBackend;
   const resolvedDatabaseConfig = storageBackend.config;
   activeDbBackend = resolvedDatabaseConfig.backend;
+  // Construct optional locks after storage so they can borrow the global pool.
+  let runtimeLocks = null;
+  if (runtimeLockFactory) {
+    try {
+      runtimeLocks = await runtimeLockFactory({ globalStore });
+      lockService = runtimeLocks.lockService;
+    } catch (error) {
+      await Promise.allSettled([globalStore.close?.(), budgetStore.close?.()]);
+      throw error;
+    }
+  }
 
   // Wrap host logging with Cashflow-specific error metadata.
   const logCashflowError = createCashflowErrorLogger(logError);
@@ -585,6 +599,7 @@ async function createCashflowModule({
     getSettingsAsync,
     initReadOnlyPragmas,
     listLedgerYears,
+    lockService,
     logError,
     logServerEvent,
     openLedgerDb,
@@ -666,6 +681,7 @@ async function createCashflowModule({
     globalStore,
     initializeBudgetStorage,
     initializeBudgetStorageAsync,
+    logError,
     openGlobalDb
   });
 
@@ -690,6 +706,7 @@ async function createCashflowModule({
     generateId,
     listLedgerYears,
     loadAllConfirmedTransactions,
+    lockService,
     logError,
     logServerEvent,
     mutationHook: portabilityMutationHook,
@@ -979,11 +996,25 @@ async function createCashflowModule({
 
     if (checkDefaultBudget) {
       result.defaultBudgetChecked = true;
-      const defaultPlanningDbPath = planningDbPath("local", { create: false });
-      result.defaultBudgetPresent = fs.existsSync(defaultPlanningDbPath);
-      if (result.defaultBudgetPresent) {
-        const budgetReady = await budgetStore.checkReadiness("local");
-        result.defaultBudgetSchemaVersion = budgetReady.planningSchemaVersion;
+      if (resolvedDatabaseConfig.backend === "postgres") {
+        try {
+          const budgetReady = await budgetStore.checkReadiness("local");
+          result.defaultBudgetPresent = true;
+          result.defaultBudgetSchemaVersion = budgetReady.planningSchemaVersion;
+        } catch (error) {
+          if (error?.code === "CASHFLOW_POSTGRES_BUDGET_NOT_FOUND") {
+            result.defaultBudgetPresent = false;
+          } else {
+            throw error;
+          }
+        }
+      } else {
+        const defaultPlanningDbPath = planningDbPath("local", { create: false });
+        result.defaultBudgetPresent = fs.existsSync(defaultPlanningDbPath);
+        if (result.defaultBudgetPresent) {
+          const budgetReady = await budgetStore.checkReadiness("local");
+          result.defaultBudgetSchemaVersion = budgetReady.planningSchemaVersion;
+        }
       }
     }
 
@@ -1008,7 +1039,8 @@ async function createCashflowModule({
     predictedAmountForRecurringExpenseAsync,
     safeGetCurrentFxSnapshot,
     safeGetCurrentFxSnapshotAsync,
-    sumConfirmedFunding
+    sumConfirmedFunding,
+    sumConfirmedFundingAsync
   });
 
   // Queue and send user-facing notifications for shortfalls, pending summaries, and goals.
@@ -1147,7 +1179,7 @@ async function createCashflowModule({
   }
 
   // Schedule recurring maintenance: midnight transitions, FX refresh, notifications, backups.
-  const { startBackgroundJobs } = createCashflowBackgroundJobs({
+  const { startBackgroundJobs, stopBackgroundJobs } = createCashflowBackgroundJobs({
     budgetStore,
     cleanupOperationalData: cleanupOperationalDataBestEffort,
     compactLedgerHistory,
@@ -1170,8 +1202,21 @@ async function createCashflowModule({
     sendQueuedNotifications
   });
 
+  // Drain users of the pools before closing every owned connection pool.
+  async function close() {
+    await stopBackgroundJobs();
+    const results = await Promise.allSettled([
+      runtimeLocks?.close(), budgetStore.close?.(), globalStore.close?.()
+    ]);
+    const failures = results.filter(result => result.status === "rejected");
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Storage shutdown failed");
+  }
+
   // Public module surface consumed by server.mjs and tests.
   return {
+    close,
+    globalStore,
+    stopBackgroundJobs,
     cleanupOperationalData,
     compactLedgerHistory,
     readinessCheck,

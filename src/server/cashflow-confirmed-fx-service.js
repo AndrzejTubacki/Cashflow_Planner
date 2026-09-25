@@ -30,16 +30,6 @@ export function createCashflowConfirmedFxService({
       };
     }
 
-    if (typeof getFxSnapshotForDate === "function") {
-      const snapshot = await getFxSnapshotForDate(confirmedDate);
-      const raw = getFxRateForCurrency(normalizedCurrency, settings, snapshot);
-
-      return {
-        fxRate: raw,
-        bufferedFxRate: raw
-      };
-    }
-
     if (input.fx_rate || input.buffered_fx_rate) {
       const fxRate = Number(input.fx_rate || input.buffered_fx_rate);
 
@@ -50,6 +40,16 @@ export function createCashflowConfirmedFxService({
       return {
         fxRate,
         bufferedFxRate: Number(input.buffered_fx_rate || input.fx_rate)
+      };
+    }
+
+    if (typeof getFxSnapshotForDate === "function") {
+      const snapshot = await getFxSnapshotForDate(confirmedDate);
+      const raw = getFxRateForCurrency(normalizedCurrency, settings, snapshot);
+
+      return {
+        fxRate: raw,
+        bufferedFxRate: raw
       };
     }
 

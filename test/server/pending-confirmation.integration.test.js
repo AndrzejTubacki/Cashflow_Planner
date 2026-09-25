@@ -39,6 +39,41 @@ function insertPending(harness, row) {
   }
 }
 
+test("concurrent SQLite expense confirmations cannot spend the same remaining balance", async () => {
+  global.__CASHFLOW_TEST_RACE_DELAY = 100;
+  let arrivals = 0, release, reject, timer;
+  const gate = new Promise((resolve, fail) => { release = resolve; reject = fail; });
+  try {
+    await withHarness(async harness => {
+      insertPending(harness, { id: "race-income", name: "Opening", amount: 100,
+        type: "income", date: "2025-12-01" });
+      await harness.api("/api/pending/race-income/confirm", { method: "POST", body: {} });
+      for (const id of ["race-a", "race-b"]) {
+        insertPending(harness, { id, name: id, amount: 80, currency: "EUR", type: "expense", date: "2026-01-01" });
+      }
+      const results = await Promise.all(["race-a", "race-b"].map(id =>
+        harness.request(`/api/pending/${id}/confirm`, { method: "POST", body: {} })));
+      assert.deepEqual(results.map(result => result.response.status).sort(), [200, 400]);
+      assert.match(results.find(result => result.response.status === 400).body.error, /balance negative/);
+      const snapshot = await harness.api("/api");
+      assert.equal(snapshot.confirmedTransactions.filter(row => row.id.startsWith("race-")).length, 2);
+      assert.equal(arrivals, 2, "both calls must have reached the FX await before either balance check");
+      const db = harness.openLedgerDb("2026");
+      try {
+        assert.equal(db.prepare("SELECT running_balance_pln FROM confirmed_transactions").get().running_balance_pln, 20);
+      } finally { db.close(); }
+    }, { userId: "review_race", getFxSnapshotForDate: async () => {
+      if (++arrivals === 1) timer = setTimeout(() => reject(new Error("FX barrier timed out")), 10000);
+      if (arrivals === 2) { clearTimeout(timer); release(); }
+      await gate;
+      return { eur: { currency: "EUR", rate: 1, source: "test" } };
+    } });
+  } finally {
+    clearTimeout(timer);
+    global.__CASHFLOW_TEST_RACE_DELAY = undefined;
+  }
+});
+
 test("moving future to pending removes future row and is idempotent by occurrence key", async () => withHarness(async harness => {
   await harness.api("/api/settings", {
     method: "PUT",
@@ -691,6 +726,14 @@ test("a second ledger currency switch is blocked until the pending conversion is
     method: "POST",
     body: { amount: firstConversion.amount, confirmed_date: "2026-05-20" }
   });
+
+  const updateDb = harness.openPlanningDb();
+  try {
+    updateDb.prepare("UPDATE ledger_currency_events SET created_at = datetime('now', '-1 minute')").run();
+  } finally {
+    updateDb.close();
+  }
+
   await harness.api("/api/settings", {
     method: "PUT",
     body: {

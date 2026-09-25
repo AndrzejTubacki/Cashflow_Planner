@@ -535,6 +535,7 @@ export default {
     "The first date after this period. Future allocations after this date belong to the next period.": "The first date after this period. Future allocations after this date belong to the next period.",
     "The first date in the currently displayed budget period.": "The first date in the currently displayed budget period.",
     "The last date in the currently displayed budget period.": "The last date in the currently displayed budget period.",
+    "Cannot change currency for a goal with confirmed ledger history": "Cannot change currency for a goal with confirmed ledger history",
     "Cannot change currency for a one-off transaction with confirmed ledger history": "Cannot change currency for a one-off transaction with confirmed ledger history",
     "Cannot change type for a one-off transaction with confirmed ledger history": "Cannot change type for a one-off transaction with confirmed ledger history",
     "One-off transaction amount cannot be lower than the already confirmed amount": "One-off transaction amount cannot be lower than the already confirmed amount",

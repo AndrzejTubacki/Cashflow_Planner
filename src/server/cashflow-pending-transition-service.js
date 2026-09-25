@@ -76,6 +76,9 @@ export function createCashflowPendingTransitionService({
 
   async function moveDueFutureTransactionsToPendingWithBudgetStore(userId, today) {
     return await budgetStore.transaction(async writer => {
+      if (typeof writer.lockBudgetLedger === "function") {
+        await writer.lockBudgetLedger(userId);
+      }
       const futureTxns = (await writer.listPlanningRows(userId, "future_transactions"))
         .filter(row => String(row.date || "") <= today)
         .sort((a, b) => {

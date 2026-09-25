@@ -292,13 +292,17 @@ async function loadBudgetManagerData({ preserveInvitation = false } = {}) {
   state.budgetManager = manager;
 }
 
+let cashflowLoadSeq = 0;
 async function loadCashflow(messageKey = "") {
+  const seq = ++cashflowLoadSeq;
   state.message = "";
   state.error = "";
   state.validationResult = null;
 
   try {
-    state.cashflow = await apiClient.json("/api", { cache: "no-store" });
+    const data = await apiClient.json("/api", { cache: "no-store" });
+    if (seq !== cashflowLoadSeq) return;
+    state.cashflow = data;
     const locale = localeOf(state.cashflow);
     await loadLocale(locale);
     document.documentElement.lang = locale;

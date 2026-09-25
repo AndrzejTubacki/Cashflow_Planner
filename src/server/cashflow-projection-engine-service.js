@@ -60,7 +60,7 @@ function fundingValue(map, id) {
 
 function addFundingToMap(map, id, amount) {
   if (!id) return;
-  map.set(id, addMoneyAmounts(map.get(id), amount));
+  map.set(id, addMoneyAmounts(map.get(id) || 0, amount));
 }
 
 function fundingMapsFromRows(rows = [], ledgerCurrency = "PLN", { futureRows = false } = {}) {
@@ -70,7 +70,7 @@ function fundingMapsFromRows(rows = [], ledgerCurrency = "PLN", { futureRows = f
     if (String(row?.ledger_currency || "PLN") !== ledgerCurrency) continue;
     if (!futureRows && row?.type === "income") continue;
 
-    const amount = roundMoneyAmount(row?.ledger_amount);
+    const amount = roundMoneyAmount(row?.ledger_amount || 0);
     addFundingToMap(maps.source_flex_id, row?.source_flex_id, amount);
     addFundingToMap(maps.source_goal_id, row?.source_goal_id, amount);
   }
@@ -119,8 +119,8 @@ export function buildProjectionFundingState({
     goals
       .filter(goal => {
         const total = addMoneyAmounts(
-          confirmedGoalFunding.get(goal.id),
-          pendingGoalFunding.get(goal.id),
+          (confirmedGoalFunding.get(goal.id) || 0),
+          (pendingGoalFunding.get(goal.id) || 0),
           fundingValue(futureMaps.source_goal_id, goal.id)
         );
 
@@ -920,8 +920,8 @@ export function computeProjectionPlan({
 
       const targetLedger = roundMoneyAmount(goalTargetLedger.get(goal.id));
       const fundedLedger = addMoneyAmounts(
-        confirmedGoalFunding.get(goal.id),
-        pendingGoalFunding.get(goal.id)
+        (confirmedGoalFunding.get(goal.id) || 0),
+        (pendingGoalFunding.get(goal.id) || 0)
       );
 
       return subtractMoneyAmounts(targetLedger, fundedLedger) > 0.0001;
@@ -932,9 +932,9 @@ export function computeProjectionPlan({
     return flexes.some(flex => {
       const targetLedger = roundMoneyAmount(flexTargetLedger.get(flex.id));
       const fundedLedger = addMoneyAmounts(
-        confirmedFlexFunding.get(flex.id),
-        pendingFlexFunding.get(flex.id),
-        generatedFlexFunding.get(flex.id)
+        (confirmedFlexFunding.get(flex.id) || 0),
+        (pendingFlexFunding.get(flex.id) || 0),
+        (generatedFlexFunding.get(flex.id) || 0)
       );
 
       if (subtractMoneyAmounts(targetLedger, fundedLedger) <= 0.0001) return false;
@@ -1053,7 +1053,7 @@ export function computeProjectionPlan({
     for (const oneOff of oneOffs) {
       const progressKey = `${oneOff.id}:${oneOff.type}:${String(oneOff.currency || "").toUpperCase()}`;
       const progress = oneOffProgress.get(progressKey) || null;
-      const confirmedAmount = roundMoneyAmount(progress?.confirmedAmount);
+      const confirmedAmount = roundMoneyAmount(progress?.confirmedAmount || 0);
       const remainingAmount = Math.max(0, subtractMoneyAmounts(oneOff.amount, confirmedAmount));
       const isConfirmedRemainder = Boolean(progress);
       const occurrenceKey = isConfirmedRemainder
@@ -1102,7 +1102,7 @@ export function computeProjectionPlan({
       const existingPending = pendingByOccurrenceKey.get(occurrenceKey) || null;
       const availableForExpense = addMoneyAmounts(
         spendableBalance(period),
-        Math.max(0, roundMoneyAmount(existingPending?.ledger_amount))
+        Math.max(0, roundMoneyAmount(existingPending?.ledger_amount || 0))
       );
 
       if (oneOff.type === "income") {
@@ -1294,8 +1294,8 @@ export function computeProjectionPlan({
       0,
       subtractMoneyAmounts(
         targetLedger,
-        confirmedGoalFunding.get(goal.id),
-        pendingGoalFunding.get(goal.id)
+        (confirmedGoalFunding.get(goal.id) || 0),
+        (pendingGoalFunding.get(goal.id) || 0)
       )
     );
 
@@ -1428,9 +1428,9 @@ export function computeProjectionPlan({
       if (targetLedger <= 0) continue;
 
       const alreadyFundedLedger = addMoneyAmounts(
-        confirmedFlexFunding.get(flex.id),
-        pendingFlexFunding.get(flex.id),
-        generatedFlexFunding.get(flex.id)
+        (confirmedFlexFunding.get(flex.id) || 0),
+        (pendingFlexFunding.get(flex.id) || 0),
+        (generatedFlexFunding.get(flex.id) || 0)
       );
 
       const remainingLedger = Math.max(0, subtractMoneyAmounts(targetLedger, alreadyFundedLedger));
@@ -1476,7 +1476,7 @@ export function computeProjectionPlan({
 
       generatedFlexFunding.set(
         flex.id,
-        addMoneyAmounts(generatedFlexFunding.get(flex.id), inserted.ledgerAmount)
+        addMoneyAmounts((generatedFlexFunding.get(flex.id) || 0) || 0, inserted.ledgerAmount)
       );
 
       subtractPeriodAvailable(period, inserted.ledgerAmount);
@@ -1489,8 +1489,8 @@ export function computeProjectionPlan({
     const targetLedger = roundMoneyAmount(goalTargetLedger.get(goal.id));
 
     const alreadyFundedLedger = addMoneyAmounts(
-      confirmedGoalFunding.get(goal.id),
-      pendingGoalFunding.get(goal.id)
+      (confirmedGoalFunding.get(goal.id) || 0),
+      (pendingGoalFunding.get(goal.id) || 0)
     );
 
     const futureAllocatedLedger = futureRows
@@ -1606,9 +1606,7 @@ export function createCashflowProjectionEngineService({
    * Async/backend-neutral counterpart to regenerateProjections. Requires a
    * budget store plus its async companion helpers (all already exist and are
    * used elsewhere once a Postgres budget store is configured). Shares the
-   * same computeProjectionPlan core as the SQLite path is expected to move to
-   * — see context.md §5.1 for the port design and remaining wiring steps
-   * (this function is not yet called by the projection coordinator).
+   * same computeProjectionPlan core as the SQLite path.
    */
   async function regenerateProjectionsAsync(budgetId) {
     if (!budgetStore) throw new Error("A budget store is required for regenerateProjectionsAsync");
@@ -1749,6 +1747,9 @@ export function createCashflowProjectionEngineService({
   }
 
   function regenerateProjections(userId) {
+    if (typeof confirmedBalanceAsOf !== "function") throw new Error("confirmedBalanceAsOf is required");
+    if (typeof confirmedFundingTotals !== "function") throw new Error("confirmedFundingTotals is required");
+    if (typeof confirmedRowsAfterDate !== "function") throw new Error("confirmedRowsAfterDate is required");
     const db = openPlanningDb(userId);
 
     try {
@@ -1880,12 +1881,7 @@ export function createCashflowProjectionEngineService({
       });
       const handledOccurrenceKeys = confirmedOccurrenceKeys(userId);
       const oneOffProgress = confirmedOneOffProgress(userId);
-      const confirmedFunding = typeof confirmedFundingTotals === "function"
-        ? confirmedFundingTotals(userId, ledgerCurrency, settings)
-        : {
-            source_flex_id: new Map(),
-            source_goal_id: new Map()
-          };
+      const confirmedFunding = confirmedFundingTotals(userId, ledgerCurrency, settings);
 
       function convert(amount, currency, type) {
         const rates = getBufferedFxForCurrency(
@@ -1918,21 +1914,7 @@ export function createCashflowProjectionEngineService({
         flexTargetLedger.set(flex.id, convert(flex.amount, flex.currency, "expense").ledgerAmount);
       }
 
-      if (typeof confirmedFundingTotals !== "function") {
-        for (const goal of goals) {
-          confirmedFunding.source_goal_id.set(
-            goal.id,
-            sumConfirmedFunding(userId, "source_goal_id", goal.id, ledgerCurrency, settings)
-          );
-        }
 
-        for (const flex of flexes) {
-          confirmedFunding.source_flex_id.set(
-            flex.id,
-            sumConfirmedFunding(userId, "source_flex_id", flex.id, ledgerCurrency, settings)
-          );
-        }
-      }
 
       const fundingState = buildProjectionFundingState({
         confirmedFunding,
@@ -2145,8 +2127,6 @@ export function createCashflowProjectionEngineService({
       }
 
       function applyFutureConfirmedBalancesToPeriods() {
-        if (typeof confirmedRowsAfterDate !== "function") return;
-
         const confirmedRows = confirmedRowsAfterDate(db, userId, today);
         for (const row of confirmedRows) {
           const targetPeriod = periodForDate(String(row.date || ""));
@@ -2199,8 +2179,8 @@ export function createCashflowProjectionEngineService({
 
           const targetLedger = roundMoneyAmount(goalTargetLedger.get(goal.id));
           const fundedLedger = addMoneyAmounts(
-            confirmedGoalFunding.get(goal.id),
-            pendingGoalFunding.get(goal.id)
+            (confirmedGoalFunding.get(goal.id) || 0),
+            (pendingGoalFunding.get(goal.id) || 0)
           );
 
           return subtractMoneyAmounts(targetLedger, fundedLedger) > 0.0001;
@@ -2220,9 +2200,9 @@ export function createCashflowProjectionEngineService({
         return flexes.some(flex => {
           const targetLedger = roundMoneyAmount(flexTargetLedger.get(flex.id));
           const fundedLedger = addMoneyAmounts(
-            confirmedFlexFunding.get(flex.id),
-            pendingFlexFunding.get(flex.id),
-            generatedFlexFunding.get(flex.id)
+            (confirmedFlexFunding.get(flex.id) || 0),
+            (pendingFlexFunding.get(flex.id) || 0),
+            (generatedFlexFunding.get(flex.id) || 0)
           );
 
           if (subtractMoneyAmounts(targetLedger, fundedLedger) <= 0.0001) return false;
@@ -2291,9 +2271,7 @@ export function createCashflowProjectionEngineService({
         }
 
         if (periods.length) {
-          addPeriodAvailable(periods[0], typeof confirmedBalanceAsOf === "function"
-            ? confirmedBalanceAsOf(db, userId, today)
-            : planningOpeningBalance(db, userId, { includePending: false }));
+          addPeriodAvailable(periods[0], confirmedBalanceAsOf(db, userId, today));
           applyPendingBalancesToPeriods();
           applyFutureConfirmedBalancesToPeriods();
         }
@@ -2354,7 +2332,7 @@ export function createCashflowProjectionEngineService({
           for (const oneOff of oneOffs) {
             const progressKey = `${oneOff.id}:${oneOff.type}:${String(oneOff.currency || "").toUpperCase()}`;
             const progress = oneOffProgress.get(progressKey) || null;
-            const confirmedAmount = roundMoneyAmount(progress?.confirmedAmount);
+            const confirmedAmount = roundMoneyAmount(progress?.confirmedAmount || 0);
             const remainingAmount = Math.max(0, subtractMoneyAmounts(oneOff.amount, confirmedAmount));
             const isConfirmedRemainder = Boolean(progress);
             const occurrenceKey = isConfirmedRemainder
@@ -2406,7 +2384,7 @@ export function createCashflowProjectionEngineService({
             `).get(occurrenceKey);
             const availableForExpense = addMoneyAmounts(
               spendableBalance(period),
-              Math.max(0, roundMoneyAmount(existingPending?.ledger_amount))
+              Math.max(0, roundMoneyAmount(existingPending?.ledger_amount || 0))
             );
 
             if (oneOff.type === "income") {
@@ -2597,8 +2575,8 @@ export function createCashflowProjectionEngineService({
             0,
             subtractMoneyAmounts(
               targetLedger,
-              confirmedGoalFunding.get(goal.id),
-              pendingGoalFunding.get(goal.id)
+              (confirmedGoalFunding.get(goal.id) || 0),
+              (pendingGoalFunding.get(goal.id) || 0)
             )
           );
 
@@ -2736,9 +2714,9 @@ export function createCashflowProjectionEngineService({
             if (targetLedger <= 0) continue;
 
             const alreadyFundedLedger = addMoneyAmounts(
-              confirmedFlexFunding.get(flex.id),
-              pendingFlexFunding.get(flex.id),
-              generatedFlexFunding.get(flex.id)
+              (confirmedFlexFunding.get(flex.id) || 0),
+              (pendingFlexFunding.get(flex.id) || 0),
+              (generatedFlexFunding.get(flex.id) || 0)
             );
 
             const remainingLedger = Math.max(0, subtractMoneyAmounts(targetLedger, alreadyFundedLedger));
@@ -2784,7 +2762,7 @@ export function createCashflowProjectionEngineService({
 
             generatedFlexFunding.set(
               flex.id,
-              addMoneyAmounts(generatedFlexFunding.get(flex.id), inserted.ledgerAmount)
+              addMoneyAmounts((generatedFlexFunding.get(flex.id) || 0) || 0, inserted.ledgerAmount)
             );
 
             subtractPeriodAvailable(period, inserted.ledgerAmount);
@@ -2797,8 +2775,8 @@ export function createCashflowProjectionEngineService({
           const targetLedger = roundMoneyAmount(goalTargetLedger.get(goal.id));
 
           const alreadyFundedLedger = addMoneyAmounts(
-            confirmedGoalFunding.get(goal.id),
-            pendingGoalFunding.get(goal.id)
+            (confirmedGoalFunding.get(goal.id) || 0),
+            (pendingGoalFunding.get(goal.id) || 0)
           );
 
           const futureAllocatedLedger = db.prepare(`
@@ -2924,11 +2902,9 @@ export function createCashflowProjectionEngineService({
         FROM pending_transactions
         WHERE occurrence_key LIKE 'reserve_transfer:%'
       `).all();
-      const confirmedReserveRows = typeof confirmedRowsAfterDate === "function"
-        ? confirmedRowsAfterDate(db, userId, today).filter(row =>
+      const confirmedReserveRows = confirmedRowsAfterDate(db, userId, today).filter(row =>
           String(row?.occurrence_key || "").startsWith("reserve_transfer:")
-        )
-        : [];
+        );
       const lockedReserveClaims = findLockedReserveClaims([...pendingReserveRows, ...confirmedReserveRows]);
 
       const reserveClaims = computeReserveClaims({

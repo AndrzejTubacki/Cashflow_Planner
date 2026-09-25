@@ -12,6 +12,7 @@ import {
 loadDotenv({ quiet: true });
 
 const CASHFLOW_POSTGRES_SCHEMA_TABLES = [
+  "cashflow_backup_artifacts",
   "cashflow_budget_schema_version",
   "cashflow_global_schema_version",
   ...POSTGRES_COORDINATION_TABLES,

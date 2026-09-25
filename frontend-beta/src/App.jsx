@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import Shell from "./Shell.jsx";
 import LedgerView from "./LedgerView.jsx";
 import RecurringView from "./RecurringView.jsx";
@@ -45,18 +45,24 @@ export default function App() {
     applyUiPreferences(loadUiPreferences(currentPreferenceScope()));
   }, []);
 
+  const loadCounter = useRef(0);
   const load = useCallback(async () => {
+    const currentRequestId = ++loadCounter.current;
     try {
       const sessionResult = await fetchSession();
       if (sessionResult?.csrfToken) setCsrfToken(sessionResult.csrfToken);
 
       const data = await fetchSnapshot();
-      setSnapshot(data);
-      setStatus("ready");
-      localStorage.setItem("cashflow_preferred_ui", "beta");
+      if (currentRequestId === loadCounter.current) {
+        setSnapshot(data);
+        setStatus("ready");
+        localStorage.setItem("cashflow_preferred_ui", "beta");
+      }
     } catch (err) {
-      setErrorMessage(err.message || "Could not load your budget.");
-      setStatus("error");
+      if (currentRequestId === loadCounter.current) {
+        setErrorMessage(err.message || "Could not load your budget.");
+        setStatus("error");
+      }
     }
   }, []);
 

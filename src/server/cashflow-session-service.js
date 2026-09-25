@@ -231,7 +231,8 @@ export function createCashflowSessionService({
     if (row.selected_budget_id) {
       try {
         context = await resolveBudgetContext(row.selected_budget_id, { accountId: row.account_id });
-      } catch {
+      } catch (error) {
+        await withRepository(repo => repo.sessions.clearSelectedBudget(row.id));
         context = await resolveAccountContext(row.account_id);
       }
     } else {
@@ -265,7 +266,10 @@ export function createCashflowSessionService({
       const row = await activeSessionRow(repo, token, { touch: true });
       if (!row) throw unauthorized();
       const csrfToken = randomToken();
-      await repo.sessions.updateCsrfHash(row.id, tokenHash(csrfToken));
+      const newHash = tokenHash(csrfToken);
+      const existingHashes = String(row.csrf_token_hash || "").split(",").filter(Boolean);
+      const hashesToKeep = [newHash, ...existingHashes].slice(0, 2);
+      await repo.sessions.updateCsrfHash(row.id, hashesToKeep.join(","));
       return csrfToken;
     });
   }
@@ -273,7 +277,10 @@ export function createCashflowSessionService({
   async function validateCsrfToken(token, csrfToken) {
     return await withRepository(async repo => {
       const row = await activeSessionRow(repo, token);
-      return Boolean(row) && hashesMatch(row.csrf_token_hash, tokenHash(csrfToken));
+      if (!row) return false;
+      const submittedHash = tokenHash(csrfToken);
+      const validHashes = String(row.csrf_token_hash || "").split(",").filter(Boolean);
+      return validHashes.some(h => hashesMatch(h, submittedHash));
     });
   }
 

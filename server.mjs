@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+import { createInternalAuthLimiter } from "./src/server/cashflow-auth-rate-limit.js";
 import { DEFAULT_TIMEZONE } from "./src/server/cashflow-constants.js";
 import { normalizeTimezone } from "./src/server/cashflow-date-utils.js";
 import {
@@ -165,8 +166,8 @@ try {
 try {
   ({ default: rateLimit } = await import("express-rate-limit"));
 } catch (error) {
-  logServerEvent("optional_rate_limit_unavailable", { message: error.message });
-  rateLimit = null;
+  logError("rate_limit_module_load_failed", { message: error.message });
+  throw error;
 }
 
 const app = express();
@@ -179,15 +180,6 @@ if (helmet) {
 }
 app.use(express.json({ limit: jsonLimit }));
 app.use(express.urlencoded({ extended: true }));
-if (rateLimit) {
-  app.use("/api/auth/internal", rateLimit({
-    legacyHeaders: false,
-    limit: 20,
-    standardHeaders: "draft-8",
-    windowMs: 15 * 60 * 1000
-  }));
-}
-
 let createCashflowModule;
 
 try {
@@ -196,12 +188,6 @@ try {
   logError("cashflow_module_load_failed", error);
   throw error;
 }
-
-const runtimeLockRuntime = await createCashflowRuntimeLockService({
-  env: process.env,
-  logError,
-  logServerEvent
-});
 
 let cashflow;
 try {
@@ -212,7 +198,9 @@ try {
     localeDir,
     getCurrentFxSnapshot: () => null,
     getFxSnapshotForDate: null,
-    lockService: runtimeLockRuntime.lockService,
+    runtimeLockFactory: ({ globalStore }) => createCashflowRuntimeLockService({
+      env: process.env, globalStore, logError, logServerEvent
+    }),
     logError,
     logServerEvent,
     appendApiLogLine
@@ -225,6 +213,12 @@ try {
   });
   throw error;
 }
+
+// Authentication throttling shares the global pool in Postgres mode and fails
+// closed on storage errors. SQLite retains the single-process memory store.
+app.use("/api/auth/internal", createInternalAuthLimiter({
+  rateLimit, globalStore: cashflow.globalStore, logError
+}));
 
 // Register every /api route supplied by the domain module.
 cashflow.registerRoutes(app);
@@ -389,8 +383,8 @@ async function shutdown(signal) {
   forceExitTimer.unref?.();
 
   try {
-    await closeServer();
-    await runtimeLockRuntime.close();
+    await Promise.all([closeServer(), cashflow.stopBackgroundJobs()]);
+    await cashflow.close();
     clearTimeout(forceExitTimer);
     logServerEvent("server_shutdown_complete", { signal });
     process.exit(0);

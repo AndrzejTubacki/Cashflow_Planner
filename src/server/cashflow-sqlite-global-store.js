@@ -44,7 +44,7 @@ function normalizeTtl(value, fallback) {
   return Math.trunc(number);
 }
 
-function createInProcessLockService({
+export function createInProcessLockService({
   defaultTtlMs = 120000,
   locks = new Map(),
   now = () => new Date(),
@@ -66,7 +66,7 @@ function createInProcessLockService({
     const expiresAtMs = timestamp + normalizeTtl(options.ttlMs, defaultTtlMs);
     const existing = locks.get(normalizedName);
 
-    if (existing && existing.expiresAtMs > timestamp && existing.owner_id !== normalizedOwnerId) {
+    if (existing && existing.expiresAtMs > timestamp) {
       return {
         acquired: false,
         lock: null
@@ -263,6 +263,7 @@ export function createSqliteGlobalStore({
     const db = dbService.openGlobalDb();
     try {
       const replaceAll = db.transaction(() => {
+        dropGlobalRuntimeGuardTriggers(db);
         db.prepare(`DELETE FROM ${quoteIdentifier(safeTable)}`).run();
         let inserted = 0;
         for (const row of normalized) {
@@ -273,6 +274,7 @@ export function createSqliteGlobalStore({
           `);
           inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
         }
+        ensureGlobalRuntimeSchemaObjects(db);
         return inserted;
       });
       return {

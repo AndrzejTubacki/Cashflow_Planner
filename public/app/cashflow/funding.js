@@ -1,6 +1,6 @@
 import { escapeHtml } from "../utils.js";
 import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
-import { asNumber, formatMoney, formatPercent, t } from "./shared.js";
+import { asNumber, formatMoneyHtml, formatPercent, t } from "./shared.js";
 
 const EMPTY_VALUE = "-";
 const FUNDING_EPSILON = 0.0001;
@@ -185,22 +185,22 @@ function renderFundingPie(locale, item, label, ledgerCurrency = DEFAULT_LEDGER_C
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--confirmed"></i>
             <span>${escapeHtml(t(locale, "Confirmed"))}</span>
-            <strong>${formatMoney(parts.confirmed, ledgerCurrency, locale)}</strong>
+            <strong>${formatMoneyHtml(parts.confirmed, ledgerCurrency, locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--pending"></i>
             <span>${escapeHtml(t(locale, "Pending"))}</span>
-            <strong>${formatMoney(parts.pending, ledgerCurrency, locale)}</strong>
+            <strong>${formatMoneyHtml(parts.pending, ledgerCurrency, locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--future"></i>
             <span>${escapeHtml(t(locale, "Future"))}</span>
-            <strong>${formatMoney(parts.future, ledgerCurrency, locale)}</strong>
+            <strong>${formatMoneyHtml(parts.future, ledgerCurrency, locale)}</strong>
           </span>
           <span class="cashflow-funding-metric">
             <i class="cashflow-legend-dot cashflow-legend-dot--missing"></i>
             <span>${escapeHtml(t(locale, "Missing"))}</span>
-            <strong>${formatMoney(parts.remaining, ledgerCurrency, locale)}</strong>
+            <strong>${formatMoneyHtml(parts.remaining, ledgerCurrency, locale)}</strong>
           </span>
         </div>
       </div>

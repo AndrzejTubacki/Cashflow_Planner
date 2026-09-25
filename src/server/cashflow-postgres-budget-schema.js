@@ -636,6 +636,16 @@ CREATE TABLE IF NOT EXISTS ledger_currency_events (
   PRIMARY KEY (budget_id, id)
 );
 
+-- Artifacts live outside financial snapshot replacement so rollback cannot
+-- erase its own safety copy. Budget deletion still removes private artifacts.
+CREATE TABLE IF NOT EXISTS cashflow_backup_artifacts (
+  budget_id TEXT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
+  id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (budget_id, id)
+);
+
 CREATE TABLE IF NOT EXISTS backup_metadata (
   budget_id TEXT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
   id TEXT NOT NULL,

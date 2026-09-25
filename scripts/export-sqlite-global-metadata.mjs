@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import Database from "better-sqlite3";
 
 import {
@@ -16,32 +18,6 @@ import {
   POSTGRES_GLOBAL_TABLES
 } from "../src/server/cashflow-postgres-global-schema.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    outputDir: path.resolve("external-database-exports"),
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--output-dir") {
-      options.outputDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
   return `Usage: npm run db:global:export -- [--data-dir PATH] [--output-dir PATH] [--pretty]
@@ -146,7 +122,15 @@ export function createSqliteGlobalMetadataExport({
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--data-dir","--output-dir"],
+    boolean: ["--pretty"],
+    defaults: {
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    outputDir: path.resolve("external-database-exports"),
+    pretty: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
@@ -156,7 +140,7 @@ async function main() {
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

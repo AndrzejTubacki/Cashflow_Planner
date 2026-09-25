@@ -1,316 +1,124 @@
-import assert from "node:assert/strict";
-import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import fs from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import crypto from 'node:crypto';
+import { createCashflowBackupService } from '../../src/server/cashflow-backup-service.js';
+import { createCashflowLedgerService } from '../../src/server/cashflow-ledger-service.js';
+import { createPostgresGlobalStore } from '../../src/server/cashflow-postgres-global-store.js';
+import { createPostgresBudgetStore } from '../../src/server/cashflow-budget-store.js';
+import { postgresRuntimeTestsEnabled, withDisposablePostgresDb } from '../helpers/postgres-test-db.js';
 
-import { createCashflowBackupService } from "../../src/server/cashflow-backup-service.js";
+const gated = { skip: postgresRuntimeTestsEnabled() ? false : 'enable disposable Postgres tests' };
 
-function throwIfCalled(name) {
-  return () => {
-    throw new Error(`${name} should not be called on the Postgres backup path`);
-  };
+// Replace the old in-memory Postgres impersonation with actual SQL-backed
+// backups, restore transactions, constraints, and metadata queries.
+async function fixture(fn) {
+  await withDisposablePostgresDb(async ({ databaseUrl, pool }) => {
+    const global = await createPostgresGlobalStore({ databaseUrl });
+    const store = await createPostgresBudgetStore({ databaseUrl });
+    try {
+      await global.initialize(); await store.initialize();
+      await pool.query("INSERT INTO budgets (id, storage_key, display_name, created_at, updated_at) VALUES ('household','household','Test',now(),now())");
+      await pool.query("INSERT INTO settings (budget_id, updated_at) VALUES ('household',now())");
+      const ledger = createCashflowLedgerService({ budgetStore: store });
+      let hook = () => {};
+      const service = createCashflowBackupService({
+        budgetStore: store,
+        generateId: prefix => `${prefix}_${crypto.randomUUID()}`,
+        getSettingsAsync: async id => (await store.listPlanningRows(id, 'settings'))[0],
+        backupRootDir: () => { throw new Error('Postgres backup must not use local files'); },
+        backupHook: details => hook(details),
+        recalculateLedgerRunningBalanceAsync: ledger.recalculateLedgerRunningBalanceAsync,
+        // Projection execution itself is covered by postgres-runtime.integration;
+        // this boundary records scheduling, with failures injected via backupHook.
+        regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true })
+      });
+      await fn({ service, store, pool, setHook: value => { hook = value; } });
+    } finally { await store.close(); await global.close(); }
+  });
 }
 
-async function withTempBackupRoot(fn) {
-  const dir = await mkdtemp(path.join(tmpdir(), "cashflow-backup-test-"));
-  try {
-    return await fn(dir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
+test('Postgres backup commits snapshot bytes with discovery metadata', gated, async () => fixture(async ({ service, store }) => {
+  const ref = await service.createBackupAsync('household');
+  const rows = await store.listPlanningRows('household', 'backup_metadata');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].backup_path, ref);
+  assert.equal(rows[0].success, true);
+  const payload = await store.readBackupArtifact('household', rows[0].id);
+  assert.equal(Number(rows[0].size_bytes), Buffer.byteLength(payload));
+  assert.equal(JSON.parse(payload).format, 'cashflow-budget-store-snapshot');
+}));
 
-function postgresBackupStore({ settingsRow, planningTables = {} }) {
-  const metadataRows = [];
+test('Postgres backup failure publishes neither success metadata nor partial bytes', gated, async () => fixture(async ({ service, store, pool, setHook }) => {
+  setHook(({ phase }) => { if (phase === 'before_success_metadata') throw new Error('injected backup failure'); });
+  await assert.rejects(service.createBackupAsync('household'), /injected backup failure/);
+  const metadata = await store.listPlanningRows('household', 'backup_metadata');
+  assert.equal(metadata.length, 1);
+  assert.equal(metadata[0].success, false);
+  assert.equal(Number((await pool.query('SELECT count(*) FROM cashflow_backup_artifacts')).rows[0].count), 0);
+}));
 
-  return {
-    backend: "postgres",
-    metadataRows,
-    async listConfirmedTransactions() {
-      return [];
-    },
-    async listLedgerYears() {
-      return [];
-    },
-    async listPlanningRows(budgetId, tableName) {
-      if (tableName === "settings") return [{ ...settingsRow, budget_id: budgetId }];
-      if (tableName === "backup_metadata") return metadataRows.filter(row => row.budget_id === budgetId);
-      return (planningTables[tableName] || []).map(row => ({ ...row, budget_id: budgetId }));
-    },
-    async insertPlanningRows(budgetId, tableName, rows) {
-      if (tableName === "backup_metadata") {
-        metadataRows.push(...rows.map(row => ({ ...row, budget_id: budgetId })));
-        return { inserted: rows.length };
-      }
-      throw new Error(`Unexpected insertPlanningRows table: ${tableName}`);
-    },
-    async replaceConfirmedTransactionsForYear() {
-      return { inserted: 0, replaced: true };
-    },
-    async replacePlanningRows(budgetId, tableName, rows) {
-      planningTables[tableName] = rows;
-      return { inserted: rows.length, replaced: true };
+test('Postgres restore restores settings and keeps its safety artifact', gated, async () => fixture(async ({ service, store, pool }) => {
+  const ref = await service.createBackupAsync('household');
+  await pool.query("UPDATE settings SET minimum_reserve_amount = 999 WHERE budget_id = 'household'");
+  const result = await service.restoreBackupAsync('household', ref.slice('postgres-backup:'.length));
+  assert.equal(result.ok, true);
+  assert.equal(Number((await store.listPlanningRows('household', 'settings'))[0].minimum_reserve_amount), 0);
+  assert.ok(await store.readBackupArtifact('household', result.safetyBackup.slice('postgres-backup:'.length)));
+}));
+
+test('Postgres restore failure rolls back and retains both backup artifacts', gated, async () => fixture(async ({ service, store, pool, setHook }) => {
+  const ref = await service.createBackupAsync('household');
+  await pool.query("UPDATE settings SET minimum_reserve_amount = 123 WHERE budget_id = 'household'");
+  setHook(({ phase }) => { if (phase === 'before_restore_apply') throw new Error('injected restore failure'); });
+  await assert.rejects(service.restoreBackupAsync('household', ref.slice('postgres-backup:'.length)), /rolled back/);
+  assert.equal(Number((await store.listPlanningRows('household', 'settings'))[0].minimum_reserve_amount), 123);
+  assert.equal((await store.listPlanningRows('household', 'backup_metadata')).length, 2);
+}));
+
+for (const scenario of ['disabled', 'recent', 'elapsed']) {
+  test(`Postgres automatic backup handles ${scenario} interval`, gated, async () => fixture(async ({ service, store, pool }) => {
+    await pool.query("UPDATE settings SET auto_backup_enabled = $1, backup_interval_minutes = 60 WHERE budget_id = 'household'", [scenario !== 'disabled']);
+    if (scenario !== 'disabled') {
+      await service.createBackupAsync('household');
+      if (scenario === 'elapsed') await pool.query("UPDATE backup_metadata SET backup_timestamp = now() - interval '2 hours'");
     }
-  };
+    const result = await service.maybeRunAutomaticBackupAsync('household');
+    assert.equal(Boolean(result), scenario === 'elapsed');
+    const rows = await store.listPlanningRows('household', 'backup_metadata');
+    assert.equal(rows.length, scenario === 'disabled' ? 0 : scenario === 'recent' ? 1 : 2);
+  }));
 }
 
-function requiredSyncStubs() {
-  return {
-    backupDir: () => {
-      throw new Error("SQLite backupDir should not be used on the Postgres path");
-    },
-    directorySizeBytes: throwIfCalled("directorySizeBytes"),
-    initReadOnlyPragmas: throwIfCalled("initReadOnlyPragmas"),
-    listLedgerYears: throwIfCalled("listLedgerYears"),
-    openLedgerDb: throwIfCalled("openLedgerDb"),
-    openPlanningDb: throwIfCalled("openPlanningDb"),
-    recalculateLedgerRunningBalance: throwIfCalled("recalculateLedgerRunningBalance"),
-    regenerateProjectionsAfterMutation: throwIfCalled("regenerateProjectionsAfterMutation"),
-    getSettings: throwIfCalled("getSettings")
-  };
-}
-
-test("createBackupAsync writes a real JSON snapshot file and records success metadata through the budget store", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({
-      settingsRow: { id: 1, ledger_currency: "PLN", locale: "en", timezone: "UTC" },
-      planningTables: {
-        recurring_expenses: [{ id: "exp-1", name: "Rent", amount: 100 }]
-      }
-    });
-
-    const service = createCashflowBackupService({
-      ...requiredSyncStubs(),
-      backupHook: null,
-      backupRootDir: () => dir,
-      budgetStore,
-      generateId: prefix => `${prefix}-1`,
-      getSettingsAsync: async userId => (await budgetStore.listPlanningRows(userId, "settings"))[0],
-      recalculateLedgerRunningBalanceAsync: async () => {},
-      regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true, projection_error: null })
-    });
-
-    const backupPath = await service.createBackupAsync("household");
-
-    assert.equal(fs.existsSync(backupPath), true);
-    assert.equal(path.extname(backupPath), ".json");
-    const written = JSON.parse(fs.readFileSync(backupPath, "utf8"));
-    assert.equal(written.format, "cashflow-budget-store-snapshot");
-    assert.equal(written.payload.tables.recurring_expenses[0].id, "exp-1");
-
-    assert.equal(budgetStore.metadataRows.length, 1);
-    assert.equal(budgetStore.metadataRows[0].success, true);
-    assert.equal(budgetStore.metadataRows[0].backup_path, backupPath);
-    assert.equal(budgetStore.metadataRows[0].budget_id, "household");
+test('Postgres backup waits for an in-flight financial transaction before reading its snapshot', gated, async () => fixture(async ({ service, store, pool }) => {
+  let entered;
+  let release;
+  const acquired = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  const mutation = store.transaction(async (writer, client) => {
+    await writer.lockBudgetLedger('household');
+    await client.query("UPDATE settings SET minimum_reserve_amount = 77 WHERE budget_id = 'household'");
+    entered();
+    await gate;
   });
-});
-
-test("createBackupAsync records failure metadata when snapshot creation fails before any file is written", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({
-      settingsRow: { id: 1, ledger_currency: "PLN", locale: "en", timezone: "UTC" }
-    });
-
-    const service = createCashflowBackupService({
-      ...requiredSyncStubs(),
-      backupRootDir: () => dir,
-      budgetStore,
-      generateId: prefix => `${prefix}-1`,
-      getSettingsAsync: async userId => (await budgetStore.listPlanningRows(userId, "settings"))[0],
-      recalculateLedgerRunningBalanceAsync: async () => {},
-      regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true, projection_error: null })
-    });
-
-    // An empty userId makes createBudgetStoreSnapshot's budgetIds filter to
-    // an empty array, so it throws before any file I/O happens — this
-    // exercises the catch block's cleanup/failure-metadata path.
-    await assert.rejects(
-      () => service.createBackupAsync(""),
-      /budgetId is required|At least one budgetId is required/
-    );
-
-    assert.equal(budgetStore.metadataRows.length, 1);
-    assert.equal(budgetStore.metadataRows[0].success, false);
-    assert.ok(budgetStore.metadataRows[0].error_message);
-  });
-});
-
-test("restoreBackupAsync restores planning rows from a real JSON snapshot file and recalculates/regenerates afterward", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({
-      settingsRow: { id: 1, ledger_currency: "PLN", locale: "en", timezone: "UTC" },
-      planningTables: {
-        recurring_expenses: [{ id: "exp-original", name: "Original", amount: 50 }]
-      }
-    });
-
-    let balanceRecalculated = 0;
-    let projectionRegenerated = 0;
-
-    const service = createCashflowBackupService({
-      ...requiredSyncStubs(),
-      backupRootDir: () => dir,
-      budgetStore,
-      generateId: (() => {
-        let n = 0;
-        return prefix => `${prefix}-${++n}`;
-      })(),
-      getSettingsAsync: async userId => (await budgetStore.listPlanningRows(userId, "settings"))[0],
-      recalculateLedgerRunningBalanceAsync: async () => {
-        balanceRecalculated += 1;
-      },
-      regenerateProjectionsAfterMutationAsync: async () => {
-        projectionRegenerated += 1;
-        return { projection_ok: true, projection_error: null };
-      }
-    });
-
-    const backupPath = await service.createBackupAsync("household");
-
-    // Mutate live data after the backup was taken, then restore it.
-    await budgetStore.replacePlanningRows("household", "recurring_expenses", [
-      { id: "exp-changed", name: "Changed after backup", amount: 999 }
-    ]);
-
-    const backupId = budgetStore.metadataRows[0].id;
-    const result = await service.restoreBackupAsync("household", backupId);
-
-    assert.equal(result.ok, true);
-    assert.equal(result.restoredFrom, backupPath);
-    assert.equal(result.mode, "budget_store_snapshot");
-    assert.equal(result._projection.projection_ok, true);
-    assert.equal(balanceRecalculated, 1);
-    // createBackupAsync (called once above, and once again internally for the
-    // pre-restore safety backup) never regenerates projections itself — only
-    // restoreBackupFromPathAsync does, once, for the actual restore.
-    assert.equal(projectionRegenerated, 1);
-
-    const restoredRows = await budgetStore.listPlanningRows("household", "recurring_expenses");
-    assert.equal(restoredRows[0].id, "exp-original");
-  });
-});
-
-test("restoreBackupAsync rolls back to a fresh safety backup when the target restore fails", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({
-      settingsRow: { id: 1, ledger_currency: "PLN", locale: "en", timezone: "UTC" },
-      planningTables: {
-        recurring_expenses: [{ id: "exp-current", name: "Current", amount: 10 }]
-      }
-    });
-
-    let regenerateCall = 0;
-
-    const service = createCashflowBackupService({
-      ...requiredSyncStubs(),
-      backupRootDir: () => dir,
-      budgetStore,
-      generateId: (() => {
-        let n = 0;
-        return prefix => `${prefix}-${++n}`;
-      })(),
-      getSettingsAsync: async userId => (await budgetStore.listPlanningRows(userId, "settings"))[0],
-      recalculateLedgerRunningBalanceAsync: async () => {},
-      regenerateProjectionsAfterMutationAsync: async () => {
-        regenerateCall += 1;
-        // Fail only the first restore attempt (the target backup), succeed on
-        // the rollback-to-safety-backup attempt.
-        if (regenerateCall === 1) {
-          return { projection_ok: false, projection_error: "boom" };
-        }
-        return { projection_ok: true, projection_error: null };
-      }
-    });
-
-    // Create a backup to restore (this becomes corrupted for the test by
-    // writing an otherwise-valid but distinct snapshot).
-    const targetBackupPath = await service.createBackupAsync("household");
-    const targetBackupId = budgetStore.metadataRows[0].id;
-    void targetBackupPath;
-
-    await assert.rejects(
-      () => service.restoreBackupAsync("household", targetBackupId),
-      error => {
-        assert.match(error.message, /rolled back/);
-        return true;
-      }
-    );
-
-    // Two backups now exist: the original target backup and the safety
-    // backup created just before the (failed) restore attempt.
-    assert.equal(budgetStore.metadataRows.length, 2);
-    assert.equal(regenerateCall, 2);
-  });
-});
-
-function automaticBackupService(dir, budgetStore, settingsRow) {
-  return createCashflowBackupService({
-    ...requiredSyncStubs(),
-    backupRootDir: () => dir,
-    budgetStore,
-    generateId: prefix => `${prefix}-auto`,
-    getSettingsAsync: async () => settingsRow,
-    recalculateLedgerRunningBalanceAsync: async () => {},
-    regenerateProjectionsAfterMutationAsync: async () => ({ projection_ok: true, projection_error: null })
-  });
-}
-
-test("maybeRunAutomaticBackupAsync does nothing when auto_backup_enabled is off", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({ settingsRow: {} });
-    const service = automaticBackupService(dir, budgetStore, {
-      auto_backup_enabled: 0,
-      backup_interval_minutes: 60
-    });
-
-    assert.equal(await service.maybeRunAutomaticBackupAsync("household"), null);
-    assert.equal(budgetStore.metadataRows.length, 0);
-  });
-});
-
-test("maybeRunAutomaticBackupAsync skips when the last successful backup is still within the interval", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({ settingsRow: {} });
-    budgetStore.metadataRows.push({
-      budget_id: "household",
-      id: "recent-backup",
-      success: true,
-      backup_timestamp: new Date().toISOString()
-    });
-    const service = automaticBackupService(dir, budgetStore, {
-      auto_backup_enabled: 1,
-      backup_interval_minutes: 60
-    });
-
-    assert.equal(await service.maybeRunAutomaticBackupAsync("household"), null);
-    assert.equal(budgetStore.metadataRows.length, 1);
-  });
-});
-
-test("maybeRunAutomaticBackupAsync creates a real backup when the interval has elapsed", async () => {
-  await withTempBackupRoot(async dir => {
-    const budgetStore = postgresBackupStore({
-      settingsRow: { id: 1, ledger_currency: "PLN", locale: "en", timezone: "UTC" }
-    });
-    budgetStore.metadataRows.push({
-      budget_id: "household",
-      id: "stale-backup",
-      success: true,
-      backup_timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
-    });
-    const service = automaticBackupService(dir, budgetStore, {
-      auto_backup_enabled: 1,
-      backup_interval_minutes: 60
-    });
-
-    const result = await service.maybeRunAutomaticBackupAsync("household");
-
-    assert.ok(result?.backupPath);
-    assert.equal(fs.existsSync(result.backupPath), true);
-    assert.equal(result.deleted, 0);
-    assert.equal(budgetStore.metadataRows.length, 2);
-    assert.equal(budgetStore.metadataRows[1].success, true);
-  });
-});
+  await acquired;
+  let completed = false;
+  const backup = service.createBackupAsync('household').finally(() => { completed = true; });
+  // Observe actual server-side lock contention; no guessed scheduling delay.
+  let waiting = false;
+  try {
+    const deadline = Date.now() + 5000;
+    while (!completed && Date.now() < deadline) {
+      const result = await pool.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted");
+      if (result.rows.length) { waiting = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(waiting, true, 'backup must wait on the budget transaction lock');
+  } finally {
+    release();
+    await mutation;
+    await backup;
+  }
+  const ref = await backup;
+  const snapshot = JSON.parse(await store.readBackupArtifact('household', ref.slice('postgres-backup:'.length)));
+  assert.equal(Number(snapshot.payload.tables.settings[0].minimum_reserve_amount), 77);
+}));

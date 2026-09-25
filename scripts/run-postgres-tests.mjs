@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 
 import { config as loadDotenv } from "dotenv";
 
@@ -24,14 +25,18 @@ if (!String(process.env.CASHFLOW_DATABASE_URL || "").trim()) {
 // here resets the *same* disposable database at the start/end of each of
 // its own tests (see test/helpers/postgres-test-db.js), so two files
 // racing that reset against each other corrupts both runs.
-const POSTGRES_TEST_FILES = [
-  "test/server/postgres-runtime.integration.test.js",
-  "test/server/server-runtime.integration.test.js"
-];
+// Discover every guarded integration file, including new regressions, so a
+// green test:postgres cannot silently omit them. Keep all files serial.
+const testDirectory = new URL("../test/server/", import.meta.url);
+const POSTGRES_TEST_FILES = readdirSync(testDirectory)
+  .filter(name => name.endsWith(".test.js"))
+  .filter(name => readFileSync(new URL(name, testDirectory), "utf8").includes("postgresRuntimeTestsEnabled"))
+  .sort()
+  .map(name => `test/server/${name}`);
 
 async function runFile(file) {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--test", file], {
+    const child = spawn(process.execPath, ["--test", "--test-concurrency=1", file], {
       env: {
         ...process.env,
         CASHFLOW_POSTGRES_TEST_RUNNER: "1"

@@ -43,7 +43,13 @@ function BudgetRow({ budget, isCurrent, onSwitch, onRename, onArchive, onRestore
           type="button"
           className="beta-btn-small"
           disabled={busy}
-          onClick={() => downloadFile(`/api/budgets/${encodeURIComponent(budget.id)}/export`, `cashflow-${budget.id}-full-export.json`)}
+          onClick={() => {
+            setBusy(true);
+            setError("");
+            downloadFile(`/api/budgets/${encodeURIComponent(budget.id)}/export`, `cashflow-${budget.id}-full-export.json`)
+              .catch(err => setError(`Export failed: ${err.message}`))
+              .finally(() => setBusy(false));
+          }}
         >
           Export
         </button>
@@ -79,6 +85,21 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      try {
+        const result = await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/members`);
+        if (active) setMembers(result.members || []);
+      } catch (err) {
+        if (active) setError(err.message || "Failed to load members");
+      }
+    }
+    load();
+    return () => { active = false; };
+  }, [budgetId]);
+
+  // Keep a non-cancellable load for explicit refreshes
   async function load() {
     try {
       const result = await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/members`);
@@ -87,8 +108,6 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
       setError(err.message || "Failed to load members");
     }
   }
-
-  useEffect(() => { load(); }, [budgetId]);
 
   async function updateRole(accountId, role) {
     setBusy(true);
@@ -211,6 +230,27 @@ function InvitationsPanel({ budgetId, currentRole }) {
   const [role, setRole] = useState("viewer");
   const [expiresInHours, setExpiresInHours] = useState(168);
 
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      try {
+        const [invResult, accResult] = await Promise.all([
+          apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/invitations`),
+          apiFetch("/api/accounts").catch(() => ({ accounts: [] }))
+        ]);
+        if (active) {
+          setInvitations(invResult.invitations || []);
+          setAccounts(accResult.accounts || []);
+        }
+      } catch (err) {
+        if (active) setError(err.message || "Failed to load invitations");
+      }
+    }
+    load();
+    return () => { active = false; };
+  }, [budgetId]);
+
+  // Keep a non-cancellable load for explicit refreshes
   async function load() {
     try {
       const [invResult, accResult] = await Promise.all([
@@ -223,8 +263,6 @@ function InvitationsPanel({ budgetId, currentRole }) {
       setError(err.message || "Failed to load invitations");
     }
   }
-
-  useEffect(() => { load(); }, [budgetId]);
 
   async function handleCreate(event) {
     event.preventDefault();
@@ -241,6 +279,7 @@ function InvitationsPanel({ budgetId, currentRole }) {
         }
       });
       setLastToken(result.invitation?.token || "");
+      setTimeout(() => setLastToken(""), 60000);
       setEmail("");
       setAccountId("");
       await load();

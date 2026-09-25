@@ -80,6 +80,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged }) {
         body: { purpose }
       });
       setTokenOutput(result.token || "");
+      setTimeout(() => setTokenOutput(""), 60000);
     });
   }
 

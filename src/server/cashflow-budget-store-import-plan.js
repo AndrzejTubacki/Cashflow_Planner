@@ -1,3 +1,4 @@
+import { replacePlanningBatches } from "./cashflow-planning-replacement.js";
 import {
   SQLITE_BUDGET_STORAGE_EXPORT_FORMAT,
   SQLITE_BUDGET_STORAGE_EXPORT_VERSION,
@@ -219,6 +220,7 @@ function assertBudgetStoreReplacer(budgetStore) {
 export async function applyBudgetStoreImportPlan({
   budgetStore,
   mode = "append",
+  preserveBackupMetadata = false,
   onBatch = () => {},
   plan,
   payload
@@ -252,7 +254,23 @@ export async function applyBudgetStoreImportPlan({
     }
 
     const appliedBatches = [];
+    const replacedPlanningBudgets = new Set();
     for (const batch of importPlan.writeBatches) {
+      // SQLite needs a single planning transaction; ledger files remain separate.
+      if (normalizedMode === "replace" && batch.type === "planning"
+        && typeof writer.replacePlanningTables === "function") {
+        if (!replacedPlanningBudgets.has(batch.budgetId)) {
+          const batches = importPlan.writeBatches.filter(candidate =>
+            candidate.type === "planning" && candidate.budgetId === batch.budgetId
+            && !(preserveBackupMetadata && candidate.tableName === "backup_metadata"));
+          const results = await replacePlanningBatches(writer, batch.budgetId, batches, onBatch);
+          appliedBatches.push(...results.map(result => ({ ...result, mode: normalizedMode })));
+          replacedPlanningBudgets.add(batch.budgetId);
+        }
+        continue;
+      }
+      // App-level financial imports must keep existing shared backup references.
+      if (preserveBackupMetadata && batch.tableName === "backup_metadata") continue;
       await onBatch({
         budgetId: batch.budgetId,
         ledgerYear: batch.ledgerYear || null,

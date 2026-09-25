@@ -1,3 +1,4 @@
+import { replacePlanningBatches } from "./cashflow-planning-replacement.js";
 import { createBudgetStoreExport } from "./cashflow-budget-store-export.js";
 import {
   normalizeSqliteBudgetStorageExport
@@ -72,12 +73,14 @@ function ledgerYearsFromRows(exportPayload, budgetId) {
 export async function createBudgetStoreSnapshot({
   budgetIds,
   budgetStore,
+  excludeBackupMetadata = false,
   now = new Date(),
   reason = "manual"
 } = {}) {
   const payload = await createBudgetStoreExport({
     budgetIds,
     budgetStore,
+    excludeBackupMetadata,
     now
   });
 
@@ -120,6 +123,7 @@ export function normalizeBudgetStoreSnapshot(snapshot) {
 export async function restoreBudgetStoreSnapshot({
   budgetStore,
   includeExistingLedgerYears = true,
+  preserveBackupMetadata = false,
   onBatch = () => {},
   snapshot
 } = {}) {
@@ -142,25 +146,12 @@ export async function restoreBudgetStoreSnapshot({
     const appliedBatches = [];
 
     for (const budgetId of normalized.budgetIds) {
-      for (const tableName of POSTGRES_BUDGET_PLANNING_TABLES) {
-        const rows = rowsForBudget(payload, tableName, budgetId);
-        await onBatch({
-          budgetId,
-          ledgerYear: null,
-          rows: rows.length,
-          tableName,
-          type: "planning"
-        });
-        const result = await writer.replacePlanningRows(budgetId, tableName, rows);
-        appliedBatches.push({
-          budgetId,
-          ledgerYear: null,
-          result: { ...(result || {}) },
-          rows: rows.length,
-          tableName,
-          type: "planning"
-        });
-      }
+      // Group SQLite planning writes so FK validation and rollback cover the
+      // whole graph. Postgres continues using its surrounding transaction.
+      const planningBatches = POSTGRES_BUDGET_PLANNING_TABLES
+        .filter(tableName => !(preserveBackupMetadata && tableName === "backup_metadata"))
+        .map(tableName => ({ tableName, rows: rowsForBudget(payload, tableName, budgetId) }));
+      appliedBatches.push(...await replacePlanningBatches(writer, budgetId, planningBatches, onBatch));
 
       const sourceYears = new Set([
         ...sourceLedgerYearsForBudget(payload, budgetId),

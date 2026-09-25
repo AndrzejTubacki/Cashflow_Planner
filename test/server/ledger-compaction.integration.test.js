@@ -76,6 +76,29 @@ function backupCount(harness) {
   }
 }
 
+test("ledger schema and full import reject absent confirmation dates before compaction", async () => withHarness(async harness => {
+  assert.throws(() => insertConfirmed(harness, "2024", {
+    id: "null-date", name: "Invalid historical row", amount: 100,
+    type: "income", date: "2024-01-10", confirmedDate: null
+  }), /NOT NULL constraint failed/);
+
+  for (const missing of [false, true]) {
+    const sample = await harness.api("/api/export/sample");
+    delete sample.checksum;
+    const [year] = Object.keys(sample.ledgers);
+    const row = sample.ledgers[year][0];
+    if (missing) delete row.confirmed_date;
+    else row.confirmed_date = null;
+    const result = await harness.request("/api/import/full", {
+      method: "POST", body: { mode: "replace", export: sample }
+    });
+    assert.equal(result.response.status, 400);
+    assert.ok(result.body.details.some(detail => detail.field === "confirmed_date"));
+  }
+  assert.equal(confirmedRows(harness, "2024").length, 0);
+  assert.equal(backupCount(harness), 0);
+}, { userId: "review_ledger" }));
+
 test("ledger history compaction is disabled by default", async () => withHarness(async harness => {
   insertConfirmed(harness, "2024", {
     id: "old-income",
@@ -155,4 +178,59 @@ test("ledger history compaction replaces old confirmed rows with balance rows pe
   assert.equal(repeated.compactedRows, 0);
   assert.equal(confirmedRows(harness, "2025").length, 1);
   assert.equal(backupCount(harness), 1);
+}));
+
+test("ledger history compaction deletes explicit IDs so legacy rows with null confirmed_date are not double-counted", async () => withHarness(async harness => {
+  const db = harness.openLedgerDb("2024");
+  try {
+    // Create the table without the NOT NULL constraint to simulate legacy database
+    db.exec(`
+      CREATE TABLE confirmed_transactions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        amount REAL NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+        date TEXT NOT NULL,
+        confirmed_date TEXT,
+        fx_rate REAL,
+        buffered_fx_rate REAL,
+        ledger_currency TEXT NOT NULL DEFAULT 'PLN',
+        running_balance_pln REAL NOT NULL,
+        ledger_amount REAL,
+        source_recurring_expense_id TEXT,
+        source_recurring_income_id TEXT,
+        source_one_off_id TEXT,
+        source_flex_id TEXT,
+        source_goal_id TEXT,
+        occurrence_key TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  } finally {
+    db.close();
+  }
+
+  insertConfirmed(harness, "2024", {
+    id: "legacy-null-date",
+    name: "Legacy income",
+    amount: 100,
+    type: "income",
+    date: "2024-01-10",
+    confirmedDate: null
+  });
+
+  const result = await harness.cashflow.compactLedgerHistory(harness.userId, { months: 12, today: "2026-05-21" });
+  
+  assert.equal(result.compactedRows, 1);
+  assert.equal(result.createdRows, 1);
+  
+  // The old 2024 row should be gone
+  assert.equal(confirmedRows(harness, "2024").length, 0);
+  
+  // The total should be 100 in the new 2025 compacted row
+  const compacted = confirmedRows(harness, "2025");
+  assert.equal(compacted.length, 1);
+  assert.equal(compacted[0].amount, 100);
 }));

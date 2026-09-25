@@ -235,6 +235,10 @@ test("ledger migration from version 2 adds occurrence keys and preserves ledger 
   assert.equal(row.ledger_amount, 25);
   assert.equal(row.running_balance_pln, 75);
   assert.equal(row.occurrence_key, "one_off:oneoff-1:expense:2026-01-02");
+  // The legacy ledger already required confirmation dates; migration must not
+  // admit the NULL rows assumed by the compaction review finding.
+  assert.throws(() => db.prepare("UPDATE confirmed_transactions SET confirmed_date = NULL WHERE id = 'conf-1'").run(),
+    /NOT NULL constraint failed/);
 }));
 
 test("planning migration rounds stored money columns to cents", () => withTempDb(db => {

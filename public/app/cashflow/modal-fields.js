@@ -5,7 +5,7 @@ import {
   PREDICTION_SUBSTITUTE_OPTIONS,
   SUPPORTED_FX_CURRENCIES
 } from "./constants.js";
-import { t, todayForCashflow } from "./shared.js";
+import { t, todayForCashflow, renderCurrencyOptions } from "./shared.js";
 
 function fieldValue(item, name, fallback = "") {
   const value = item?.[name];
@@ -26,11 +26,7 @@ function renderCurrencySelect(locale, item = {}) {
     <label>
       <span>${escapeHtml(t(locale, "Currency"))}</span>
       <select name="currency" required>
-        ${SUPPORTED_FX_CURRENCIES.map(currency => `
-          <option value="${escapeHtml(currency)}"${selected === currency ? " selected" : ""}>
-            ${escapeHtml(currency)}
-          </option>
-        `).join("")}
+        ${renderCurrencyOptions(selected)}
       </select>
     </label>
   `;

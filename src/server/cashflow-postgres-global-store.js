@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { createPostgresAuthRateLimitStore } from "./cashflow-postgres-auth-rate-limit-store.js";
 
 import { createPostgresGlobalDbService } from "./cashflow-postgres-global-db-service.js";
 import { createPostgresGlobalRepository } from "./cashflow-postgres-global-repository.js";
@@ -30,13 +31,15 @@ export async function createPostgresGlobalStore({
   logError = () => {},
   logServerEvent = () => {},
   pgModule = null,
+  poolMax = 10,
   repositoryFactory = createPostgresGlobalRepository
 } = {}) {
   const dbService = await createPostgresGlobalDbService({
     databaseUrl,
     logError,
     logServerEvent,
-    pgModule
+    pgModule,
+    poolMax
   });
 
   async function withRepository(fn) {
@@ -65,22 +68,33 @@ export async function createPostgresGlobalStore({
 
   function createLockService(options = {}) {
     const ownerId = String(options.ownerId || `cashflow_${crypto.randomUUID()}`).trim();
-    const lockOptions = { ...options, ownerId };
-    return {
-      ownerId,
-      release: async name => await dbService.withClient(async client =>
-        await createPostgresLockService({ ...lockOptions, client }).release(name)
-      ),
-      renew: async (name, renewOptions = {}) => await dbService.withClient(async client =>
-        await createPostgresLockService({ ...lockOptions, client }).renew(name, renewOptions)
-      ),
-      tryAcquire: async (name, acquireOptions = {}) => await dbService.withClient(async client =>
-        await createPostgresLockService({ ...lockOptions, client }).tryAcquire(name, acquireOptions)
-      ),
-      withLock: async (name, fn, acquireOptions = {}) => await dbService.withClient(async client =>
-        await createPostgresLockService({ ...lockOptions, client }).withLock(name, fn, acquireOptions)
-      )
-    };
+    const lockOptions = { logError, ...options, ownerId };
+    // Never pin a pool client across user work: nested store queries and
+    // heartbeat queries must make progress even when every callback is busy.
+    const client = { query: (sql, params) => dbService.withClient(connection => connection.query(sql, params)) };
+    return createPostgresLockService({ ...lockOptions, client });
+  }
+
+  async function initializeLockSchema() {
+    // Separate lock databases need only coordination DDL. Serialize replica
+    // startup without implicitly migrating the application's global schema.
+    return dbService.withClient(async client => {
+      await client.query("BEGIN");
+      try {
+        await client.query("SELECT pg_advisory_xact_lock(73190102)");
+        await client.query(`CREATE TABLE IF NOT EXISTS cashflow_runtime_locks (
+          name TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+          acquired_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL, CHECK (expires_at > acquired_at)
+        )`);
+        await client.query("CREATE INDEX IF NOT EXISTS idx_cashflow_runtime_locks_expires_at ON cashflow_runtime_locks(expires_at)");
+        await client.query("COMMIT");
+        logServerEvent("cashflow_postgres_lock_schema_ready");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    });
   }
 
   async function listRows(tableName) {
@@ -125,7 +139,7 @@ export async function createPostgresGlobalStore({
     return await dbService.withClient(async client => {
       await client.query("BEGIN");
       try {
-        await client.query(`ALTER TABLE ${quoteIdentifier(safeTable)} DISABLE TRIGGER USER`);
+        await client.query(`SET CONSTRAINTS ALL DEFERRED`);
         await client.query(`DELETE FROM ${quoteIdentifier(safeTable)}`);
         let inserted = 0;
         for (const row of normalized) {
@@ -139,7 +153,6 @@ export async function createPostgresGlobalStore({
           );
           inserted += Number(result?.rowCount || 0);
         }
-        await client.query(`ALTER TABLE ${quoteIdentifier(safeTable)} ENABLE TRIGGER USER`);
         await client.query("COMMIT");
         return {
           inserted,
@@ -158,9 +171,7 @@ export async function createPostgresGlobalStore({
     return await dbService.withClient(async client => {
       await client.query("BEGIN");
       try {
-        for (const tableName of POSTGRES_GLOBAL_TABLES) {
-          await client.query(`ALTER TABLE ${quoteIdentifier(tableName)} DISABLE TRIGGER USER`);
-        }
+        await client.query("SET CONSTRAINTS ALL DEFERRED");
         for (const tableName of [...POSTGRES_GLOBAL_TABLES].reverse()) {
           await client.query(`DELETE FROM ${quoteIdentifier(tableName)}`);
         }
@@ -181,7 +192,6 @@ export async function createPostgresGlobalStore({
           }
         }
         for (const tableName of POSTGRES_GLOBAL_TABLES) {
-          await client.query(`ALTER TABLE ${quoteIdentifier(tableName)} ENABLE TRIGGER USER`);
         }
         await client.query("COMMIT");
         return {
@@ -200,7 +210,9 @@ export async function createPostgresGlobalStore({
     checkReadiness: dbService.checkReadiness,
     close: dbService.close,
     createLockService,
+    createAuthRateLimitStore: () => createPostgresAuthRateLimitStore({ withClient: dbService.withClient }),
     initialize: dbService.initializeGlobalSchema,
+    initializeLockSchema,
     insertRows,
     listRows,
     replaceAllRows,

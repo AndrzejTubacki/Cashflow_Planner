@@ -1,4 +1,4 @@
-﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { fetchWithTimeout, fxFetchTimeoutMs } from "./cashflow-fetch-utils.js";
 
@@ -30,7 +30,7 @@ export function createCashflowFxCacheService({
   regenerateProjectionsAfterMutationAsync = null,
   fetchImpl = fetch
 }) {
-  let currentFxSnapshotDisabled = false;
+  let currentFxSnapshotDisabledUntil = 0;
 
   function fxCacheDateKey(date = null, timezone = DEFAULT_TIMEZONE) {
     return String(date || todayInTimezone(timezone)).slice(0, 10);
@@ -175,7 +175,7 @@ export function createCashflowFxCacheService({
       }
     }
 
-    if (currentFxSnapshotDisabled || typeof getCurrentFxSnapshot !== "function") {
+    if (Date.now() < currentFxSnapshotDisabledUntil || typeof getCurrentFxSnapshot !== "function") {
       return null;
     }
 
@@ -188,7 +188,7 @@ export function createCashflowFxCacheService({
 
       return null;
     } catch (error) {
-      currentFxSnapshotDisabled = true;
+      currentFxSnapshotDisabledUntil = Date.now() + 5 * 60 * 1000;
 
       logCashflowError("cashflow_current_fx_snapshot_disabled", error, {
         userId,
@@ -208,7 +208,7 @@ export function createCashflowFxCacheService({
       }
     }
 
-    if (currentFxSnapshotDisabled || typeof getCurrentFxSnapshot !== "function") {
+    if (Date.now() < currentFxSnapshotDisabledUntil || typeof getCurrentFxSnapshot !== "function") {
       return null;
     }
 
@@ -221,7 +221,7 @@ export function createCashflowFxCacheService({
 
       return null;
     } catch (error) {
-      currentFxSnapshotDisabled = true;
+      currentFxSnapshotDisabledUntil = Date.now() + 5 * 60 * 1000;
 
       logCashflowError("cashflow_current_fx_snapshot_disabled", error, {
         userId,
@@ -264,7 +264,7 @@ export function createCashflowFxCacheService({
       if (exact?.rate) return Number(exact.rate);
 
       const latestBefore = db.prepare(`
-        SELECT rate
+        SELECT rate, rate_date
         FROM fx_rates_cache
         WHERE base_currency = ?
           AND quote_currency = ?
@@ -273,7 +273,16 @@ export function createCashflowFxCacheService({
         LIMIT 1
       `).get(normalized, quote, rateDate);
 
-      if (latestBefore?.rate) return Number(latestBefore.rate);
+      if (latestBefore?.rate) {
+        const rateAgeDays = (new Date(`${rateDate}T00:00:00Z`) - new Date(`${latestBefore.rate_date}T00:00:00Z`)) / (1000 * 60 * 60 * 24);
+        if (rateAgeDays > 14) {
+          const err = new Error(`FX rate cache is stale for ${normalized}/${quote}`);
+          err.status = 409;
+          err.details = { code: "stale_fx_rate", ageDays: rateAgeDays };
+          throw err;
+        }
+        return Number(latestBefore.rate);
+      }
 
       if (quote !== "PLN") {
         const baseToPln = normalized === "PLN" ? 1 : getCachedFxRate(userId, normalized, date, "PLN");
@@ -403,8 +412,18 @@ export function createCashflowFxCacheService({
       .filter(row => String(row.rate_date || "").slice(0, 10) <= rateDate)
       .sort((a, b) => String(b.rate_date || "").localeCompare(String(a.rate_date || "")));
 
-    const direct = Number(pairRows[0]?.rate);
-    if (Number.isFinite(direct) && direct > 0) return direct;
+    if (pairRows.length > 0) {
+      const bestRow = pairRows[0];
+      const rateAgeDays = (new Date(`${rateDate}T00:00:00Z`) - new Date(`${String(bestRow.rate_date || "").slice(0, 10)}T00:00:00Z`)) / (1000 * 60 * 60 * 24);
+      if (rateAgeDays > 14) {
+        const err = new Error(`FX rate cache is stale for ${normalized}/${quote}`);
+        err.status = 409;
+        err.details = { code: "stale_fx_rate", ageDays: rateAgeDays };
+        throw err;
+      }
+      const direct = Number(bestRow.rate);
+      if (Number.isFinite(direct) && direct > 0) return direct;
+    }
 
     if (quote !== "PLN") {
       const baseToPln = normalized === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, normalized, date, "PLN");

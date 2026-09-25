@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import {
   normalizeSqliteBudgetStorageExport
 } from "../src/server/cashflow-postgres-budget-import.js";
@@ -20,39 +22,9 @@ import {
   POSTGRES_GLOBAL_TABLES
 } from "../src/server/cashflow-postgres-global-schema.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    budgetExportPath: "",
-    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
-    globalExportPath: "",
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--global-export") {
-      options.globalExportPath = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--budget-export") {
-      options.budgetExportPath = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--database-url") {
-      options.databaseUrl = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
-  return `Usage: npm run db:postgres:verify -- --global-export PATH --budget-export PATH [--database-url URL] [--pretty]
+  return `Usage: npm run db:postgres:verify -- --global-export PATH --budget-export PATH [--pretty]
 
 Compares sensitive SQLite-to-Postgres export artifacts with row counts in a Postgres destination.
 The command reads only schema versions and table counts from Postgres and does not print row values.`;
@@ -170,7 +142,7 @@ export async function verifyPostgresMigration({
   if (!globalExportPath) throw new Error("--global-export is required");
   if (!budgetExportPath) throw new Error("--budget-export is required");
   if (!String(databaseUrl || "").trim()) {
-    throw new Error("CASHFLOW_DATABASE_URL or --database-url is required");
+    throw new Error("CASHFLOW_DATABASE_URL is required");
   }
 
   const globalExport = normalizeSqliteGlobalMetadataExport(readJson(globalExportPath));
@@ -242,7 +214,16 @@ export async function verifyPostgresMigrationCli(options = parseArgs()) {
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--global-export","--budget-export"],
+    boolean: ["--pretty"],
+    defaults: {
+    budgetExportPath: "",
+    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
+    globalExportPath: "",
+    pretty: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
@@ -252,7 +233,7 @@ async function main() {
   if (!result.ok) process.exitCode = 2;
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

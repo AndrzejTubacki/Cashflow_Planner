@@ -18,6 +18,43 @@ async function withHarness(fn) {
   }
 }
 
+test("unauthorized error localization never reads header-selected budget storage", async t => {
+  const harness = await createCashflowTestHarness({ userId: "review_private" });
+  try {
+    const db = harness.openPlanningDb();
+    db.prepare("UPDATE settings SET locale = 'pl' WHERE id = 1").run();
+    db.close();
+    const globalDb = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
+    globalDb.prepare("UPDATE auth_config SET active_mode = 'internal' WHERE id = 1").run();
+    globalDb.close();
+
+    // Observe real SQLite reads without replacing storage or authorization.
+    // Auth errors have no Polish translation today, so response text alone
+    // cannot detect the unauthorized settings lookup.
+    const reads = [];
+    const prepare = Database.prototype.prepare;
+    t.mock.method(Database.prototype, "prepare", function (...args) {
+      if (this.name === planningDbPath(harness.dataDir, harness.userId)) reads.push(args[0]);
+      return prepare.apply(this, args);
+    });
+    for (const header of ["x-cashflow-budget-id", "x-cashflow-user-id"]) {
+      for (const cookie of ["", "cashflow_session=invalid-session"]) {
+        for (const budgetId of [harness.userId, "review_nonexistent"]) {
+          const result = await harness.request("/api", {
+            skipUserHeader: true,
+            headers: { [header]: budgetId, ...(cookie ? { cookie } : {}) }
+          });
+          assert.equal(result.response.status, 401);
+        }
+      }
+    }
+    assert.deepEqual(reads, [], "denied requests must not open another budget's planning database");
+    assert.equal(fs.existsSync(path.join(harness.dataDir, "review_nonexistent")), false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("routes return localized error messages based on saved user locale", async () => withHarness(async harness => {
   await harness.api("/api/settings", {
     method: "PUT",

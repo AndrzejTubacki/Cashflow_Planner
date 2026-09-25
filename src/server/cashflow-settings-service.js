@@ -9,6 +9,46 @@ import { generateId } from "./cashflow-id-utils.js";
 import { latestBalanceFromConfirmedRows } from "./cashflow-ledger-balance-utils.js";
 import { multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
+
+import dns from "node:dns";
+import { promisify } from "node:util";
+const lookupAsync = promisify(dns.lookup);
+
+function isPrivateIp(ip) {
+  // block 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1, fc00::/7, fe80::/10
+  if (!ip) return false;
+  if (ip === "::1" || ip.toLowerCase().startsWith("fc") || ip.toLowerCase().startsWith("fd") || ip.toLowerCase().startsWith("fe8")) return true;
+  const parts = ip.split(".");
+  if (parts.length !== 4) return false;
+  const p0 = parseInt(parts[0], 10);
+  const p1 = parseInt(parts[1], 10);
+  if (p0 === 10 || p0 === 127 || p0 === 169 && p1 === 254 || p0 === 192 && p1 === 168) return true;
+  if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
+  return false;
+}
+
+async function assertUrlIsExternalAsync(url, field) {
+  if (!url) return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  const host = parsed.hostname;
+  if (host === "localhost" || isPrivateIp(host)) {
+    throw badRequest(`${field} must point to a public external service`);
+  }
+  try {
+    const { address } = await lookupAsync(host);
+    if (isPrivateIp(address)) {
+      throw badRequest(`${field} resolves to a private IP address and is not allowed`);
+    }
+  } catch (error) {
+    throw badRequest(`${field} hostname could not be resolved`);
+  }
+}
+
 import { badRequest, conflict } from "./cashflow-user-utils.js";
 
 const POSTGRES_BOOLEAN_SETTINGS = new Set([
@@ -92,23 +132,6 @@ export function createCashflowSettingsService({
       let ledgerSwitch = null;
 
       if (ledgerCurrencyChanged) {
-        const unresolvedConversion = db.prepare(`
-          SELECT id, ledger_currency
-          FROM pending_transactions
-          WHERE occurrence_key LIKE 'ledger_currency_conversion:%'
-          ORDER BY created_at ASC, id ASC
-          LIMIT 1
-        `).get();
-
-        if (unresolvedConversion) {
-          throw conflict("Confirm or clear the pending ledger currency conversion before changing ledger currency again", [{
-            field: "ledger_currency",
-            reason: "pending_conversion",
-            pendingConversionId: unresolvedConversion.id,
-            ledgerCurrency: unresolvedConversion.ledger_currency
-          }]);
-        }
-
         const rateDate = todayInTimezone(currentSettings?.timezone || DEFAULT_TIMEZONE);
         const pendingManualRates = safeUpdates.manual_fx_rates !== undefined
           ? safeUpdates.manual_fx_rates
@@ -181,6 +204,30 @@ export function createCashflowSettingsService({
       }
 
       db.transaction(() => {
+        if (ledgerSwitch) {
+          const unresolvedConversion = db.prepare(`
+            SELECT id, ledger_currency
+            FROM pending_transactions
+            WHERE occurrence_key LIKE 'ledger_currency_conversion:%'
+            LIMIT 1
+          `).get();
+
+          if (unresolvedConversion) {
+            throw conflict("Confirm or clear the pending ledger currency conversion before changing ledger currency again", [{
+              field: "ledger_currency",
+              reason: "pending_conversion",
+              pendingConversionId: unresolvedConversion.id,
+              ledgerCurrency: unresolvedConversion.ledger_currency
+            }]);
+          }
+
+          const freshOldBalance = typeof latestConfirmedBalance === "function"
+            ? Number(latestConfirmedBalance(userId) || 0)
+            : 0;
+          ledgerSwitch.oldBalance = roundMoneyAmount(freshOldBalance);
+          ledgerSwitch.convertedOpeningBalance = multiplyMoney(freshOldBalance, ledgerSwitch.rate);
+        }
+
         if (Object.keys(safeUpdates).length) {
           const setClauses = Object.keys(safeUpdates)
             .map(key => `${key} = ?`)
@@ -418,6 +465,10 @@ export function createCashflowSettingsService({
       }
 
       if (ledgerSwitch) {
+        const freshOldBalance = await confirmedBalanceForSettings(userId, currentSettings);
+        ledgerSwitch.oldBalance = roundMoneyAmount(freshOldBalance);
+        ledgerSwitch.convertedOpeningBalance = multiplyMoney(freshOldBalance, ledgerSwitch.rate);
+
         const unresolvedConversion = (await writer.listPlanningRows(userId, "pending_transactions"))
           .filter(row => String(row.occurrence_key || "").startsWith("ledger_currency_conversion:"))
           .sort((a, b) => {

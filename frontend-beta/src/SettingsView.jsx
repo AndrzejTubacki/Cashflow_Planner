@@ -232,6 +232,7 @@ export default function SettingsView({ snapshot, onRefresh }) {
   const [notificationChannel, setNotificationChannel] = useState(settings.notification_channel || "ntfy");
   const [ntfyUrl, setNtfyUrl] = useState(settings.ntfy_url || "");
   const [ntfyAuthToken, setNtfyAuthToken] = useState(settings.ntfy_auth_token || "");
+  const [showNtfyToken, setShowNtfyToken] = useState(false);
   const [discordWebhookUrl, setDiscordWebhookUrl] = useState(settings.discord_webhook_url || "");
   const [deliveryTime, setDeliveryTime] = useState(settings.notification_delivery_time || "08:00");
   const [repeatDays, setRepeatDays] = useState(settings.necessary_underfunded_repeat_days ?? 1);
@@ -361,7 +362,20 @@ export default function SettingsView({ snapshot, onRefresh }) {
             <div className="beta-form-grid">
               <label className="beta-field">
                 <span>Ledger currency</span>
-                <select value={ledgerCurrency} onChange={e => setLedgerCurrency(e.target.value)}>
+                <select value={ledgerCurrency} onChange={e => {
+                  const newLedger = e.target.value;
+                  setLedgerCurrency(newLedger);
+                  setFxCurrencies(prev => prev.filter(c => c !== newLedger));
+                  setManualRates(prev => {
+                    const next = { ...prev };
+                    for (const key of Object.keys(next)) {
+                      if (key.startsWith(newLedger + "/") || key.endsWith("/" + newLedger)) {
+                        delete next[key];
+                      }
+                    }
+                    return next;
+                  });
+                }}>
                   {SUPPORTED_FX_CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </label>
@@ -485,7 +499,12 @@ export default function SettingsView({ snapshot, onRefresh }) {
               </label>
               <label className="beta-field">
                 <span>ntfy access token</span>
-                <input type="text" autoComplete="off" value={ntfyAuthToken} onChange={e => setNtfyAuthToken(e.target.value)} placeholder="tk_..." />
+                <div style={{ display: "flex", gap: "0.25rem" }}>
+                  <input type={showNtfyToken ? "text" : "password"} autoComplete="off" value={ntfyAuthToken} onChange={e => setNtfyAuthToken(e.target.value)} placeholder="tk_..." style={{ flex: 1 }} />
+                  <button type="button" className="beta-btn" onClick={() => setShowNtfyToken(s => !s)} title="Toggle reveal">
+                    {showNtfyToken ? "Hide" : "Show"}
+                  </button>
+                </div>
               </label>
               <label className="beta-field">
                 <span>Discord webhook URL</span>

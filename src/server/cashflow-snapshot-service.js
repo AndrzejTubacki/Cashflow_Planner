@@ -1,4 +1,4 @@
-﻿import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { recurringOccurrencesInPeriod, todayInTimezone } from "./cashflow-date-utils.js";
 import {
   addMoneyAmounts,
@@ -34,7 +34,8 @@ export function createCashflowSnapshotService({
   predictedAmountForRecurringExpenseAsync = null,
   safeGetCurrentFxSnapshot,
   safeGetCurrentFxSnapshotAsync = null,
-  sumConfirmedFunding
+  sumConfirmedFunding,
+  sumConfirmedFundingAsync = null
 }) {
   function validFundingSourceColumn(sourceColumn) {
     if (!["source_flex_id", "source_goal_id"].includes(sourceColumn)) {
@@ -65,71 +66,6 @@ export function createCashflowSnapshotService({
   function sumGeneratedFundingFromRows(rows = [], sourceColumn, sourceId, ledgerCurrency = "PLN") {
     return generatedFundingRows(rows, sourceColumn, sourceId, ledgerCurrency)
       .reduce((total, row) => addMoneyAmounts(total, row.ledger_amount || 0), 0);
-  }
-
-  function summarizeRecurringExpenseOccurrences(db, expense, periods, today) {
-    const expectedDates = [];
-
-    for (const period of periods || []) {
-      for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
-        expectedDates.push(date);
-      }
-    }
-
-    const uniqueExpectedDates = [...new Set(expectedDates)].sort();
-
-    let funded = 0;
-    let partial = 0;
-    let underfunded = 0;
-    let skipped = 0;
-
-    const generatedByDate = new Map();
-
-    const generatedRows = db.prepare(`
-      SELECT date, status
-      FROM future_transactions
-      WHERE source_recurring_expense_id = ?
-
-      UNION ALL
-
-      SELECT date, status
-      FROM pending_transactions
-      WHERE source_recurring_expense_id = ?
-    `).all(expense.id, expense.id);
-
-    for (const row of generatedRows) {
-      if (!generatedByDate.has(row.date)) {
-        generatedByDate.set(row.date, []);
-      }
-
-      generatedByDate.get(row.date).push(row.status || "funded");
-    }
-
-    for (const date of uniqueExpectedDates) {
-      const statuses = generatedByDate.get(date) || [];
-
-      if (!statuses.length) {
-        skipped += 1;
-        continue;
-      }
-
-      if (statuses.includes("underfunded")) {
-        underfunded += 1;
-      } else if (statuses.includes("partial")) {
-        partial += 1;
-      } else {
-        funded += 1;
-      }
-    }
-
-    return {
-      occurrence_total: uniqueExpectedDates.length,
-      occurrence_funded_count: funded,
-      occurrence_partial_count: partial,
-      occurrence_underfunded_count: underfunded,
-      occurrence_skipped_count: skipped,
-      occurrence_summary: `${funded}/${uniqueExpectedDates.length}`
-    };
   }
 
   function summarizeRecurringExpenseOccurrencesFromRows(expense, periods, today, generatedRows = []) {
@@ -307,10 +243,21 @@ export function createCashflowSnapshotService({
         { anchorOverrides: periodAnchorOverrides }
       );
 
+      const futureTransactions = db.prepare(`
+        SELECT *
+        FROM future_transactions
+        ORDER BY date ASC, period ASC, type DESC, created_at ASC, id ASC
+      `).all();
+
+      const generatedTransactions = [
+        ...futureTransactions,
+        ...pendingTransactions
+      ];
+
       const recurringExpensesRaw = db.prepare(`
         SELECT r.*, pt.operating_priority AS priority
         FROM recurring_expenses r
-        JOIN planned_transactions pt ON pt.id = r.planned_transaction_id
+        LEFT JOIN planned_transactions pt ON pt.id = r.planned_transaction_id
         ORDER BY pt.operating_priority ASC
       `).all();
 
@@ -342,20 +289,9 @@ export function createCashflowSnapshotService({
             : null,
           current_prediction_fx_missing: !currentPredictionLedger.ok,
           current_prediction_warning: currentPredictionLedger.ok ? null : currentPredictionLedger.error,
-          ...summarizeRecurringExpenseOccurrences(db, expense, periods, today)
+          ...summarizeRecurringExpenseOccurrencesFromRows(expense, periods, today, generatedTransactions)
         };
       });
-
-      const futureTransactions = db.prepare(`
-        SELECT *
-        FROM future_transactions
-        ORDER BY date ASC, period ASC, type DESC, created_at ASC, id ASC
-      `).all();
-
-      const generatedTransactions = [
-        ...futureTransactions,
-        ...pendingTransactions
-      ];
 
       const oneOffsRaw = db.prepare(`
         SELECT *
@@ -382,14 +318,14 @@ export function createCashflowSnapshotService({
       const goals = db.prepare(`
         SELECT g.*, pt.goal_priority AS priority
         FROM goals g
-        JOIN planned_transactions pt ON pt.id = g.planned_transaction_id
+        LEFT JOIN planned_transactions pt ON pt.id = g.planned_transaction_id
         ORDER BY pt.goal_priority ASC
       `).all();
 
       const flexTransactions = db.prepare(`
         SELECT f.*, pt.operating_priority AS priority
         FROM flex_transactions f
-        JOIN planned_transactions pt ON pt.id = f.planned_transaction_id
+        LEFT JOIN planned_transactions pt ON pt.id = f.planned_transaction_id
         ORDER BY pt.operating_priority ASC
       `).all();
 
@@ -397,10 +333,10 @@ export function createCashflowSnapshotService({
         ? confirmedFundingTotals(userId, ledgerCurrency, settings)
         : null;
       const confirmedGoalFundingFor = goalId => roundMoneyAmount(confirmedFunding
-        ? confirmedFunding.source_goal_id.get(goalId)
+        ? confirmedFunding.source_goal_id.get(goalId) || 0
         : sumConfirmedFunding(userId, "source_goal_id", goalId, ledgerCurrency, settings));
       const confirmedFlexFundingFor = flexId => roundMoneyAmount(confirmedFunding
-        ? confirmedFunding.source_flex_id.get(flexId)
+        ? confirmedFunding.source_flex_id.get(flexId) || 0
         : sumConfirmedFunding(userId, "source_flex_id", flexId, ledgerCurrency, settings));
 
       const confirmedTransactions = rawConfirmedTransactions
@@ -429,6 +365,10 @@ export function createCashflowSnapshotService({
           return String(b.id || "").localeCompare(String(a.id || ""));
         });
 
+      const eventRows = db.prepare(`
+        SELECT *
+        FROM event_log
+      `).all();
       const goalSummaries = goals.map(goal => {
         const target = safeConvertToLedger(goal.amount, goal.currency, "expense");
         const alreadyFundedLedger = confirmedGoalFundingFor(goal.id);
@@ -447,13 +387,7 @@ export function createCashflowSnapshotService({
           ledgerCurrency
         );
 
-        const impossible = db.prepare(`
-          SELECT details
-          FROM event_log
-          WHERE action = 'goal_impossible' AND entity_id = ?
-          ORDER BY timestamp DESC
-          LIMIT 1
-        `).get(goal.id);
+        const impossible = latestImpossibleEventFromRows(eventRows, goal.id);
 
         const normalizedFutureAllocatedLedger = roundMoneyAmount(futureAllocatedLedger);
         const normalizedPendingAllocatedLedger = roundMoneyAmount(pendingAllocatedLedger);
@@ -823,12 +757,12 @@ export function createCashflowSnapshotService({
       : (typeof confirmedFundingTotals === "function"
         ? confirmedFundingTotals(userId, ledgerCurrency, settings)
         : null);
-    const confirmedGoalFundingFor = goalId => roundMoneyAmount(confirmedFunding
-      ? confirmedFunding.source_goal_id.get(goalId)
-      : sumConfirmedFunding(userId, "source_goal_id", goalId, ledgerCurrency, settings));
-    const confirmedFlexFundingFor = flexId => roundMoneyAmount(confirmedFunding
-      ? confirmedFunding.source_flex_id.get(flexId)
-      : sumConfirmedFunding(userId, "source_flex_id", flexId, ledgerCurrency, settings));
+    const confirmedGoalFundingFor = async goalId => roundMoneyAmount(confirmedFunding
+      ? confirmedFunding.source_goal_id.get(goalId) || 0
+      : (typeof sumConfirmedFundingAsync === "function" ? await sumConfirmedFundingAsync(userId, "source_goal_id", goalId, ledgerCurrency, settings) : sumConfirmedFunding(userId, "source_goal_id", goalId, ledgerCurrency, settings)));
+    const confirmedFlexFundingFor = async flexId => roundMoneyAmount(confirmedFunding
+      ? confirmedFunding.source_flex_id.get(flexId) || 0
+      : (typeof sumConfirmedFundingAsync === "function" ? await sumConfirmedFundingAsync(userId, "source_flex_id", flexId, ledgerCurrency, settings) : sumConfirmedFunding(userId, "source_flex_id", flexId, ledgerCurrency, settings)));
 
     const confirmedTransactions = rawConfirmedTransactions
       .map(tx => ({
@@ -856,9 +790,9 @@ export function createCashflowSnapshotService({
         return String(b.id || "").localeCompare(String(a.id || ""));
       });
 
-    const goalSummaries = goals.map(goal => {
+    const goalSummaries = await Promise.all(goals.map(async goal => {
       const target = safeConvertToLedger(goal.amount, goal.currency, "expense");
-      const alreadyFundedLedger = confirmedGoalFundingFor(goal.id);
+      const alreadyFundedLedger = await confirmedGoalFundingFor(goal.id);
       const normalizedFutureAllocatedLedger = roundMoneyAmount(sumGeneratedFundingFromRows(
         futureTransactions,
         "source_goal_id",
@@ -905,11 +839,11 @@ export function createCashflowSnapshotService({
           : target.error,
         fx_missing: !target.ok
       };
-    });
+    }));
 
-    const flexSummaries = flexTransactions.map(flex => {
+    const flexSummaries = await Promise.all(flexTransactions.map(async flex => {
       const target = safeConvertToLedger(flex.amount, flex.currency, "expense");
-      const alreadyFundedLedger = confirmedFlexFundingFor(flex.id);
+      const alreadyFundedLedger = await confirmedFlexFundingFor(flex.id);
       const normalizedFutureAllocatedLedger = roundMoneyAmount(sumGeneratedFundingFromRows(
         futureTransactions,
         "source_flex_id",
@@ -952,7 +886,7 @@ export function createCashflowSnapshotService({
         fx_missing: !target.ok,
         warning: target.ok ? null : target.error
       };
-    });
+    }));
 
     const periodSummaries = buildPeriodSummariesFromDefinitions(
       settings || {},

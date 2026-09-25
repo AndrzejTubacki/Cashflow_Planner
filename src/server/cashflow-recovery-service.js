@@ -33,6 +33,10 @@ export function createCashflowRecoveryService({
       ? await createBackupAsync(userId, { deferCleanup: true })
       : createBackup(userId, { deferCleanup: true });
 
+    if (global.__CASHFLOW_TEST_RACE_DELAY) {
+      await new Promise(r => setTimeout(r, global.__CASHFLOW_TEST_RACE_DELAY));
+    }
+
     try {
       const result = await work();
       if (typeof afterWork === "function") {

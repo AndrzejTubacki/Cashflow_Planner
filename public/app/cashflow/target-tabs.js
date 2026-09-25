@@ -5,20 +5,26 @@ import { renderTransactionTable } from "./transactions.js";
 
 const EMPTY_VALUE = "-";
 
+function computeFundingDisplay(item) {
+  const originalTarget = Number(item.amount || 0);
+  const targetLedger = Number(item.target_ledger_amount || 0);
+
+  const fundedLedger =
+    Number(item.already_funded_ledger || 0) +
+    Number(item.pending_allocated_ledger || 0) +
+    Number(item.future_allocated_ledger || 0);
+
+  const fundedOriginal = targetLedger > 0
+    ? Math.min(originalTarget, (fundedLedger / targetLedger) * originalTarget)
+    : 0;
+
+  return { originalTarget, targetLedger, fundedLedger, fundedOriginal };
+}
+
 export function renderGoalsTab(locale, cashflow) {
   const ledgerCurrency = cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY;
   const items = (cashflow?.goals || []).map(g => {
-    const originalTarget = Number(g.amount || 0);
-    const targetLedger = Number(g.target_ledger_amount || 0);
-
-    const fundedLedger =
-      Number(g.already_funded_ledger || 0) +
-      Number(g.pending_allocated_ledger || 0) +
-      Number(g.future_allocated_ledger || 0);
-
-    const fundedOriginal = targetLedger > 0
-      ? Math.min(originalTarget, (fundedLedger / targetLedger) * originalTarget)
-      : 0;
+    const { originalTarget, targetLedger, fundedLedger, fundedOriginal } = computeFundingDisplay(g);
 
     return {
       ...g,
@@ -72,17 +78,7 @@ export function renderGoalsTab(locale, cashflow) {
 export function renderFlexTab(locale, cashflow) {
   const ledgerCurrency = cashflow?.settings?.ledger_currency || DEFAULT_LEDGER_CURRENCY;
   const items = (cashflow?.flexTransactions || []).map(f => {
-    const originalTarget = Number(f.amount || 0);
-    const targetLedger = Number(f.target_ledger_amount || 0);
-
-    const fundedLedger =
-      Number(f.already_funded_ledger || 0) +
-      Number(f.pending_allocated_ledger || 0) +
-      Number(f.future_allocated_ledger || 0);
-
-    const fundedOriginal = targetLedger > 0
-      ? Math.min(originalTarget, (fundedLedger / targetLedger) * originalTarget)
-      : 0;
+    const { originalTarget, targetLedger, fundedLedger, fundedOriginal } = computeFundingDisplay(f);
 
     return {
       ...f,

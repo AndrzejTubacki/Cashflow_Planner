@@ -1,4 +1,4 @@
-﻿import crypto from "node:crypto";
+import crypto from "node:crypto";
 
 import { DEFAULT_TIMEZONE, NOTIFICATION_DELIVERY_TIME } from "./cashflow-constants.js";
 import { todayInTimezone, normalizeTimezone } from "./cashflow-date-utils.js";
@@ -33,11 +33,41 @@ export function createCashflowBackgroundJobs({
 }) {
   const lastRunKeys = new Set();
   let tickRunning = false;
+  let stopping = false;
+  let interval = null;
+  let inFlightTick = null;
 
   function startBackgroundJobs() {
-    return setInterval(() => {
+    // The scheduler owns its timer and tracks the complete locked promise.
+    if (interval) return interval;
+    interval = setInterval(() => {
       tickPerUserJobs().catch(err => logError("cashflow_background_tick_failed", err));
     }, 60_000);
+    return interval;
+  }
+
+  async function stopBackgroundJobs() {
+    // Reject new ticks while letting an active callback release its lease.
+    stopping = true;
+    clearInterval(interval);
+    interval = null;
+    try {
+      await inFlightTick;
+    } catch (error) {
+      // A failed tick has still drained; it must not prevent pool cleanup.
+      logError("cashflow_background_drain_failed", { error: error.message });
+    }
+  }
+
+  function tickPerUserJobs() {
+    if (stopping) return Promise.resolve({ skipped: true, reason: "shutdown" });
+    if (inFlightTick) {
+      logServerEvent("cashflow_background_tick_skipped", { reason: "previous_tick_still_running" });
+      return Promise.resolve({ skipped: true });
+    }
+    const work = runTickPerUserJobs();
+    inFlightTick = work;
+    return work.finally(() => { if (inFlightTick === work) inFlightTick = null; });
   }
 
   function localParts(timezone, currentTime) {
@@ -175,6 +205,8 @@ export function createCashflowBackgroundJobs({
     }
   }
 
+  const failureCounts = new Map();
+
   async function runDailyJobOnce({
     userId,
     jobName,
@@ -192,14 +224,19 @@ export function createCashflowBackgroundJobs({
       if (!shouldRun(memoryKey)) return null;
       if (await persistedRunExists(userId, jobName, runKey)) return null;
 
+      const fails = failureCounts.get(memoryKey) || 0;
+      if (fails >= 3) return null;
+
       try {
         const result = await work();
         await recordPersistedRun(userId, jobName, runKey, {
           scheduledTime
         });
+        failureCounts.delete(memoryKey);
         return result ?? true;
       } catch (error) {
         lastRunKeys.delete(memoryKey);
+        failureCounts.set(memoryKey, fails + 1);
         throw error;
       }
     };
@@ -222,7 +259,7 @@ export function createCashflowBackgroundJobs({
     return await runOnce();
   }
 
-  async function tickPerUserJobs() {
+  async function runTickPerUserJobs() {
     if (tickRunning) {
       logServerEvent("cashflow_background_tick_skipped", {
         reason: "previous_tick_still_running"
@@ -232,12 +269,19 @@ export function createCashflowBackgroundJobs({
 
     tickRunning = true;
     try {
-      const runTick = async () => {
+      const runTick = async (_lock, { signal } = {}) => {
         const userIds = typeof listCashflowUserIdsAsync === "function"
           ? await listCashflowUserIdsAsync()
           : listCashflowUserIds();
 
-        for (const userId of userIds) {
+        for (const [userIndex, userId] of userIds.entries()) {
+          if (signal?.aborted) {
+            logServerEvent("cashflow_background_tick_lock_lost", {
+              processedUsers: userIndex,
+              remainingUsers: userIds.length - userIndex
+            });
+            return { skipped: false, users: userIndex, lockLost: true };
+          }
           try {
             const settings = await settingsForUser(userId) || {};
             const timezone = settings.timezone || DEFAULT_TIMEZONE;
@@ -246,100 +290,120 @@ export function createCashflowBackgroundJobs({
             const today = todayInTimezone(timezone, currentTime);
             const dailyLedgerTime = settings.notification_delivery_time || NOTIFICATION_DELIVERY_TIME;
 
-            await runDailyJobOnce({
-              userId,
-              jobName: "midnight",
-              lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.ledgerCheck),
-              runKey: `${local.date}:${dailyLedgerTime}`,
-              localTime: local.time,
-              scheduledTime: dailyLedgerTime,
-              work: async () => {
-                const created = await moveDueFutureTransactionsToPending(userId, today);
-                const pendingSummaryCount = await queueDailyPendingSummary(userId);
-                const missingIncomeCount = await queueMissingIncomeNotifications(userId);
+            try {
+              await runDailyJobOnce({
+                userId,
+                jobName: "midnight",
+                lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.ledgerCheck),
+                runKey: `${local.date}:${dailyLedgerTime}`,
+                localTime: local.time,
+                scheduledTime: dailyLedgerTime,
+                work: async () => {
+                  const created = await moveDueFutureTransactionsToPending(userId, today);
+                  const pendingSummaryCount = await queueDailyPendingSummary(userId);
+                  const missingIncomeCount = await queueMissingIncomeNotifications(userId);
 
-                logServerEvent("cashflow_midnight_job_completed", {
-                  userId,
-                  transactionsCreated: created,
-                  pendingSummaryCount,
-                  missingIncomeCount
-                });
-                return { created, pendingSummaryCount, missingIncomeCount };
-              }
-            });
-
-            await runDailyJobOnce({
-              userId,
-              jobName: "fx",
-              lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.fxRefresh),
-              runKey: local.date,
-              localTime: local.time,
-              scheduledTime: "08:00",
-              work: async () => {
-                const result = typeof refreshNbpFxCacheForUser === "function"
-                  ? await refreshNbpFxCacheForUser(userId, today)
-                  : { users: await refreshNbpFxCacheForAllUsers(today) };
-                logServerEvent("cashflow_fx_refresh_completed", {
-                  userId,
-                  result
-                });
-                return result;
-              }
-            });
-
-            await runDailyJobOnce({
-              userId,
-              jobName: "notify",
-              lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.notifications),
-              runKey: `${local.date}:catchup:${dailyLedgerTime}`,
-              localTime: local.time,
-              scheduledTime: dailyLedgerTime,
-              work: async () => {
-                const sent = await sendQueuedNotifications(userId);
-                if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
-                return { sent };
-              }
-            });
-
-            const runBackup = async () => (
-              typeof maybeRunAutomaticBackupAsync === "function"
-                ? maybeRunAutomaticBackupAsync(userId)
-                : maybeRunAutomaticBackup(userId)
-            );
-            const backupResult = lockService && typeof lockService.withLock === "function"
-              ? (await lockService.withLock(
-                  budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.automaticBackup),
-                  runBackup,
-                  { ttlMs: 55_000 }
-                ))?.result
-              : await runBackup();
-            if (backupResult) {
-              logServerEvent("cashflow_auto_backup_completed", { userId, ...backupResult });
+                  logServerEvent("cashflow_midnight_job_completed", {
+                    userId,
+                    transactionsCreated: created,
+                    pendingSummaryCount,
+                    missingIncomeCount
+                  });
+                  return { created, pendingSummaryCount, missingIncomeCount };
+                }
+              });
+            } catch (err) {
+              logError("cashflow_background_job_failed", { userId, jobName: "midnight", error: err.message });
             }
 
-            await runDailyJobOnce({
-              userId,
-              jobName: "maintenance",
-              lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.retention),
-              runKey: local.date,
-              localTime: local.time,
-              scheduledTime: "03:30",
-              work: async () => {
-                cleanupOperationalData(userId, "daily_maintenance");
-                const compaction = typeof compactLedgerHistory === "function"
-                  ? await compactLedgerHistory(userId)
-                  : null;
-                if (compaction?.compactedRows) {
-                  logServerEvent("cashflow_ledger_history_compacted", {
+            try {
+              await runDailyJobOnce({
+                userId,
+                jobName: "fx",
+                lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.fxRefresh),
+                runKey: local.date,
+                localTime: local.time,
+                scheduledTime: "08:00",
+                work: async () => {
+                  const result = typeof refreshNbpFxCacheForUser === "function"
+                    ? await refreshNbpFxCacheForUser(userId, today)
+                    : { users: await refreshNbpFxCacheForAllUsers(today) };
+                  logServerEvent("cashflow_fx_refresh_completed", {
                     userId,
-                    compactedRows: compaction.compactedRows,
-                    createdRows: compaction.createdRows,
-                    cutoffDate: compaction.cutoffDate
+                    result
                   });
+                  return result;
                 }
-                return { compaction };
+              });
+            } catch (err) {
+              logError("cashflow_background_job_failed", { userId, jobName: "fx", error: err.message });
+            }
+
+            try {
+              await runDailyJobOnce({
+                userId,
+                jobName: "notify",
+                lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.notifications),
+                runKey: `${local.date}:catchup:${dailyLedgerTime}`,
+                localTime: local.time,
+                scheduledTime: dailyLedgerTime,
+                work: async () => {
+                  const sent = await sendQueuedNotifications(userId);
+                  if (sent) logServerEvent("cashflow_notifications_sent", { userId, sent });
+                  return { sent };
+                }
+              });
+            } catch (err) {
+              logError("cashflow_background_job_failed", { userId, jobName: "notify", error: err.message });
+            }
+
+            try {
+              const runBackup = async () => (
+                typeof maybeRunAutomaticBackupAsync === "function"
+                  ? maybeRunAutomaticBackupAsync(userId)
+                  : maybeRunAutomaticBackup(userId)
+              );
+              const backupResult = lockService && typeof lockService.withLock === "function"
+                ? (await lockService.withLock(
+                    budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.automaticBackup),
+                    runBackup,
+                    { ttlMs: 55_000 }
+                  ))?.result
+                : await runBackup();
+              if (backupResult) {
+                logServerEvent("cashflow_auto_backup_completed", { userId, ...backupResult });
               }
-            });
+            } catch (err) {
+              logError("cashflow_background_job_failed", { userId, jobName: "backup", error: err.message });
+            }
+
+            try {
+              await runDailyJobOnce({
+                userId,
+                jobName: "maintenance",
+                lockName: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.retention),
+                runKey: local.date,
+                localTime: local.time,
+                scheduledTime: "03:30",
+                work: async () => {
+                  cleanupOperationalData(userId, "daily_maintenance");
+                  const compaction = typeof compactLedgerHistory === "function"
+                    ? await compactLedgerHistory(userId)
+                    : null;
+                  if (compaction?.compactedRows) {
+                    logServerEvent("cashflow_ledger_history_compacted", {
+                      userId,
+                      compactedRows: compaction.compactedRows,
+                      createdRows: compaction.createdRows,
+                      cutoffDate: compaction.cutoffDate
+                    });
+                  }
+                  return { compaction };
+                }
+              });
+            } catch (err) {
+              logError("cashflow_background_job_failed", { userId, jobName: "maintenance", error: err.message });
+            }
           } catch (err) {
             logError("cashflow_background_user_failed", {
               userId,
@@ -372,6 +436,7 @@ export function createCashflowBackgroundJobs({
 
   return {
     startBackgroundJobs,
+    stopBackgroundJobs,
     tickPerUserJobs
   };
 }

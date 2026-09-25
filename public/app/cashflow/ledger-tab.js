@@ -2,7 +2,7 @@ import { escapeHtml } from "../utils.js";
 import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
 import { renderFundingOverview } from "./funding.js";
 import { renderBudgetPeriodStats } from "./periods.js";
-import { formatMoney, groupBy, hasCapability, renderDetailsPanel, t } from "./shared.js";
+import { formatMoneyHtml, groupBy, hasCapability, renderDetailsPanel, t } from "./shared.js";
 import { renderTransactionTable } from "./transactions.js";
 
 const EMPTY_VALUE = "-";
@@ -55,7 +55,7 @@ export function renderLedgerTab(locale, cashflow) {
     ? [...futureByPeriod.entries()].map(([period, txs]) => {
         const summary = (cashflow?.periodSummaries || []).find(p => p.period === period);
         const extra = summary
-          ? `<small>${formatMoney(summary.income, ledgerCurrency, locale)} / ${formatMoney(summary.expenses, ledgerCurrency, locale)}</small>`
+          ? `<small>${formatMoneyHtml(summary.income, ledgerCurrency, locale)} / ${formatMoneyHtml(summary.expenses, ledgerCurrency, locale)}</small>`
           : "";
 
         const title = summary

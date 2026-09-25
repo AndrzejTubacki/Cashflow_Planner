@@ -318,12 +318,12 @@ export function applyPlanningMigrations(db, {
       addColumnIfMissing(
         "recurring_expenses",
         "prediction_substitute_missing",
-        "prediction_substitute_missing TEXT NOT NULL DEFAULT 'none'"
+        "prediction_substitute_missing TEXT NOT NULL DEFAULT 'none' CHECK (prediction_substitute_missing IN ('none', 'mode', 'median'))"
       );
       addColumnIfMissing(
         "recurring_incomes",
         "prediction_substitute_missing",
-        "prediction_substitute_missing TEXT NOT NULL DEFAULT 'none'"
+        "prediction_substitute_missing TEXT NOT NULL DEFAULT 'none' CHECK (prediction_substitute_missing IN ('none', 'mode', 'median'))"
       );
 
       if (tableExists("recurring_expenses")) {
@@ -499,6 +499,27 @@ export function applyPlanningMigrations(db, {
             ${valueExpr("updated_at", "datetime('now')")}
           FROM settings_old_v12
           LIMIT 1
+        `).run();
+
+        db.prepare(`
+          INSERT OR IGNORE INTO settings (
+            id, ledger_currency, timezone, locale, future_periods,
+            fx_buffer_percent, fx_provider, fx_used_currencies, manual_fx_rates,
+            auto_backup_enabled, backup_interval_minutes, backup_retention_count,
+            notification_delivery_time, notify_goal_impossible, notify_necessary_underfunded,
+            notify_funding_shortfall, notify_income_missing, notify_pending_summary, notify_goal_funded,
+            notify_fx_changed, ntfy_priority_goal_impossible, ntfy_priority_necessary_underfunded,
+            ntfy_priority_funding_shortfall, ntfy_priority_income_missing, ntfy_priority_pending_summary,
+            ntfy_priority_goal_funded, ntfy_priority_fx_changed, necessary_underfunded_repeat_days,
+            updated_at
+          ) VALUES (
+            1, 'PLN', 'Europe/Warsaw', 'en-US', 12,
+            0, 'NBP', '[]', '{}',
+            1, 60, 10,
+            '08:00', 1, 1, 1, 1, 1, 0, 1,
+            'high', 'default', 'default', 'high', 'default', 'default', 'default', 1,
+            datetime('now')
+          )
         `).run();
 
         db.exec("DROP TABLE settings_old_v12");

@@ -104,3 +104,13 @@ test("nullablePositiveAmount accepts zero and positive numbers only", () => {
   assert.equal(nullablePositiveAmount("0"), 0);
   assert.equal(nullablePositiveAmount("12.34"), 12.34);
 });
+
+test("money utils return NaN for invalid inputs instead of coercing to 0", async () => {
+  const { roundMoneyAmount, addMoneyAmounts, subtractMoneyAmounts, multiplyMoney } = await import("../../src/server/cashflow-money-utils.js");
+
+  assert.ok(Number.isNaN(roundMoneyAmount("garbage")));
+  assert.ok(Number.isNaN(roundMoneyAmount(Number.NaN)));
+  assert.ok(Number.isNaN(addMoneyAmounts(100, "garbage")));
+  assert.ok(Number.isNaN(subtractMoneyAmounts(100, "garbage")));
+  assert.ok(Number.isNaN(multiplyMoney("garbage", 2)));
+});

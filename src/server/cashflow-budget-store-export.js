@@ -38,6 +38,7 @@ function rowCountsForTables(tables) {
 export async function createBudgetStoreExport({
   budgetIds,
   budgetStore,
+  excludeBackupMetadata = false,
   now = new Date()
 } = {}) {
   assertBudgetStore(budgetStore);
@@ -60,6 +61,8 @@ export async function createBudgetStoreExport({
     });
 
     for (const table of POSTGRES_BUDGET_PLANNING_TABLES) {
+      // Financial backups must not recursively include operational backup history.
+      if (excludeBackupMetadata && table === "backup_metadata") continue;
       addRows(tables, table, await budgetStore.listPlanningRows(budgetId, table));
     }
 

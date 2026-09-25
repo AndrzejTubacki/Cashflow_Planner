@@ -4,54 +4,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import { createSqliteBudgetStorageExport } from "./export-sqlite-budget-storage.mjs";
 import { createSqliteGlobalMetadataExport } from "./export-sqlite-global-metadata.mjs";
 import { importSqliteBudgetStorageToPostgres } from "../src/server/cashflow-postgres-budget-import.js";
 import { importSqliteGlobalMetadataToPostgres } from "../src/server/cashflow-postgres-global-import.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    apply: false,
-    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    dryRun: true,
-    outputDir: path.resolve("external-database-exports"),
-    pretty: false,
-    sourceIsSnapshot: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--output-dir") {
-      options.outputDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--database-url") {
-      options.databaseUrl = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--source-is-snapshot") {
-      options.sourceIsSnapshot = true;
-    } else if (arg === "--apply") {
-      options.apply = true;
-      options.dryRun = false;
-    } else if (arg === "--dry-run") {
-      options.dryRun = true;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
-  return `Usage: npm run db:migrate:sqlite-to-postgres -- --data-dir PATH --output-dir PATH [--dry-run|--apply] [--source-is-snapshot] [--database-url URL] [--pretty]
+  return `Usage: npm run db:migrate:sqlite-to-postgres -- --data-dir PATH --output-dir PATH [--dry-run|--apply] [--source-is-snapshot] [--pretty]
 
 Creates SQLite global and budget export artifacts, validates them, and optionally imports them into the draft Postgres schema.
 Apply mode requires --source-is-snapshot and a Postgres database URL. Runtime Postgres mode remains disabled.`;
@@ -135,7 +97,7 @@ export async function migrateSqliteToPostgres({
 
   if (dryRun) return summary;
   if (!String(databaseUrl || "").trim()) {
-    throw new Error("CASHFLOW_DATABASE_URL or --database-url is required for apply mode");
+    throw new Error("CASHFLOW_DATABASE_URL is required for apply mode");
   }
 
   const pg = await loadPgModule(pgModule);
@@ -197,7 +159,19 @@ export async function migrateSqliteToPostgresCli(options = parseArgs()) {
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--data-dir","--output-dir"],
+    boolean: ["--source-is-snapshot","--apply","--pretty"],
+    defaults: {
+    apply: false,
+    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    dryRun: true,
+    outputDir: path.resolve("external-database-exports"),
+    pretty: false,
+    sourceIsSnapshot: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
@@ -207,7 +181,7 @@ async function main() {
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

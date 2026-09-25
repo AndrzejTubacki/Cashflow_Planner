@@ -190,7 +190,28 @@ test("none-mode selections issue opaque revocable sessions with CSRF protection"
         date: "2026-06-01"
       }
     });
-    assert.equal(staleCsrf.response.status, 403);
+    // With the grace-window fix, the immediately previous token is still valid.
+    assert.equal(staleCsrf.response.status, 200);
+
+    // Rotate again to push the original token out of the grace window.
+    await harness.request("/api/session", { skipUserHeader: true, headers: { cookie: beforeRotation.cookie } });
+
+    const fullyStaleCsrf = await harness.request("/api/one-off", {
+      method: "POST",
+      skipUserHeader: true,
+      headers: {
+        cookie: beforeRotation.cookie,
+        "x-cashflow-csrf-token": beforeRotation.csrfToken
+      },
+      body: {
+        name: "Fully stale CSRF blocked",
+        type: "income",
+        amount: 1,
+        currency: "PLN",
+        date: "2026-06-01"
+      }
+    });
+    assert.equal(fullyStaleCsrf.response.status, 403);
 
     const freshCsrf = await harness.request("/api/one-off", {
       method: "POST",
@@ -361,12 +382,25 @@ test("offline operator command grants an audited system administrator role", asy
       body: { userId: "recovery_target" }
     });
 
-    const result = spawnSync(process.execPath, [
+    const noYesResult = spawnSync(process.execPath, [
       path.resolve(import.meta.dirname, "../../scripts/operator-admin.mjs"),
       "--data-dir",
       harness.dataDir,
       "--account-id",
       "recovery_target"
+    ], {
+      encoding: "utf8"
+    });
+    assert.equal(noYesResult.status, 0);
+    assert.match(noYesResult.stdout, /Run again with --yes to confirm/);
+
+    const result = spawnSync(process.execPath, [
+      path.resolve(import.meta.dirname, "../../scripts/operator-admin.mjs"),
+      "--data-dir",
+      harness.dataDir,
+      "--account-id",
+      "recovery_target",
+      "--yes"
     ], {
       encoding: "utf8"
     });
@@ -405,6 +439,46 @@ test("offline operator command grants an audited system administrator role", asy
     } finally {
       db.close();
     }
+
+    const revokeResult = spawnSync(process.execPath, [
+      path.resolve(import.meta.dirname, "../../scripts/operator-admin.mjs"),
+      "--data-dir",
+      harness.dataDir,
+      "--account-id",
+      "recovery_target",
+      "--revoke",
+      "--actor-account-id",
+      "recovery_target",
+      "--yes"
+    ], {
+      encoding: "utf8"
+    });
+    assert.equal(revokeResult.status, 0, revokeResult.stderr);
+    assert.match(revokeResult.stdout, /Revoked system_admin from recovery_target/);
+
+    const db2 = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
+    try {
+      assert.equal(db2.prepare(`
+        SELECT 1
+        FROM account_global_roles
+        WHERE account_id = 'recovery_target' AND role = 'system_admin'
+      `).get(), undefined);
+      
+      const revokeAudit = db2.prepare(`
+        SELECT details_json
+        FROM security_audit_log
+        WHERE action = 'operator_revoke_system_admin'
+          AND target_id = 'recovery_target'
+          AND outcome = 'success'
+          AND actor_account_id = 'recovery_target'
+      `).get();
+      assert.ok(revokeAudit);
+      const details = JSON.parse(revokeAudit.details_json);
+      assert.ok(details.operator_os_user);
+    } finally {
+      db2.close();
+    }
+
   } finally {
     await harness.cleanup();
   }
@@ -623,7 +697,8 @@ test("admin account async mutations can use an external global-store transaction
       listForAccount: () => []
     },
     invitations: {
-      revokePendingForTargetAccount: accountId => deleted.push(["invitations", accountId])
+      revokePendingForTargetAccount: accountId => deleted.push(["invitations", accountId]),
+      revokePendingIssuedByAccount: accountId => deleted.push(["invitationsIssued", accountId])
     },
     memberships: {
       countForAccount: () => 0,
@@ -733,6 +808,7 @@ test("admin account async mutations can use an external global-store transaction
   assert.deepEqual(deleted.map(row => row[0]).sort(), [
     "identities",
     "invitations",
+    "invitationsIssued",
     "passwordCredentials",
     "passwordResetTokens"
   ]);

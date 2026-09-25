@@ -78,3 +78,18 @@ export function requireEnum(value, field, allowed) {
   }
   return normalized;
 }
+
+
+export function requireString(value, field, { maxLength = null } = {}) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "object") {
+    validationError(field, "must_be_string", `${field} must be a string`);
+  }
+  const str = String(value).trim();
+  if (maxLength !== null && str.length > maxLength) {
+    validationError(field, "too_long", `${field} must be at most ${maxLength} characters`);
+  }
+  return str;
+}

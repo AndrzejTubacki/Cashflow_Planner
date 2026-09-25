@@ -12,7 +12,7 @@ import {
   runtimeLockName
 } from "../../src/server/cashflow-runtime-locks.js";
 
-function fakePgModule() {
+function fakePgModule({ failSchema = false } = {}) {
   const queries = [];
   const pools = [];
 
@@ -27,6 +27,7 @@ function fakePgModule() {
       return {
         async query(sql, params = []) {
           queries.push({ sql, params });
+          if (failSchema && String(sql).includes("CREATE TABLE")) throw new Error("schema unavailable");
           if (String(sql).includes("INSERT INTO cashflow_runtime_locks")) {
             return {
               rows: [{
@@ -93,7 +94,7 @@ test("runtime lock service is disabled by default", async () => {
     logServerEvent: (kind, details) => events.push({ kind, details })
   });
 
-  assert.equal(runtime.lockService, null);
+  assert.equal(typeof runtime.lockService.withLock, "function");
   assert.equal(runtime.config.enabled, false);
   assert.deepEqual(describeCashflowRuntimeLockConfig({}), {
     backend: "none",
@@ -157,7 +158,7 @@ test("runtime lock service can use Postgres without exposing connection details"
 
   assert.equal(runtime.config.backend, "postgres");
   assert.equal(runtime.lockService.ownerId, "test-owner");
-  assert.equal(events.some(entry => entry.kind === "cashflow_postgres_global_schema_ready"), true);
+  assert.equal(events.some(entry => entry.kind === "cashflow_postgres_lock_schema_ready"), true);
   assert.deepEqual(
     events.find(entry => entry.kind === "cashflow_runtime_lock_service_enabled")?.details,
     {
@@ -176,4 +177,76 @@ test("runtime lock service can use Postgres without exposing connection details"
 
   await runtime.close();
   assert.equal(fakePg.pools[0].ended, true);
+});
+
+// Exercise the startup configuration path itself, including accepted aliases.
+test("Postgres startup warns when runtime locks are disabled without leaking credentials", async () => {
+  for (const backend of ["postgres", "postgresql", "pg"]) {
+    for (const lockBackend of [undefined, "none", "off", "disabled"]) {
+      const errors = [];
+      const runtime = await createCashflowRuntimeLockService({
+        env: {
+          CASHFLOW_DB_BACKEND: backend,
+          CASHFLOW_DATABASE_URL: "postgres://user:private-password@private-host/db",
+          CASHFLOW_RUNTIME_LOCK_BACKEND: lockBackend
+        },
+        logError: (kind, details) => errors.push({ kind, details })
+      });
+      assert.equal(typeof runtime.lockService.withLock, "function");
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0].kind, "cashflow_postgres_runtime_locks_disabled");
+      assert.match(errors[0].details.message, /CASHFLOW_RUNTIME_LOCK_BACKEND=postgres/);
+      assert.doesNotMatch(JSON.stringify(errors), /private-password|private-host/);
+      await runtime.close();
+    }
+  }
+});
+
+test("SQLite startup and enabled Postgres locks do not emit the misconfiguration warning", async () => {
+  for (const env of [{}, { CASHFLOW_DB_BACKEND: "sqlite" }, {
+    CASHFLOW_DB_BACKEND: "postgres",
+    CASHFLOW_RUNTIME_LOCK_BACKEND: "postgres",
+    CASHFLOW_DATABASE_URL: "postgres://unused/test"
+  }]) {
+    const errors = [];
+    const runtime = await createCashflowRuntimeLockService({
+      env, pgModule: fakePgModule().module,
+      logError: (kind, details) => errors.push({ kind, details })
+    });
+    assert.deepEqual(errors, []);
+    await runtime.close();
+  }
+});
+
+// This is lifecycle instrumentation, not a replacement for the real concurrent
+// schema and pool-saturation regressions in hardening-postgres.integration.
+test("owned lock pool is capped and closed when schema initialization fails", async () => {
+  const fakePg = fakePgModule({ failSchema: true });
+  await assert.rejects(createCashflowRuntimeLockService({
+    env: { CASHFLOW_RUNTIME_LOCK_BACKEND: "postgres", CASHFLOW_DATABASE_URL: "postgres://unused/test" },
+    pgModule: fakePg.module
+  }), /schema unavailable/);
+  assert.equal(fakePg.pools.length, 1);
+  assert.equal(fakePg.pools[0].options.max, 10);
+  assert.equal(fakePg.pools[0].ended, true);
+});
+
+test("shutdown still drains a failed tick so storage cleanup can proceed", async () => {
+  const { createCashflowBackgroundJobs } = await import("../../src/server/cashflow-background-jobs.js");
+  let fail;
+  const gate = new Promise((resolve, reject) => { fail = reject; });
+  const errors = [];
+  const jobs = createCashflowBackgroundJobs({
+    listCashflowUserIdsAsync: () => gate,
+    logServerEvent: () => {},
+    logError: kind => errors.push(kind)
+  });
+  const tick = jobs.tickPerUserJobs();
+  const rejected = assert.rejects(tick, /injected tick failure/);
+  const drained = jobs.stopBackgroundJobs();
+  fail(new Error("injected tick failure"));
+  await rejected;
+  await drained;
+  assert.ok(errors.includes("cashflow_background_drain_failed"));
+  assert.deepEqual(await jobs.tickPerUserJobs(), { skipped: true, reason: "shutdown" });
 });

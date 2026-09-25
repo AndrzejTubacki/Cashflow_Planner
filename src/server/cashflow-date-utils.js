@@ -287,7 +287,25 @@ export function monthsOverlappingPeriod(period) {
 export function recurringOccurrencesInPeriod(item, period, today = null) {
   const occurrences = [];
 
-  for (const { year, month } of monthsOverlappingPeriod(period)) {
+  // Locate source months, not just months containing the final date. Undo
+  // offsets from the outside in (expense then linked income), widening for
+  // each business-day adjustment. A full month is a conservative bound for
+  // closures in the supported PL/DE calendars; offsets themselves are unbounded.
+  let sourceStart = new Date(`${period.start}T00:00:00Z`);
+  let sourceEnd = new Date(`${period.end}T00:00:00Z`);
+  for (let anchor = item; anchor;) {
+    if (anchor.anchor_business_day_adjustment === "next") sourceStart = addDaysUtc(sourceStart, -31);
+    if (anchor.anchor_business_day_adjustment === "previous") sourceEnd = addDaysUtc(sourceEnd, 31);
+    const income = anchor.anchor_income_id && anchor.anchor_income;
+    const offset = income || anchor.anchor_type !== "day_of_month"
+      ? Number(anchor.anchor_offset_days) || 0
+      : 0;
+    sourceStart = addDaysUtc(sourceStart, -offset);
+    sourceEnd = addDaysUtc(sourceEnd, -offset);
+    anchor = income || null;
+  }
+  const sourcePeriod = { start: dateStringFromUTC(sourceStart), end: dateStringFromUTC(sourceEnd) };
+  for (const { year, month } of monthsOverlappingPeriod(sourcePeriod)) {
     const date = calculateNextDate(item, year, month);
 
     if (!date) continue;

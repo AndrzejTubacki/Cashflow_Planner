@@ -4,27 +4,42 @@ export function normalizeCurrency(currency) {
 
 export const MONEY_DECIMAL_PLACES = 2;
 export const MONEY_SCALE = 10 ** MONEY_DECIMAL_PLACES;
-export const MONEY_EPSILON = 1 / MONEY_SCALE / 2;
 const MONEY_ROUNDING_EPSILON = 1e-8;
 
 export function roundMoneyAmount(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number)) return number;
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    console.error("roundMoneyAmount returning NaN for value:", value, new Error().stack);
+    return Number.NaN;
+  }
 
   const rounded = Math.sign(number) * Math.round((Math.abs(number) * MONEY_SCALE) + MONEY_ROUNDING_EPSILON) / MONEY_SCALE;
   return Object.is(rounded, -0) ? 0 : rounded;
 }
 
 export function addMoneyAmounts(...values) {
-  return roundMoneyAmount(values.reduce((sum, value) => sum + Number(value || 0), 0));
+  return roundMoneyAmount(values.reduce((sum, value) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return Number.NaN;
+    return sum + num;
+  }, 0));
 }
 
 export function subtractMoneyAmounts(value, ...subtractValues) {
-  return roundMoneyAmount(Number(value || 0) - subtractValues.reduce((sum, item) => sum + Number(item || 0), 0));
+  const base = Number(value);
+  if (!Number.isFinite(base)) return Number.NaN;
+  return roundMoneyAmount(base - subtractValues.reduce((sum, item) => {
+    const num = Number(item);
+    if (!Number.isFinite(num)) return Number.NaN;
+    return sum + num;
+  }, 0));
 }
 
 export function multiplyMoney(value, multiplier) {
-  return roundMoneyAmount(Number(value || 0) * Number(multiplier || 0));
+  const v = Number(value);
+  const m = Number(multiplier);
+  if (!Number.isFinite(v) || !Number.isFinite(m)) return Number.NaN;
+  return roundMoneyAmount(v * m);
 }
 
 function pairKey(base, quote) {

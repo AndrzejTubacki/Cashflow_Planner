@@ -8,6 +8,7 @@ import { SUPPORTED_FX_CURRENCIES as FRONTEND_CURRENCIES } from "../public/app/ca
 import { renderFundingOverview } from "../public/app/cashflow/funding.js";
 import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
 import { renderOneOffTab } from "../public/app/cashflow/one-off-tab.js";
+import { renderPriorityTab } from "../public/app/cashflow/priority-tab.js";
 import { renderCashflowPage } from "../public/app/cashflow/page.js";
 import { renderAdminTab } from "../public/app/cashflow/admin-tab.js";
 import { renderBudgetManagerTab } from "../public/app/cashflow/budget-manager-tab.js";
@@ -33,6 +34,42 @@ import {
 function assertNoMojibake(html) {
   assert.equal(/[\u00c4\u0102\u0139\u00e2\u00c2]/u.test(html), false, html);
 }
+
+test("transaction money cells render untrusted currency labels as text", async () => {
+  await loadLocale("en");
+  const currency = '<img src=x onerror="alert(1)">';
+  for (const funded of [false, true]) {
+    const html = renderTransactionTable([{
+      id: "untrusted-currency", name: "Imported transaction", type: "expense",
+      date: "2026-06-01", amount: 10, currency, ledger_currency: currency,
+      ledger_amount: 10, running_balance: 90,
+      ...(funded ? { funded_amount: 10, requested_amount: 20 } : {})
+    }], "en", { entityType: "future", canEdit: false });
+    // Cover ordinary, partial-funding, and running-balance HTML sinks.
+    assert.doesNotMatch(html, /<img\b/i);
+    assert.match(html, /&lt;img\b/i);
+  }
+});
+
+test("priority, funding, ledger summaries and goal notes escape currency once", async () => {
+  await loadLocale("en");
+  const currency = '<img src=x onerror="alert(1)">';
+  const goal = { id: "goal", name: "Goal", amount: 100, currency,
+    target_ledger_amount: 100, funded_confirmed_ledger: 10,
+    remaining_ledger: 90, priority: 1 };
+  const cashflow = {
+    settings: { ledger_currency: currency }, goals: [goal],
+    futureTransactions: [{ id: "future", date: "2026-06-10", period: "2026-06",
+      name: "Future", type: "expense", amount: 10, currency }],
+    periodSummaries: [{ period: "2026-06", income: 100, expenses: 10 }]
+  };
+  for (const render of [renderPriorityTab, renderFundingOverview, renderLedgerTab, renderGoalsTab]) {
+    const html = render("en", cashflow);
+    assert.doesNotMatch(html, /<img\b/i, render.name);
+    assert.match(html, /&lt;img\b/i, render.name);
+    assert.doesNotMatch(html, /&amp;lt;img\b/i, render.name);
+  }
+});
 
 test("app background is rendered by a fixed root layer for expanded pages", async () => {
   const css = await readFile(new URL("../public/styles/base.css", import.meta.url), "utf8");
@@ -309,6 +346,27 @@ test("frontend date defaults and one-off classification use the profile date", a
   assert.match(oneOffModal, /name="date" type="date" value="2030-01-02"/);
   assert.match(goalModal, /name="due_date" type="date" value="2030-01-02"/);
   assert.ok(oneOffTab.indexOf("Today item") < oneOffTab.indexOf("Past item"));
+});
+
+test("inactive recurring income displays disabled status instead of pending", async () => {
+  await loadLocale("en");
+
+  const cashflow = {
+    settings: { ledger_currency: "PLN" },
+    recurringIncomes: [
+      {
+        id: "rec-inc-disabled",
+        name: "Disabled Income",
+        amount: 8000,
+        currency: "PLN",
+        active: 0
+      }
+    ]
+  };
+
+  const incomeHtml = renderRecurringIncomeTab("en", cashflow);
+  assert.match(incomeHtml, /cashflow-status--disabled/);
+  assert.doesNotMatch(incomeHtml, /cashflow-status--pending/);
 });
 
 test("recurring tabs expose delete actions for recurring sources", async () => {

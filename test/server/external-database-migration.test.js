@@ -316,7 +316,7 @@ test("Postgres global schema DDL covers every current global table and invariant
   assert.match(sql, /prevent_last_system_admin_delete/);
   assert.match(sql, /prevent_budget_owner_demotion/);
   assert.doesNotMatch(sql, /datetime\('now'\)/);
-  assert.deepEqual(POSTGRES_COORDINATION_TABLES, ["cashflow_runtime_locks"]);
+  assert.deepEqual(POSTGRES_COORDINATION_TABLES, ["cashflow_runtime_locks", "cashflow_auth_rate_limits"]);
 
   for (const tableName of POSTGRES_GLOBAL_TABLES) {
     assert.match(sql, new RegExp(`CREATE TABLE IF NOT EXISTS ${tableName}\\b`));
@@ -372,6 +372,7 @@ test("Postgres budget db service initializes schema transactionally and checks r
   assert.deepEqual(ready, {
     ok: true,
     backend: "postgres",
+    budgetId: null,
     ledgerSchemaVersion: POSTGRES_LEDGER_SCHEMA_VERSION,
     planningSchemaVersion: POSTGRES_PLANNING_SCHEMA_VERSION
   });
@@ -972,6 +973,11 @@ test("SQLite budget store facade replaces planning tables and ledger years trans
 test("Postgres budget store facade exposes readiness, ledger years, and safe row counts", async () => {
   const fakePg = fakePgModule({
     queryHandler: async (sql, params) => {
+      // Readiness now verifies this budget's settings, as well as the schema.
+      if (String(sql).includes("SELECT 1 FROM settings WHERE budget_id")) {
+        assert.deepEqual(params, ["household"]);
+        return { rows: [{ "?column?": 1 }] };
+      }
       if (String(sql).includes("SELECT COUNT(*) AS count")) {
         assert.deepEqual(params, ["household"]);
         assert.match(String(sql), /FROM "pending_transactions" WHERE budget_id = \$1/);
@@ -1069,7 +1075,14 @@ test("Postgres budget store facade mirrors the SQLite runtime-neutral surface", 
     });
 
     assert.equal(postgres.backend, "postgres");
-    assert.deepEqual(budgetStoreSurface(postgres), budgetStoreSurface(sqlite));
+    const { readBackupArtifact, saveBackupArtifact, ...sharedSurface } = budgetStoreSurface(postgres);
+    assert.equal(readBackupArtifact, "function");
+    assert.equal(saveBackupArtifact, "function");
+    // SQLite groups planning replacement on one file connection; Postgres
+    // already offers a surrounding transaction across all budget storage.
+    const { replacePlanningTables, ...sqliteSharedSurface } = budgetStoreSurface(sqlite);
+    assert.equal(replacePlanningTables, "function");
+    assert.deepEqual(sharedSurface, sqliteSharedSurface);
 
     await postgres.close();
   });
@@ -2962,6 +2975,7 @@ test("Postgres lock service withLock releases after success and failure", async 
 
   assert.deepEqual(await service.withLock("projection:all", () => "done"), {
     acquired: true,
+    lockLost: false,
     result: "done"
   });
 
@@ -3344,7 +3358,7 @@ test("Postgres global store wraps repository access and transactions", async () 
   });
   assert.deepEqual(
     await lockService.withLock("background:tick", () => "locked", { ttlMs: 60_000 }),
-    { acquired: true, result: "locked" }
+    { acquired: true, lockLost: false, result: "locked" }
   );
   await store.close();
 
@@ -3353,7 +3367,7 @@ test("Postgres global store wraps repository access and transactions", async () 
   assert.equal(fakePg.queries.filter(entry => entry.sql === "COMMIT").length, 2);
   assert.equal(fakePg.queries.filter(entry => entry.sql === "ROLLBACK").length, 1);
   assert.equal(fakePg.queries.some(entry => String(entry.sql).includes("INSERT INTO cashflow_runtime_locks")), true);
-  assert.equal(fakePg.releases.length, 7);
+  assert.equal(fakePg.releases.length, 8);
 });
 
 test("SQLite global store mirrors the Postgres store surface and initializes legacy budgets", async () => {
@@ -3372,7 +3386,10 @@ test("SQLite global store mirrors the Postgres store surface and initializes leg
     });
 
     assert.equal(sqlite.backend, "sqlite");
-    assert.deepEqual(globalStoreSurface(sqlite), globalStoreSurface(postgres));
+    const { createAuthRateLimitStore, initializeLockSchema, ...sharedSurface } = globalStoreSurface(postgres);
+    assert.equal(createAuthRateLimitStore, "function");
+    assert.equal(initializeLockSchema, "function");
+    assert.deepEqual(globalStoreSurface(sqlite), sharedSurface);
     assert.deepEqual(sqlite.checkReadiness(), {
       ok: true,
       backend: "sqlite",
@@ -3671,21 +3688,19 @@ test("Postgres global store writes and replaces rows through the neutral writer 
     fakePg.queries.map(entry => entry.sql === "BEGIN" || entry.sql === "COMMIT"
       ? entry.sql
       : String(entry.sql).includes('INSERT INTO "accounts"') ? "INSERT_ACCOUNT"
-        : String(entry.sql).includes('ALTER TABLE "auth_config" DISABLE TRIGGER USER') ? "DISABLE_AUTH_CONFIG"
+        : String(entry.sql).includes('SET CONSTRAINTS ALL DEFERRED') ? "SET_CONSTRAINTS"
           : String(entry.sql).includes('DELETE FROM "auth_config"') ? "DELETE_AUTH_CONFIG"
             : String(entry.sql).includes('INSERT INTO "auth_config"') ? "INSERT_AUTH_CONFIG"
-              : String(entry.sql).includes('ALTER TABLE "auth_config" ENABLE TRIGGER USER') ? "ENABLE_AUTH_CONFIG"
-                : "OTHER"
+              : "OTHER"
     ),
     [
       "BEGIN",
       "INSERT_ACCOUNT",
       "COMMIT",
       "BEGIN",
-      "DISABLE_AUTH_CONFIG",
+      "SET_CONSTRAINTS",
       "DELETE_AUTH_CONFIG",
       "INSERT_AUTH_CONFIG",
-      "ENABLE_AUTH_CONFIG",
       "COMMIT"
     ]
   );

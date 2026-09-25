@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import {
   importSqliteBudgetStorageToPostgres
 } from "../src/server/cashflow-postgres-budget-import.js";
@@ -11,46 +13,9 @@ import {
   createBudgetStoreImportPlan
 } from "../src/server/cashflow-budget-store-import-plan.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    apply: false,
-    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
-    dryRun: true,
-    input: "",
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--input") {
-      options.input = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--database-url") {
-      options.databaseUrl = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--apply") {
-      options.apply = true;
-      options.dryRun = false;
-    } else if (arg === "--dry-run") {
-      options.dryRun = true;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  if (!options.help && !options.input) {
-    throw new Error("--input is required");
-  }
-
-  return options;
-}
 
 function usage() {
-  return `Usage: npm run db:budget:import-postgres -- --input PATH [--dry-run|--apply] [--database-url URL] [--pretty]
+  return `Usage: npm run db:budget:import-postgres -- --input PATH [--dry-run|--apply] [--pretty]
 
 Validates or imports a sensitive SQLite budget-storage export into the draft Postgres schema.
 Dry-run mode does not connect to Postgres. Apply mode requires a Postgres driver and database URL.`;
@@ -96,7 +61,7 @@ export async function importBudgetStorageCli(options = parseArgs()) {
   }
 
   if (!String(options.databaseUrl || "").trim()) {
-    throw new Error("CASHFLOW_DATABASE_URL or --database-url is required for apply mode");
+    throw new Error("CASHFLOW_DATABASE_URL is required for apply mode");
   }
 
   const pgModule = await loadPgModule();
@@ -122,17 +87,34 @@ export async function importBudgetStorageCli(options = parseArgs()) {
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--input"],
+    boolean: ["--apply","--pretty"],
+    defaults: {
+    apply: false,
+    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
+    dryRun: true,
+    input: "",
+    pretty: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
+  }
+
+  if (options.apply) {
+    console.error("\nWARNING: You are running a standalone migration script with --apply.");
+    console.error("This will migrate only the budget data. Your Postgres database may end up in a partially migrated state.");
+    console.error("Please run 'npm run db:verify-postgres' immediately afterwards to verify consistency.");
+    console.error("For safe, atomic migrations, use 'npm run db:migrate' instead.\n");
   }
 
   const result = await importBudgetStorageCli(options);
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     if (error.details) {

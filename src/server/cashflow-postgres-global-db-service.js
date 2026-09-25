@@ -33,7 +33,8 @@ export async function createPostgresGlobalDbService({
   databaseUrl,
   logError = () => {},
   logServerEvent = () => {},
-  pgModule = null
+  pgModule = null,
+  poolMax = 10
 } = {}) {
   if (!String(databaseUrl || "").trim()) missingDatabaseUrlError();
 
@@ -46,7 +47,10 @@ export async function createPostgresGlobalDbService({
   }
 
   const pool = new Pool({
-    connectionString: databaseUrl
+    // Bound each owned pool; shared locks use short per-query checkouts.
+    connectionString: databaseUrl,
+    max: poolMax,
+    connectionTimeoutMillis: 10_000
   });
 
   async function withClient(fn) {
@@ -89,6 +93,8 @@ export async function createPostgresGlobalDbService({
         "SELECT version FROM cashflow_global_schema_version WHERE id = $1",
         [1]
       );
+      // Check additive operational schema without applying migrations at boot.
+      await client.query("SELECT 1 FROM cashflow_auth_rate_limits LIMIT 0");
       const version = Number(result?.rows?.[0]?.version);
       if (version !== POSTGRES_GLOBAL_SCHEMA_VERSION) {
         const error = new Error(

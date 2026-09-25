@@ -5,43 +5,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import { createPostgresBudgetStore } from "../src/server/cashflow-budget-store.js";
 import { createPostgresGlobalStore } from "../src/server/cashflow-postgres-global-store.js";
 import { createCashflowStorageSnapshot } from "../src/server/cashflow-storage-snapshot.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    budgetIds: "",
-    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
-    outputDir: path.resolve("external-database-exports"),
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--budget-ids") {
-      options.budgetIds = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--database-url") {
-      options.databaseUrl = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--output-dir") {
-      options.outputDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
-  return `Usage: npm run db:postgres:export -- [--budget-ids id1,id2] [--output-dir PATH] [--database-url URL] [--pretty]
+  return `Usage: npm run db:postgres:export -- [--budget-ids id1,id2] [--output-dir PATH] [--pretty]
 
 Exports every account/budget/membership row plus the given budgets' planning
 and ledger data from Postgres into a sensitive JSON migration artifact.
@@ -56,7 +28,7 @@ export async function exportPostgresStorage({
   outputDir = path.resolve("external-database-exports")
 } = {}) {
   if (!String(databaseUrl || "").trim()) {
-    throw new Error("CASHFLOW_DATABASE_URL or --database-url is required");
+    throw new Error("CASHFLOW_DATABASE_URL is required");
   }
 
   const targetRoot = path.resolve(outputDir);
@@ -119,7 +91,16 @@ export async function exportPostgresStorageCli(options = parseArgs()) {
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--budget-ids","--output-dir"],
+    boolean: ["--pretty"],
+    defaults: {
+    budgetIds: "",
+    databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
+    outputDir: path.resolve("external-database-exports"),
+    pretty: false
+  }
+  });
   const result = await exportPostgresStorageCli(options);
   if (result.help) {
     console.log(result.help);
@@ -128,7 +109,7 @@ async function main() {
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

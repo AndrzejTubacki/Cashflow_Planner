@@ -8,7 +8,8 @@ import {
   requireMoneyAmount,
   requireNullableMoneyAmount,
   requireNullableNumber,
-  requireNumber
+  requireNumber,
+  requireString
 } from "./cashflow-input-validation.js";
 
 const PREDICTION_SUBSTITUTES = [
@@ -26,6 +27,8 @@ function normalizeIfPresent(next, field, normalize) {
 }
 
 function validateCommon(next, kind) {
+  normalizeIfPresent(next, "name", (value, field) => requireString(value, field, { maxLength: 255 }));
+  normalizeIfPresent(next, "note", (value, field) => requireString(value, field, { maxLength: 2000 }));
   normalizeIfPresent(next, "currency", requireSupportedCurrency);
   if (hasOwn(next, "amount")) {
     next.amount = requireMoneyAmount(next.amount, "amount", { min: kind === "goal" ? 0.01 : 0 });

@@ -10,15 +10,9 @@ import {
   SUPPORTED_FX_CURRENCIES,
   TIMEZONE_OPTIONS
 } from "./constants.js";
-import { t } from "./shared.js";
+import { t, renderCurrencyOptions, renderTimezoneDatalist, renderHolidayCountryOptions } from "./shared.js";
 
-function renderCurrencyOptions(selected) {
-  return SUPPORTED_FX_CURRENCIES.map(currency => `
-    <option value="${escapeHtml(currency)}"${currency === selected ? " selected" : ""}>
-      ${escapeHtml(currency)}
-    </option>
-  `).join("");
-}
+
 
 function isSystemAdmin(account) {
   return Array.isArray(account?.globalRoles) && account.globalRoles.includes("system_admin");
@@ -399,17 +393,13 @@ export function renderAdminTab(locale, cashflow = null) {
             <span>${escapeHtml(t(locale, "Default timezone"))}</span>
             <input name="timezone" value="${escapeHtml(options.timezone || DEFAULT_TIMEZONE)}" list="cashflow-admin-timezones">
             <datalist id="cashflow-admin-timezones">
-              ${TIMEZONE_OPTIONS.map(timezone => `<option value="${escapeHtml(timezone)}"></option>`).join("")}
+              ${renderTimezoneDatalist()}
             </datalist>
           </label>
           <label>
             <span>${escapeHtml(t(locale, "Default holiday country"))}</span>
             <select name="holiday_country">
-              ${HOLIDAY_COUNTRIES.map(country => `
-                <option value="${escapeHtml(country.code)}"${country.code === selectedHolidayCountry ? " selected" : ""}>
-                  ${escapeHtml(country.code)} - ${escapeHtml(t(locale, country.labelKey))}
-                </option>
-              `).join("")}
+              ${renderHolidayCountryOptions(locale, selectedHolidayCountry)}
             </select>
           </label>
           <label>

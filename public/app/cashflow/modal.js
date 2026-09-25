@@ -142,7 +142,10 @@ function coerceCashflowModalPayload(entityType, form) {
     } else if (data[field] !== undefined) {
       const normalized = normalizeCashflowNumericInput(data[field]);
       const parsed = Number(normalized);
-      data[field] = Number.isFinite(parsed) ? parsed : data[field];
+      if (!Number.isFinite(parsed)) {
+        throw new Error(`Invalid numeric value provided for ${field.replace(/_/g, " ")}`);
+      }
+      data[field] = parsed;
     }
   }
 

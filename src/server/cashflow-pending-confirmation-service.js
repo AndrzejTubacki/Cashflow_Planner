@@ -131,12 +131,16 @@ export function createCashflowPendingConfirmationService({
       throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
     }
 
-    return runRecoverableUserMutation(userId, "confirm_pending_transaction", async () => {
+    const confirmationResult = await runRecoverableUserMutation(userId, "confirm_pending_transaction", async () => {
       const year = confirmedDate.slice(0, 4);
       const ledgerDb = openLedgerDb(userId, year);
       let result;
       try {
         result = ledgerDb.transaction(() => {
+          if (!isLedgerConversion && wouldLedgerGoNegativeAfterInsert(userId, candidate)) {
+            return null;
+          }
+
           ledgerDb.prepare(`
             INSERT INTO confirmed_transactions (
               id, name, currency, amount, type, date, confirmed_date,
@@ -171,6 +175,10 @@ export function createCashflowPendingConfirmationService({
         ledgerDb.close();
       }
 
+      if (result === null) {
+        return null;
+      }
+
       const db = openPlanningDb(userId);
       try {
         if (pendingHadOccurrenceKey) {
@@ -185,6 +193,11 @@ export function createCashflowPendingConfirmationService({
       recalculateLedgerRunningBalance(userId);
       return withProjectionStatus(userId, result);
     });
+
+    if (confirmationResult === null) {
+      throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
+    }
+    return confirmationResult;
   }
 
   function rowById(rows, id) {

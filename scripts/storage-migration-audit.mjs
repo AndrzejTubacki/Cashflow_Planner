@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import Database from "better-sqlite3";
 
 import { GLOBAL_TABLE_NAMES } from "../src/server/cashflow-global-schema.js";
@@ -13,31 +15,6 @@ import {
   PLANNING_TABLE_NAMES
 } from "../src/server/cashflow-schema.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    includeIdentifiers: false,
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--include-identifiers") {
-      options.includeIdentifiers = true;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
 
 function usage() {
   return `Usage: npm run db:audit -- [--data-dir PATH] [--pretty] [--include-identifiers]
@@ -235,7 +212,15 @@ export function auditSqliteStorage({
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--data-dir"],
+    boolean: ["--include-identifiers","--pretty"],
+    defaults: {
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    includeIdentifiers: false,
+    pretty: false
+  }
+  });
   if (options.help) {
     console.log(usage());
     return;
@@ -245,7 +230,7 @@ async function main() {
   console.log(JSON.stringify(report, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

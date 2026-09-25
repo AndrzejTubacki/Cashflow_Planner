@@ -636,10 +636,18 @@ export function createCashflowGlobalService({
     }
   }
 
-  function userExists(userId) {
+  function checkLocalUserExists(userId) {
     const normalizedId = normalizeUserId(userId);
-    if (normalizedId === "local") return true;
-    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) return true;
+    if (normalizedId === "local") return { exists: true, normalizedId };
+    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) {
+      return { exists: true, normalizedId };
+    }
+    return { exists: false, normalizedId };
+  }
+
+  function userExists(userId) {
+    const { exists, normalizedId } = checkLocalUserExists(userId);
+    if (exists) return true;
 
     const db = openGlobalDb();
     try {
@@ -650,9 +658,9 @@ export function createCashflowGlobalService({
   }
 
   async function userExistsAsync(userId) {
-    const normalizedId = normalizeUserId(userId);
-    if (normalizedId === "local") return true;
-    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) return true;
+    const { exists, normalizedId } = checkLocalUserExists(userId);
+    if (exists) return true;
+    
     return await withGlobalRepository(async repo => Boolean(await repo.users.getMetadata(normalizedId)));
   }
 
@@ -740,6 +748,12 @@ export function createCashflowGlobalService({
   }
 
   async function listUsersAsync() {
+    if (!globalStore || globalStore.backend !== "postgres") {
+      // Delegate to sync version: SQLite needs a single synchronous transaction
+      // block to ensure metadata and compatibility budgets atomically, which
+      // the async repo iteration cannot provide.
+      return listUsers();
+    }
     return await withGlobalRepository(async repo => {
       const ids = new Set(["local", ...listCashflowUserIds()]);
       for (const userId of ids) {
@@ -832,6 +846,9 @@ export function createCashflowGlobalService({
   }
 
   async function listAdminAccountsAsync() {
+    if (!globalStore || globalStore.backend !== "postgres") {
+      return listAdminAccounts();
+    }
     return await withGlobalRepository(async repo => {
       const rows = await repo.accounts.listAdminIds();
       const accounts = [];
@@ -842,8 +859,7 @@ export function createCashflowGlobalService({
     });
   }
 
-  function updateAdminAccount(actorAccountId, accountId, input = {}) {
-    const normalizedId = normalizeUserId(accountId);
+  function prepareAdminAccountUpdate(input = {}) {
     const updates = {};
     if (Object.prototype.hasOwnProperty.call(input, "displayName") || Object.prototype.hasOwnProperty.call(input, "display_name")) {
       updates.displayName = normalizeAccountDisplayName(input.displayName ?? input.display_name, "displayName");
@@ -861,6 +877,12 @@ export function createCashflowGlobalService({
       }
       updates.status = status;
     }
+    return updates;
+  }
+
+  function updateAdminAccount(actorAccountId, accountId, input = {}) {
+    const normalizedId = normalizeUserId(accountId);
+    const updates = prepareAdminAccountUpdate(input);
 
     const db = openGlobalDb();
     try {
@@ -879,7 +901,7 @@ export function createCashflowGlobalService({
           try {
             repo.accounts.updateEmail(normalizedId, updates.email);
           } catch (error) {
-            if (String(error?.message || "").includes("UNIQUE")) {
+            if (String(error?.message || "").includes("UNIQUE") || error?.code === "23505") {
               throw conflict("Email is already assigned to another account", [{
                 field: "email",
                 reason: "not_unique"
@@ -922,24 +944,13 @@ export function createCashflowGlobalService({
 
   async function updateAdminAccountAsync(actorAccountId, accountId, input = {}) {
     const normalizedId = normalizeUserId(accountId);
-    const updates = {};
-    if (Object.prototype.hasOwnProperty.call(input, "displayName") || Object.prototype.hasOwnProperty.call(input, "display_name")) {
-      updates.displayName = normalizeAccountDisplayName(input.displayName ?? input.display_name, "displayName");
-    }
-    if (Object.prototype.hasOwnProperty.call(input, "email")) {
-      updates.email = normalizeAccountEmail(input.email, "email");
-    }
-    if (Object.prototype.hasOwnProperty.call(input, "status")) {
-      const status = String(input.status || "").trim();
-      if (!["active", "disabled"].includes(status)) {
-        throw badRequest("status must be active or disabled", [{
-          field: "status",
-          reason: "unsupported_value"
-        }]);
-      }
-      updates.status = status;
-    }
+    const updates = prepareAdminAccountUpdate(input);
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
+    // The sync fallback delegates entirely to the SQLite implementation.
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await repo.accounts.require(normalizedId);
       if (account.status === "deleted") throw conflict("Deleted accounts cannot be changed");
@@ -1030,6 +1041,9 @@ export function createCashflowGlobalService({
   async function setAccountSystemAdminAsync(actorAccountId, accountId, enabledValue) {
     const normalizedId = normalizeUserId(accountId);
     const enabled = normalizeAdminBoolean(enabledValue, "enabled");
+    
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await repo.accounts.require(normalizedId);
       if (account.status !== "active") throw conflict("Only active accounts can hold system administrator role");
@@ -1088,6 +1102,8 @@ export function createCashflowGlobalService({
     const normalizedSessionId = String(sessionId || "").trim();
     if (!normalizedSessionId) throw badRequest("sessionId is required", [{ field: "sessionId", reason: "required" }]);
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await repo.accounts.require(normalizedId);
       const changes = await repo.sessions.revoke(normalizedSessionId, normalizedId);
@@ -1132,6 +1148,7 @@ export function createCashflowGlobalService({
         repo.passwordCredentials.deleteForAccount(normalizedId);
         repo.passwordResetTokens.deleteForAccount(normalizedId);
         repo.invitations.revokePendingForTargetAccount(normalizedId);
+        repo.invitations.revokePendingIssuedByAccount(normalizedId);
         repo.accounts.markDeleted(normalizedId);
         repo.users.setPermissions(normalizedId, "[]");
         auditGlobalSecurity(db, {
@@ -1150,6 +1167,9 @@ export function createCashflowGlobalService({
 
   async function deleteAdminAccountAsync(actorAccountId, accountId) {
     const normalizedId = normalizeUserId(accountId);
+    
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await repo.accounts.require(normalizedId);
       if (account.status === "deleted") {
@@ -1173,6 +1193,7 @@ export function createCashflowGlobalService({
       await repo.passwordCredentials.deleteForAccount(normalizedId);
       await repo.passwordResetTokens.deleteForAccount(normalizedId);
       await repo.invitations.revokePendingForTargetAccount(normalizedId);
+      await repo.invitations.revokePendingIssuedByAccount(normalizedId);
       await repo.accounts.markDeleted(normalizedId);
       await repo.users.setPermissions(normalizedId, "[]");
       await repo.audit.insertSecurityEvent({
@@ -1201,6 +1222,9 @@ export function createCashflowGlobalService({
   }
 
   async function listActiveBudgetIdsAsync() {
+    if (!globalStore || globalStore.backend !== "postgres") {
+      return listActiveBudgetIds();
+    }
     return await withGlobalRepository(async repo => {
       await syncExistingStorageBudgetsForRepo(repo);
       const rows = await repo.budgets.listActiveStorage();
@@ -1221,6 +1245,17 @@ export function createCashflowGlobalService({
     } finally {
       db.close();
     }
+  }
+
+  async function resolveBudgetStorageKeyAsync(budgetId = "") {
+    if (!globalStore || globalStore.backend !== "postgres") {
+      return resolveBudgetStorageKey(budgetId);
+    }
+    const normalizedId = normalizeUserId(budgetId);
+    return await withGlobalRepository(async repo => {
+      const budget = await repo.budgets.get(normalizedId);
+      return budget?.storage_key || normalizedId;
+    });
   }
 
   function createUser(input = {}) {
@@ -2064,6 +2099,9 @@ export function createCashflowGlobalService({
 
   async function upsertAdminAuthProviderAsync(actorAccountId, providerId, input = {}) {
     const id = normalizeAuthProviderId(providerId);
+    
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const existing = await repo.authProviders.get(id);
       const next = normalizeProviderPayload(id, input, existing || null);
@@ -2115,6 +2153,9 @@ export function createCashflowGlobalService({
 
   async function deleteAdminAuthProviderAsync(actorAccountId, providerId) {
     const id = normalizeAuthProviderId(providerId);
+    
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const row = await authProviderRowForRepo(repo, id);
       await repo.authProviders.delete(row.id);
@@ -2614,6 +2655,8 @@ export function createCashflowGlobalService({
     const emailVerified = providerEmailVerifiedFromProfile(prepared.provider, profile);
     const displayName = providerDisplayNameFromProfile(prepared.provider, profile, email || subject);
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const freshState = await repo.oauthStates.get(prepared.stateRow.id);
       if (!freshState || freshState.status !== "pending") {
@@ -2763,6 +2806,8 @@ export function createCashflowGlobalService({
       "emailVerified"
     );
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await repo.accounts.require(normalizedAccountId);
       if (account.status !== "active") throw conflict("Only active accounts can receive provider identities");
@@ -2872,6 +2917,8 @@ export function createCashflowGlobalService({
       "emailVerified"
     );
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await repo.accounts.require(normalizedId);
       if (account.status !== "active") throw conflict("Only active accounts can receive external identities");
@@ -2990,6 +3037,8 @@ export function createCashflowGlobalService({
     const tokenHash = authTokenHash(token);
     const expiresAt = addHoursIso(PASSWORD_TOKEN_TTL_HOURS);
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const account = await repo.accounts.require(normalizedId);
       if (account.status !== "active") throw conflict("Only active accounts can receive password setup links");
@@ -3108,6 +3157,8 @@ export function createCashflowGlobalService({
     const tokenHash = authTokenHash(rawToken);
     const nowMs = Date.now();
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const tokenRow = await repo.passwordResetTokens.getPendingWithAccountByHash(tokenHash);
       if (!tokenRow || Date.parse(tokenRow.expires_at) <= nowMs || tokenRow.account_status !== "active") {
@@ -3253,6 +3304,8 @@ export function createCashflowGlobalService({
     });
 
     const verified = await argon2.verify(row.password_hash, passwordMaterial(input.password));
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       if (!verified) {
         const attempts = Number(row.failed_attempts || 0) + 1;
@@ -3385,6 +3438,8 @@ export function createCashflowGlobalService({
     const invitationHash = authTokenHash(rawToken);
     const accountId = `account_${crypto.randomUUID()}`;
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const config = await repo.authConfig.getActiveMode();
       if ((config.active_mode || "none") !== "internal") {
@@ -3602,6 +3657,8 @@ export function createCashflowGlobalService({
   }
 
   async function authenticateExternalLogin(headers = {}) {
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const config = authConfigFromRow(await repo.authConfig.get() || {});
       if (config.activeMode !== "external") {
@@ -3816,6 +3873,8 @@ export function createCashflowGlobalService({
         ? normalizeDraftAuthConfig(safeJsonParseObject(input.draftConfig ?? input.draft_config, "draftConfig"))
         : current.draftConfig;
 
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       await repo.authConfig.updateDraft({
         draftMode,
@@ -3905,6 +3964,8 @@ export function createCashflowGlobalService({
   }
 
   async function testAdminAuthDraftAsync(actorAccountId) {
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const config = authConfigFromRow(await repo.authConfig.get() || {});
       const activeAdminCount = await repo.accounts.countActiveSystemAdmins();
@@ -4014,6 +4075,8 @@ export function createCashflowGlobalService({
   }
 
   async function activateAdminAuthDraftAsync(actorAccountId) {
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
       const config = authConfigFromRow(await repo.authConfig.get() || {});
       const activeAdminCount = await repo.accounts.countActiveSystemAdmins();

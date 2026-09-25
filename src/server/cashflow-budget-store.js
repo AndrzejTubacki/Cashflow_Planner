@@ -707,13 +707,23 @@ export function createSqliteBudgetStore({
     try {
       const insertRows = db.transaction(() => {
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: false });
-          const statement = db.prepare(`
-            INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map(() => "?").join(", ")})
-          `);
-          inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+        if (normalized.length > 0) {
+          const colSetMap = new Map();
+          for (const row of normalized) {
+             const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: false });
+             const key = columns.join(',');
+             if (!colSetMap.has(key)) colSetMap.set(key, { columns, rows: [] });
+             colSetMap.get(key).rows.push(row);
+          }
+          for (const { columns, rows } of colSetMap.values()) {
+             const statement = db.prepare(`
+               INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
+               VALUES (${columns.map(() => "?").join(", ")})
+             `);
+             for (const row of rows) {
+               inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+             }
+          }
         }
         return inserted;
       });
@@ -730,17 +740,27 @@ export function createSqliteBudgetStore({
     try {
       const updateRows = db.transaction(() => {
         let updated = 0;
-        for (const update of normalized) {
-          const columns = Object.keys(update.values);
-          const statement = db.prepare(`
-            UPDATE ${quoteIdentifier(safeTable)}
-            SET ${columns.map(column => `${quoteIdentifier(column)} = ?`).join(", ")}
-            WHERE id = ?
-          `);
-          updated += statement.run([
-            ...columns.map(column => normalizeSqliteBindValue(update.values[column])),
-            update.id
-          ]).changes;
+        if (normalized.length > 0) {
+          const colSetMap = new Map();
+          for (const update of normalized) {
+             const columns = Object.keys(update.values);
+             const key = columns.join(',');
+             if (!colSetMap.has(key)) colSetMap.set(key, { columns, updates: [] });
+             colSetMap.get(key).updates.push(update);
+          }
+          for (const { columns, updates } of colSetMap.values()) {
+             const statement = db.prepare(`
+               UPDATE ${quoteIdentifier(safeTable)}
+               SET ${columns.map(column => `${quoteIdentifier(column)} = ?`).join(", ")}
+               WHERE id = ?
+             `);
+             for (const update of updates) {
+               updated += statement.run([
+                 ...columns.map(column => normalizeSqliteBindValue(update.values[column])),
+                 update.id
+               ]).changes;
+             }
+          }
         }
         return updated;
       });
@@ -903,6 +923,47 @@ export function createSqliteBudgetStore({
     }
   }
 
+
+  async function replacePlanningTables(budgetId, batches = []) {
+    const db = openPlanningDb(budgetId);
+    try {
+      db.pragma("defer_foreign_keys = ON");
+      const replaceAll = db.transaction(() => {
+        const results = [];
+        for (const batch of batches) {
+          const safeTable = assertPlanningTable(batch.tableName);
+          const normalized = normalizePlanningRowsForInsert(budgetId, safeTable, batch.rows);
+          db.prepare(`DELETE FROM ${quoteIdentifier(safeTable)}`).run();
+          let inserted = 0;
+          if (normalized.length > 0) {
+            const colSet = new Set();
+            for (const r of normalized) {
+              for (const k of Object.keys(r)) {
+                if (r[k] !== undefined) colSet.add(k);
+              }
+            }
+            const columns = POSTGRES_BUDGET_COLUMNS[safeTable]
+              .filter(c => c !== "budget_id")
+              .filter(c => colSet.has(c));
+
+            const statement = db.prepare(`
+              INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
+              VALUES (${columns.map(() => "?").join(", ")})
+            `);
+            for (const row of normalized) {
+              inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+            }
+          }
+          results.push({ inserted });
+        }
+        return results;
+      });
+      return replaceAll();
+    } finally {
+      db.close();
+    }
+  }
+
   async function replacePlanningRows(budgetId, tableName, rows = []) {
     const safeTable = assertPlanningTable(tableName);
     const normalized = normalizePlanningRowsForInsert(budgetId, safeTable, rows);
@@ -912,13 +973,23 @@ export function createSqliteBudgetStore({
       const replaceRows = db.transaction(() => {
         db.prepare(`DELETE FROM ${quoteIdentifier(safeTable)}`).run();
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: false });
-          const statement = db.prepare(`
-            INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map(() => "?").join(", ")})
-          `);
-          inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+        if (normalized.length > 0) {
+          const colSetMap = new Map();
+          for (const row of normalized) {
+             const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: false });
+             const key = columns.join(',');
+             if (!colSetMap.has(key)) colSetMap.set(key, { columns, rows: [] });
+             colSetMap.get(key).rows.push(row);
+          }
+          for (const { columns, rows } of colSetMap.values()) {
+             const statement = db.prepare(`
+               INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
+               VALUES (${columns.map(() => "?").join(", ")})
+             `);
+             for (const row of rows) {
+               inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+             }
+          }
         }
         return inserted;
       });
@@ -1042,14 +1113,24 @@ export function createSqliteBudgetStore({
     try {
       const insertRows = db.transaction(() => {
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: false })
-            .filter(column => column !== "ledger_year");
-          const statement = db.prepare(`
-            INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map(() => "?").join(", ")})
-          `);
-          inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+        if (normalized.length > 0) {
+          const colSetMap = new Map();
+          for (const row of normalized) {
+             const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: false })
+               .filter(column => column !== "ledger_year");
+             const key = columns.join(',');
+             if (!colSetMap.has(key)) colSetMap.set(key, { columns, rows: [] });
+             colSetMap.get(key).rows.push(row);
+          }
+          for (const { columns, rows } of colSetMap.values()) {
+             const statement = db.prepare(`
+               INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
+               VALUES (${columns.map(() => "?").join(", ")})
+             `);
+             for (const row of rows) {
+               inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+             }
+          }
         }
         return inserted;
       });
@@ -1073,17 +1154,27 @@ export function createSqliteBudgetStore({
     try {
       const updateRows = db.transaction(() => {
         let updated = 0;
-        for (const update of normalized) {
-          const columns = Object.keys(update.values);
-          const statement = db.prepare(`
-            UPDATE confirmed_transactions
-            SET ${columns.map(column => `${quoteIdentifier(column)} = ?`).join(", ")}
-            WHERE id = ?
-          `);
-          updated += statement.run([
-            ...columns.map(column => normalizeSqliteBindValue(update.values[column])),
-            update.id
-          ]).changes;
+        if (normalized.length > 0) {
+          const colSetMap = new Map();
+          for (const update of normalized) {
+             const columns = Object.keys(update.values);
+             const key = columns.join(',');
+             if (!colSetMap.has(key)) colSetMap.set(key, { columns, updates: [] });
+             colSetMap.get(key).updates.push(update);
+          }
+          for (const { columns, updates } of colSetMap.values()) {
+             const statement = db.prepare(`
+               UPDATE confirmed_transactions
+               SET ${columns.map(column => `${quoteIdentifier(column)} = ?`).join(", ")}
+               WHERE id = ?
+             `);
+             for (const update of updates) {
+               updated += statement.run([
+                 ...columns.map(column => normalizeSqliteBindValue(update.values[column])),
+                 update.id
+               ]).changes;
+             }
+          }
         }
         return updated;
       });
@@ -1132,14 +1223,24 @@ export function createSqliteBudgetStore({
       const replaceRows = db.transaction(() => {
         db.prepare("DELETE FROM confirmed_transactions").run();
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: false })
-            .filter(column => column !== "ledger_year");
-          const statement = db.prepare(`
-            INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map(() => "?").join(", ")})
-          `);
-          inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+        if (normalized.length > 0) {
+          const colSetMap = new Map();
+          for (const row of normalized) {
+             const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: false })
+               .filter(column => column !== "ledger_year");
+             const key = columns.join(',');
+             if (!colSetMap.has(key)) colSetMap.set(key, { columns, rows: [] });
+             colSetMap.get(key).rows.push(row);
+          }
+          for (const { columns, rows } of colSetMap.values()) {
+             const statement = db.prepare(`
+               INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
+               VALUES (${columns.map(() => "?").join(", ")})
+             `);
+             for (const row of rows) {
+               inserted += statement.run(columns.map(column => normalizeSqliteBindValue(row[column]))).changes;
+             }
+          }
         }
         return inserted;
       });
@@ -1226,6 +1327,7 @@ export function createSqliteBudgetStore({
     pendingTransactionExistsByOccurrenceKey,
     replaceConfirmedTransactionsForYear,
     replacePlanningRows,
+    replacePlanningTables,
     sumFutureLedgerAmountBySource,
     updateConfirmedTransactionsById,
     updatePlanningRowsById,
@@ -1239,6 +1341,25 @@ export async function createPostgresBudgetStore(options = {}) {
   const service = await createPostgresBudgetDbService(options);
 
   function repositoryForClient(client) {
+
+    async function saveBackupArtifact(budgetId, metadata, payloadText) {
+      await client.query(`
+        INSERT INTO backup_metadata (budget_id, id, backup_timestamp, backup_path, size_bytes, success, error_message, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        budgetId, metadata.id, metadata.backup_timestamp, metadata.backup_path, metadata.size_bytes, metadata.success, metadata.error_message, metadata.created_at
+      ]);
+      await client.query(`
+        INSERT INTO cashflow_backup_artifacts (budget_id, id, payload, created_at)
+        VALUES ($1, $2, $3, $4)
+      `, [budgetId, metadata.id, payloadText, metadata.created_at]);
+    }
+
+    async function readBackupArtifact(budgetId, artifactId) {
+      const result = await client.query("SELECT payload FROM cashflow_backup_artifacts WHERE budget_id = $1 AND id = $2", [budgetId, artifactId]);
+      return result.rows.length > 0 ? result.rows[0].payload : null;
+    }
+
     async function countRows(budgetId, tableName, { ledgerYear = null } = {}) {
       assertBudgetTable(tableName);
       const params = [budgetId];
@@ -1273,16 +1394,32 @@ export async function createPostgresBudgetStore(options = {}) {
       const safeTable = assertPlanningTable(tableName);
       const normalized = normalizePlanningRowsForInsert(budgetId, safeTable, rows);
       let inserted = 0;
-      for (const row of normalized) {
-        const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: true });
-        const result = await client.query(
-          `
-            INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-          `,
-          columns.map(column => row[column])
-        );
-        inserted += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+        const colSet = new Set();
+        for (const row of normalized) {
+          for (const col of columnsForInsertedRow(safeTable, row, { includeBudgetId: true })) colSet.add(col);
+        }
+        const columns = Array.from(colSet);
+        const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+          const chunk = normalized.slice(i, i + chunkSize);
+          const values = [];
+          const placeholders = [];
+          for (let j = 0; j < chunk.length; j++) {
+             const row = chunk[j];
+             const rowPlaceholders = [];
+             for (const col of columns) {
+               values.push(row[col] !== undefined ? row[col] : null);
+               rowPlaceholders.push(`$${values.length}`);
+             }
+             placeholders.push(`(${rowPlaceholders.join(', ')})`);
+          }
+          const result = await client.query(
+            `INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+            values
+          );
+          inserted += Number(result?.rowCount || 0);
+        }
       }
       return { inserted };
     }
@@ -1296,16 +1433,32 @@ export async function createPostgresBudgetStore(options = {}) {
         [budgetId]
       );
       let inserted = 0;
-      for (const row of normalized) {
-        const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: true });
-        const result = await client.query(
-          `
-            INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-          `,
-          columns.map(column => row[column])
-        );
-        inserted += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+        const colSet = new Set();
+        for (const row of normalized) {
+          for (const col of columnsForInsertedRow(safeTable, row, { includeBudgetId: true })) colSet.add(col);
+        }
+        const columns = Array.from(colSet);
+        const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+          const chunk = normalized.slice(i, i + chunkSize);
+          const values = [];
+          const placeholders = [];
+          for (let j = 0; j < chunk.length; j++) {
+             const row = chunk[j];
+             const rowPlaceholders = [];
+             for (const col of columns) {
+               values.push(row[col] !== undefined ? row[col] : null);
+               rowPlaceholders.push(`$${values.length}`);
+             }
+             placeholders.push(`(${rowPlaceholders.join(', ')})`);
+          }
+          const result = await client.query(
+            `INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+            values
+          );
+          inserted += Number(result?.rowCount || 0);
+        }
       }
       return { inserted, replaced: true };
     }
@@ -1313,36 +1466,37 @@ export async function createPostgresBudgetStore(options = {}) {
     async function upsertFxRates(budgetId, rows = []) {
       const normalized = normalizeFxRateRows(budgetId, rows);
       let upserted = 0;
-      for (const row of normalized) {
-        const result = await client.query(
-          `
-            INSERT INTO fx_rates_cache (
-              budget_id, base_currency, quote_currency, currency, rate_date,
-              rate, effective_date, source, raw_json, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (budget_id, base_currency, quote_currency, rate_date)
-            DO UPDATE SET
-              currency = EXCLUDED.currency,
-              rate = EXCLUDED.rate,
-              effective_date = EXCLUDED.effective_date,
-              source = EXCLUDED.source,
-              raw_json = EXCLUDED.raw_json,
-              updated_at = EXCLUDED.updated_at
-          `,
-          [
-            row.budget_id,
-            row.base_currency,
-            row.quote_currency,
-            row.currency,
-            row.rate_date,
-            row.rate,
-            row.effective_date,
-            row.source,
-            row.raw_json,
-            row.updated_at
-          ]
-        );
-        upserted += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+        const chunkSize = 1000;
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+          const chunk = normalized.slice(i, i + chunkSize);
+          const values = [];
+          const placeholders = [];
+          for (let j = 0; j < chunk.length; j++) {
+             const row = chunk[j];
+             const offset = j * 10;
+             values.push(row.budget_id, row.base_currency, row.quote_currency, row.currency, row.rate_date, row.rate, row.effective_date, row.source, row.raw_json, row.updated_at);
+             placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`);
+          }
+          const result = await client.query(
+            `
+              INSERT INTO fx_rates_cache (
+                budget_id, base_currency, quote_currency, currency, rate_date,
+                rate, effective_date, source, raw_json, updated_at
+              ) VALUES ${placeholders.join(', ')}
+              ON CONFLICT (budget_id, base_currency, quote_currency, rate_date)
+              DO UPDATE SET
+                currency = EXCLUDED.currency,
+                rate = EXCLUDED.rate,
+                effective_date = EXCLUDED.effective_date,
+                source = EXCLUDED.source,
+                raw_json = EXCLUDED.raw_json,
+                updated_at = EXCLUDED.updated_at
+            `,
+            values
+          );
+          upserted += Number(result?.rowCount || 0);
+        }
       }
       return { upserted };
     }
@@ -1350,35 +1504,36 @@ export async function createPostgresBudgetStore(options = {}) {
     async function upsertNotifications(budgetId, rows = []) {
       const normalized = normalizeNotificationRows(budgetId, rows);
       let upserted = 0;
-      for (const row of normalized) {
-        const result = await client.query(
-          `
-            INSERT INTO notification_queue (
-              budget_id, id, notification_type, title, message, priority,
-              entity_id, queued_at, sent_at, dedupe_key
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (budget_id, dedupe_key)
-            WHERE dedupe_key IS NOT NULL
-            DO UPDATE SET
-              title = EXCLUDED.title,
-              message = EXCLUDED.message,
-              priority = EXCLUDED.priority,
-              queued_at = EXCLUDED.queued_at
-          `,
-          [
-            row.budget_id,
-            row.id,
-            row.notification_type,
-            row.title,
-            row.message,
-            row.priority,
-            row.entity_id,
-            row.queued_at,
-            row.sent_at,
-            row.dedupe_key
-          ]
-        );
-        upserted += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+        const chunkSize = 1000;
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+          const chunk = normalized.slice(i, i + chunkSize);
+          const values = [];
+          const placeholders = [];
+          for (let j = 0; j < chunk.length; j++) {
+             const row = chunk[j];
+             const offset = j * 10;
+             values.push(row.budget_id, row.id, row.notification_type, row.title, row.message, row.priority, row.entity_id, row.queued_at, row.sent_at, row.dedupe_key);
+             placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`);
+          }
+          const result = await client.query(
+            `
+              INSERT INTO notification_queue (
+                budget_id, id, notification_type, title, message, priority,
+                entity_id, queued_at, sent_at, dedupe_key
+              ) VALUES ${placeholders.join(', ')}
+              ON CONFLICT (budget_id, dedupe_key)
+              WHERE dedupe_key IS NOT NULL
+              DO UPDATE SET
+                title = EXCLUDED.title,
+                message = EXCLUDED.message,
+                priority = EXCLUDED.priority,
+                queued_at = EXCLUDED.queued_at
+            `,
+            values
+          );
+          upserted += Number(result?.rowCount || 0);
+        }
       }
       return { upserted };
     }
@@ -1386,22 +1541,40 @@ export async function createPostgresBudgetStore(options = {}) {
     async function updatePlanningRowsById(budgetId, tableName, updates = []) {
       const { safeTable, updates: normalized } = normalizePlanningRowUpdates(budgetId, tableName, updates);
       let updated = 0;
-      for (const update of normalized) {
-        const columns = Object.keys(update.values);
-        const result = await client.query(
-          `
-            UPDATE ${quoteIdentifier(safeTable)}
-            SET ${columns.map((column, index) => `${quoteIdentifier(column)} = $${index + 3}`).join(", ")}
-            WHERE budget_id = $1
-              AND id = $2
-          `,
-          [
-            budgetId,
-            update.id,
-            ...columns.map(column => update.values[column])
-          ]
-        );
-        updated += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+        const colSetMap = new Map();
+        for (const update of normalized) {
+           const cols = Object.keys(update.values).sort();
+           const key = cols.join(',');
+           if (!colSetMap.has(key)) colSetMap.set(key, { cols, updates: [] });
+           colSetMap.get(key).updates.push(update);
+        }
+        for (const { cols, updates } of colSetMap.values()) {
+           const chunkSize = Math.max(1, Math.floor(65000 / (cols.length + 2)));
+           for (let i = 0; i < updates.length; i += chunkSize) {
+              const chunk = updates.slice(i, i + chunkSize);
+              const values = [];
+              const placeholders = [];
+              for (let j = 0; j < chunk.length; j++) {
+                 const update = chunk[j];
+                 const offset = j * (cols.length + 2);
+                 values.push(budgetId, update.id, ...cols.map(c => update.values[c]));
+                 const rowCols = cols.map((_, idx) => `$${offset + 3 + idx}`).join(', ');
+                 placeholders.push(`($${offset + 1}::text, $${offset + 2}::text, ${rowCols})`);
+              }
+              const result = await client.query(
+                `
+                  UPDATE ${quoteIdentifier(safeTable)}
+                  SET ${cols.map((c, idx) => `${quoteIdentifier(c)} = v.col${idx}`).join(', ')}
+                  FROM (VALUES ${placeholders.join(', ')}) AS v(budget_id, id, ${cols.map((_, idx) => `col${idx}`).join(', ')})
+                  WHERE ${quoteIdentifier(safeTable)}.budget_id = v.budget_id
+                    AND ${quoteIdentifier(safeTable)}.id = v.id
+                `,
+                values
+              );
+              updated += Number(result?.rowCount || 0);
+           }
+        }
       }
       return { updated };
     }
@@ -1553,16 +1726,58 @@ export async function createPostgresBudgetStore(options = {}) {
     async function insertConfirmedTransactions(budgetId, rows = []) {
       const normalized = normalizeConfirmedRowsForInsert(budgetId, rows);
       let inserted = 0;
-      for (const row of normalized) {
-        const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true });
-        const result = await client.query(
-          `
-            INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-          `,
-          columns.map(column => row[column])
-        );
-        inserted += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+
+        const colSet = new Set();
+
+        for (const row of normalized) {
+
+          for (const col of columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true })) colSet.add(col);
+
+        }
+
+        const columns = Array.from(colSet);
+
+        const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+
+          const chunk = normalized.slice(i, i + chunkSize);
+
+          const values = [];
+
+          const placeholders = [];
+
+          for (let j = 0; j < chunk.length; j++) {
+
+             const row = chunk[j];
+
+             const rowPlaceholders = [];
+
+             for (const col of columns) {
+
+               values.push(row[col] !== undefined ? row[col] : null);
+
+               rowPlaceholders.push(`$${values.length}`);
+
+             }
+
+             placeholders.push(`(${rowPlaceholders.join(', ')})`);
+
+          }
+
+          const result = await client.query(
+
+            `INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+
+            values
+
+          );
+
+          inserted += Number(result?.rowCount || 0);
+
+        }
+
       }
       return { inserted };
     }
@@ -1574,24 +1789,76 @@ export async function createPostgresBudgetStore(options = {}) {
         updates
       );
       let updated = 0;
-      for (const update of normalized) {
-        const columns = Object.keys(update.values);
-        const result = await client.query(
-          `
-            UPDATE confirmed_transactions
-            SET ${columns.map((column, index) => `${quoteIdentifier(column)} = $${index + 4}`).join(", ")}
-            WHERE budget_id = $1
-              AND ledger_year = $2
-              AND id = $3
-          `,
-          [
-            budgetId,
-            targetYear,
-            update.id,
-            ...columns.map(column => update.values[column])
-          ]
-        );
-        updated += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+
+        const colSetMap = new Map();
+
+        for (const update of normalized) {
+
+           const cols = Object.keys(update.values);
+
+           const key = cols.join(',');
+
+           if (!colSetMap.has(key)) colSetMap.set(key, { cols, updates: [] });
+
+           colSetMap.get(key).updates.push(update);
+
+        }
+
+        for (const { cols, updates } of colSetMap.values()) {
+
+           const chunkSize = Math.max(1, Math.floor(65000 / (cols.length + 3)));
+
+           for (let i = 0; i < updates.length; i += chunkSize) {
+
+              const chunk = updates.slice(i, i + chunkSize);
+
+              const values = [];
+
+              const placeholders = [];
+
+              for (let j = 0; j < chunk.length; j++) {
+
+                 const update = chunk[j];
+
+                 const offset = j * (cols.length + 3);
+
+                 values.push(budgetId, targetYear, update.id, ...cols.map(c => update.values[c]));
+
+                 const rowCols = cols.map((_, idx) => `$${offset + 4 + idx}`).join(', ');
+
+                 placeholders.push(`($${offset + 1}::text, $${offset + 2}::numeric, $${offset + 3}::text, ${rowCols})`);
+
+              }
+
+              const result = await client.query(
+
+                `
+
+                  UPDATE confirmed_transactions
+
+                  SET ${cols.map((c, idx) => `${quoteIdentifier(c)} = v.col${idx}`).join(', ')}
+
+                  FROM (VALUES ${placeholders.join(', ')}) AS v(budget_id, ledger_year, id, ${cols.map((_, idx) => `col${idx}`).join(', ')})
+
+                  WHERE confirmed_transactions.budget_id = v.budget_id
+
+                    AND confirmed_transactions.ledger_year = v.ledger_year
+
+                    AND confirmed_transactions.id = v.id
+
+                `,
+
+                values
+
+              );
+
+              updated += Number(result?.rowCount || 0);
+
+           }
+
+        }
+
       }
       return { updated };
     }
@@ -1632,16 +1899,58 @@ export async function createPostgresBudgetStore(options = {}) {
         [budgetId, targetYear]
       );
       let inserted = 0;
-      for (const row of normalized) {
-        const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true });
-        const result = await client.query(
-          `
-            INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
-            VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-          `,
-          columns.map(column => row[column])
-        );
-        inserted += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+
+        const colSet = new Set();
+
+        for (const row of normalized) {
+
+          for (const col of columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true })) colSet.add(col);
+
+        }
+
+        const columns = Array.from(colSet);
+
+        const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+
+          const chunk = normalized.slice(i, i + chunkSize);
+
+          const values = [];
+
+          const placeholders = [];
+
+          for (let j = 0; j < chunk.length; j++) {
+
+             const row = chunk[j];
+
+             const rowPlaceholders = [];
+
+             for (const col of columns) {
+
+               values.push(row[col] !== undefined ? row[col] : null);
+
+               rowPlaceholders.push(`$${values.length}`);
+
+             }
+
+             placeholders.push(`(${rowPlaceholders.join(', ')})`);
+
+          }
+
+          const result = await client.query(
+
+            `INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+
+            values
+
+          );
+
+          inserted += Number(result?.rowCount || 0);
+
+        }
+
       }
       return { inserted, ledgerYear: targetYear, replaced: true };
     }
@@ -1659,28 +1968,79 @@ export async function createPostgresBudgetStore(options = {}) {
       return (result?.rows || []).map(row => Number(row.ledger_year));
     }
 
-    async function updateConfirmedLedgerBalances(budgetId, updates = []) {
+  
+  async function saveBackupArtifact(budgetId, metadata, payloadText) {
+    return await service.withClient(async client => {
+      await client.query("BEGIN");
+      try {
+        await repositoryForClient(client).saveBackupArtifact(budgetId, metadata, payloadText);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  async function readBackupArtifact(budgetId, artifactId) {
+    return await service.withClient(client => repositoryForClient(client).readBackupArtifact(budgetId, artifactId));
+  }
+
+  async function updateConfirmedLedgerBalances(budgetId, updates = []) {
       const normalized = normalizeBalanceUpdates(updates);
       let updated = 0;
-      for (const update of normalized) {
-        const result = await client.query(
-          `
-            UPDATE confirmed_transactions
-            SET running_balance_pln = $4,
-                ledger_amount = $5
-            WHERE budget_id = $1
-              AND ledger_year = $2
-              AND id = $3
-          `,
-          [
-            budgetId,
-            update.ledgerYear,
-            update.id,
-            update.runningBalance,
-            update.ledgerAmount
-          ]
-        );
-        updated += Number(result?.rowCount || 0);
+      if (normalized.length > 0) {
+
+        const chunkSize = Math.max(1, Math.floor(65000 / 5));
+
+        for (let i = 0; i < normalized.length; i += chunkSize) {
+
+           const chunk = normalized.slice(i, i + chunkSize);
+
+           const values = [];
+
+           const placeholders = [];
+
+           for (let j = 0; j < chunk.length; j++) {
+
+              const update = chunk[j];
+
+              const offset = j * 5;
+
+              values.push(budgetId, update.ledgerYear, update.id, update.runningBalance, update.ledgerAmount);
+
+              placeholders.push(`($${offset + 1}::text, $${offset + 2}::numeric, $${offset + 3}::text, $${offset + 4}::numeric, $${offset + 5}::numeric)`);
+
+           }
+
+           const result = await client.query(
+
+             `
+
+               UPDATE confirmed_transactions
+
+               SET running_balance_pln = v.running_balance_pln,
+
+                   ledger_amount = v.ledger_amount
+
+               FROM (VALUES ${placeholders.join(', ')}) AS v(budget_id, ledger_year, id, running_balance_pln, ledger_amount)
+
+               WHERE confirmed_transactions.budget_id = v.budget_id
+
+                 AND confirmed_transactions.ledger_year = v.ledger_year
+
+                 AND confirmed_transactions.id = v.id
+
+             `,
+
+             values
+
+           );
+
+           updated += Number(result?.rowCount || 0);
+
+        }
+
       }
       return { updated };
     }
@@ -1743,6 +2103,7 @@ export async function createPostgresBudgetStore(options = {}) {
       listConfirmedTransactions,
       listLedgerYears,
       listPlanningRows,
+    pendingTransactionExistsByOccurrenceKey,
       lockBudgetLedger,
       markNotificationsSent,
       pendingTransactionExistsByOccurrenceKey,
@@ -1818,16 +2179,58 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: true });
-          const result = await client.query(
-            `
-              INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
-              VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-            `,
-            columns.map(column => row[column])
-          );
-          inserted += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const colSet = new Set();
+
+          for (const row of normalized) {
+
+            for (const col of columnsForInsertedRow(safeTable, row, { includeBudgetId: true })) colSet.add(col);
+
+          }
+
+          const columns = Array.from(colSet);
+
+          const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+            const chunk = normalized.slice(i, i + chunkSize);
+
+            const values = [];
+
+            const placeholders = [];
+
+            for (let j = 0; j < chunk.length; j++) {
+
+               const row = chunk[j];
+
+               const rowPlaceholders = [];
+
+               for (const col of columns) {
+
+                 values.push(row[col] !== undefined ? row[col] : null);
+
+                 rowPlaceholders.push(`$${values.length}`);
+
+               }
+
+               placeholders.push(`(${rowPlaceholders.join(', ')})`);
+
+            }
+
+            const result = await client.query(
+
+              `INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+
+              values
+
+            );
+
+            inserted += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { inserted };
@@ -1850,16 +2253,58 @@ export async function createPostgresBudgetStore(options = {}) {
           [budgetId]
         );
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow(safeTable, row, { includeBudgetId: true });
-          const result = await client.query(
-            `
-              INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")})
-              VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-            `,
-            columns.map(column => row[column])
-          );
-          inserted += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const colSet = new Set();
+
+          for (const row of normalized) {
+
+            for (const col of columnsForInsertedRow(safeTable, row, { includeBudgetId: true })) colSet.add(col);
+
+          }
+
+          const columns = Array.from(colSet);
+
+          const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+            const chunk = normalized.slice(i, i + chunkSize);
+
+            const values = [];
+
+            const placeholders = [];
+
+            for (let j = 0; j < chunk.length; j++) {
+
+               const row = chunk[j];
+
+               const rowPlaceholders = [];
+
+               for (const col of columns) {
+
+                 values.push(row[col] !== undefined ? row[col] : null);
+
+                 rowPlaceholders.push(`$${values.length}`);
+
+               }
+
+               placeholders.push(`(${rowPlaceholders.join(', ')})`);
+
+            }
+
+            const result = await client.query(
+
+              `INSERT INTO ${quoteIdentifier(safeTable)} (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+
+              values
+
+            );
+
+            inserted += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { inserted, replaced: true };
@@ -1877,36 +2322,68 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let upserted = 0;
-        for (const row of normalized) {
-          const result = await client.query(
-            `
-              INSERT INTO fx_rates_cache (
-                budget_id, base_currency, quote_currency, currency, rate_date,
-                rate, effective_date, source, raw_json, updated_at
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-              ON CONFLICT (budget_id, base_currency, quote_currency, rate_date)
-              DO UPDATE SET
-                currency = EXCLUDED.currency,
-                rate = EXCLUDED.rate,
-                effective_date = EXCLUDED.effective_date,
-                source = EXCLUDED.source,
-                raw_json = EXCLUDED.raw_json,
-                updated_at = EXCLUDED.updated_at
-            `,
-            [
-              row.budget_id,
-              row.base_currency,
-              row.quote_currency,
-              row.currency,
-              row.rate_date,
-              row.rate,
-              row.effective_date,
-              row.source,
-              row.raw_json,
-              row.updated_at
-            ]
-          );
-          upserted += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const chunkSize = 1000;
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+            const chunk = normalized.slice(i, i + chunkSize);
+
+            const values = [];
+
+            const placeholders = [];
+
+            for (let j = 0; j < chunk.length; j++) {
+
+               const row = chunk[j];
+
+               const offset = j * 10;
+
+               values.push(row.budget_id, row.base_currency, row.quote_currency, row.currency, row.rate_date, row.rate, row.effective_date, row.source, row.raw_json, row.updated_at);
+
+               placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`);
+
+            }
+
+            const result = await client.query(
+
+              `
+
+                INSERT INTO fx_rates_cache (
+
+                  budget_id, base_currency, quote_currency, currency, rate_date,
+
+                  rate, effective_date, source, raw_json, updated_at
+
+                ) VALUES ${placeholders.join(', ')}
+
+                ON CONFLICT (budget_id, base_currency, quote_currency, rate_date)
+
+                DO UPDATE SET
+
+                  currency = EXCLUDED.currency,
+
+                  rate = EXCLUDED.rate,
+
+                  effective_date = EXCLUDED.effective_date,
+
+                  source = EXCLUDED.source,
+
+                  raw_json = EXCLUDED.raw_json,
+
+                  updated_at = EXCLUDED.updated_at
+
+              `,
+
+              values
+
+            );
+
+            upserted += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { upserted };
@@ -1924,35 +2401,66 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let upserted = 0;
-        for (const row of normalized) {
-          const result = await client.query(
-            `
-              INSERT INTO notification_queue (
-                budget_id, id, notification_type, title, message, priority,
-                entity_id, queued_at, sent_at, dedupe_key
-              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-              ON CONFLICT (budget_id, dedupe_key)
-              WHERE dedupe_key IS NOT NULL
-              DO UPDATE SET
-                title = EXCLUDED.title,
-                message = EXCLUDED.message,
-                priority = EXCLUDED.priority,
-                queued_at = EXCLUDED.queued_at
-            `,
-            [
-              row.budget_id,
-              row.id,
-              row.notification_type,
-              row.title,
-              row.message,
-              row.priority,
-              row.entity_id,
-              row.queued_at,
-              row.sent_at,
-              row.dedupe_key
-            ]
-          );
-          upserted += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const chunkSize = 1000;
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+            const chunk = normalized.slice(i, i + chunkSize);
+
+            const values = [];
+
+            const placeholders = [];
+
+            for (let j = 0; j < chunk.length; j++) {
+
+               const row = chunk[j];
+
+               const offset = j * 10;
+
+               values.push(row.budget_id, row.id, row.notification_type, row.title, row.message, row.priority, row.entity_id, row.queued_at, row.sent_at, row.dedupe_key);
+
+               placeholders.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10})`);
+
+            }
+
+            const result = await client.query(
+
+              `
+
+                INSERT INTO notification_queue (
+
+                  budget_id, id, notification_type, title, message, priority,
+
+                  entity_id, queued_at, sent_at, dedupe_key
+
+                ) VALUES ${placeholders.join(', ')}
+
+                ON CONFLICT (budget_id, dedupe_key)
+
+                WHERE dedupe_key IS NOT NULL
+
+                DO UPDATE SET
+
+                  title = EXCLUDED.title,
+
+                  message = EXCLUDED.message,
+
+                  priority = EXCLUDED.priority,
+
+                  queued_at = EXCLUDED.queued_at
+
+              `,
+
+              values
+
+            );
+
+            upserted += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { upserted };
@@ -1970,22 +2478,74 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let updated = 0;
-        for (const update of normalized) {
-          const columns = Object.keys(update.values);
-          const result = await client.query(
-            `
-              UPDATE ${quoteIdentifier(safeTable)}
-              SET ${columns.map((column, index) => `${quoteIdentifier(column)} = $${index + 3}`).join(", ")}
-              WHERE budget_id = $1
-                AND id = $2
-            `,
-            [
-              budgetId,
-              update.id,
-              ...columns.map(column => update.values[column])
-            ]
-          );
-          updated += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const colSetMap = new Map();
+
+          for (const update of normalized) {
+
+             const cols = Object.keys(update.values);
+
+             const key = cols.join(',');
+
+             if (!colSetMap.has(key)) colSetMap.set(key, { cols, updates: [] });
+
+             colSetMap.get(key).updates.push(update);
+
+          }
+
+          for (const { cols, updates } of colSetMap.values()) {
+
+             const chunkSize = Math.max(1, Math.floor(65000 / (cols.length + 2)));
+
+             for (let i = 0; i < updates.length; i += chunkSize) {
+
+                const chunk = updates.slice(i, i + chunkSize);
+
+                const values = [];
+
+                const placeholders = [];
+
+                for (let j = 0; j < chunk.length; j++) {
+
+                   const update = chunk[j];
+
+                   const offset = j * (cols.length + 2);
+
+                   values.push(budgetId, update.id, ...cols.map(c => update.values[c]));
+
+                   const rowCols = cols.map((_, idx) => `$${offset + 3 + idx}`).join(', ');
+
+                   placeholders.push(`($${offset + 1}::text, $${offset + 2}::text, ${rowCols})`);
+
+                }
+
+                const result = await client.query(
+
+                  `
+
+                    UPDATE ${quoteIdentifier(safeTable)}
+
+                    SET ${cols.map((c, idx) => `${quoteIdentifier(c)} = v.col${idx}`).join(', ')}
+
+                    FROM (VALUES ${placeholders.join(', ')}) AS v(budget_id, id, ${cols.map((_, idx) => `col${idx}`).join(', ')})
+
+                    WHERE ${quoteIdentifier(safeTable)}.budget_id = v.budget_id
+
+                      AND ${quoteIdentifier(safeTable)}.id = v.id
+
+                  `,
+
+                  values
+
+                );
+
+                updated += Number(result?.rowCount || 0);
+
+             }
+
+          }
+
         }
         await client.query("COMMIT");
         return { updated };
@@ -2093,16 +2653,58 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true });
-          const result = await client.query(
-            `
-              INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
-              VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-            `,
-            columns.map(column => row[column])
-          );
-          inserted += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const colSet = new Set();
+
+          for (const row of normalized) {
+
+            for (const col of columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true })) colSet.add(col);
+
+          }
+
+          const columns = Array.from(colSet);
+
+          const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+            const chunk = normalized.slice(i, i + chunkSize);
+
+            const values = [];
+
+            const placeholders = [];
+
+            for (let j = 0; j < chunk.length; j++) {
+
+               const row = chunk[j];
+
+               const rowPlaceholders = [];
+
+               for (const col of columns) {
+
+                 values.push(row[col] !== undefined ? row[col] : null);
+
+                 rowPlaceholders.push(`$${values.length}`);
+
+               }
+
+               placeholders.push(`(${rowPlaceholders.join(', ')})`);
+
+            }
+
+            const result = await client.query(
+
+              `INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+
+              values
+
+            );
+
+            inserted += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { inserted };
@@ -2124,24 +2726,76 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let updated = 0;
-        for (const update of normalized) {
-          const columns = Object.keys(update.values);
-          const result = await client.query(
-            `
-              UPDATE confirmed_transactions
-              SET ${columns.map((column, index) => `${quoteIdentifier(column)} = $${index + 4}`).join(", ")}
-              WHERE budget_id = $1
-                AND ledger_year = $2
-                AND id = $3
-            `,
-            [
-              budgetId,
-              targetYear,
-              update.id,
-              ...columns.map(column => update.values[column])
-            ]
-          );
-          updated += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const colSetMap = new Map();
+
+          for (const update of normalized) {
+
+             const cols = Object.keys(update.values);
+
+             const key = cols.join(',');
+
+             if (!colSetMap.has(key)) colSetMap.set(key, { cols, updates: [] });
+
+             colSetMap.get(key).updates.push(update);
+
+          }
+
+          for (const { cols, updates } of colSetMap.values()) {
+
+             const chunkSize = Math.max(1, Math.floor(65000 / (cols.length + 3)));
+
+             for (let i = 0; i < updates.length; i += chunkSize) {
+
+                const chunk = updates.slice(i, i + chunkSize);
+
+                const values = [];
+
+                const placeholders = [];
+
+                for (let j = 0; j < chunk.length; j++) {
+
+                   const update = chunk[j];
+
+                   const offset = j * (cols.length + 3);
+
+                   values.push(budgetId, targetYear, update.id, ...cols.map(c => update.values[c]));
+
+                   const rowCols = cols.map((_, idx) => `$${offset + 4 + idx}`).join(', ');
+
+                   placeholders.push(`($${offset + 1}::text, $${offset + 2}::numeric, $${offset + 3}::text, ${rowCols})`);
+
+                }
+
+                const result = await client.query(
+
+                  `
+
+                    UPDATE confirmed_transactions
+
+                    SET ${cols.map((c, idx) => `${quoteIdentifier(c)} = v.col${idx}`).join(', ')}
+
+                    FROM (VALUES ${placeholders.join(', ')}) AS v(budget_id, ledger_year, id, ${cols.map((_, idx) => `col${idx}`).join(', ')})
+
+                    WHERE confirmed_transactions.budget_id = v.budget_id
+
+                      AND confirmed_transactions.ledger_year = v.ledger_year
+
+                      AND confirmed_transactions.id = v.id
+
+                  `,
+
+                  values
+
+                );
+
+                updated += Number(result?.rowCount || 0);
+
+             }
+
+          }
+
         }
         await client.query("COMMIT");
         return { updated };
@@ -2201,16 +2855,58 @@ export async function createPostgresBudgetStore(options = {}) {
           [budgetId, targetYear]
         );
         let inserted = 0;
-        for (const row of normalized) {
-          const columns = columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true });
-          const result = await client.query(
-            `
-              INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")})
-              VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
-            `,
-            columns.map(column => row[column])
-          );
-          inserted += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const colSet = new Set();
+
+          for (const row of normalized) {
+
+            for (const col of columnsForInsertedRow("confirmed_transactions", row, { includeBudgetId: true })) colSet.add(col);
+
+          }
+
+          const columns = Array.from(colSet);
+
+          const chunkSize = Math.max(1, Math.floor(65000 / columns.length));
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+            const chunk = normalized.slice(i, i + chunkSize);
+
+            const values = [];
+
+            const placeholders = [];
+
+            for (let j = 0; j < chunk.length; j++) {
+
+               const row = chunk[j];
+
+               const rowPlaceholders = [];
+
+               for (const col of columns) {
+
+                 values.push(row[col] !== undefined ? row[col] : null);
+
+                 rowPlaceholders.push(`$${values.length}`);
+
+               }
+
+               placeholders.push(`(${rowPlaceholders.join(', ')})`);
+
+            }
+
+            const result = await client.query(
+
+              `INSERT INTO confirmed_transactions (${columns.map(quoteIdentifier).join(", ")}) VALUES ${placeholders.join(', ')}`,
+
+              values
+
+            );
+
+            inserted += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { inserted, ledgerYear: targetYear, replaced: true };
@@ -2251,25 +2947,58 @@ export async function createPostgresBudgetStore(options = {}) {
       await client.query("BEGIN");
       try {
         let updated = 0;
-        for (const update of normalized) {
-          const result = await client.query(
-            `
-              UPDATE confirmed_transactions
-              SET running_balance_pln = $4,
-                  ledger_amount = $5
-              WHERE budget_id = $1
-                AND ledger_year = $2
-                AND id = $3
-            `,
-            [
-              budgetId,
-              update.ledgerYear,
-              update.id,
-              update.runningBalance,
-              update.ledgerAmount
-            ]
-          );
-          updated += Number(result?.rowCount || 0);
+        if (normalized.length > 0) {
+
+          const chunkSize = Math.max(1, Math.floor(65000 / 5));
+
+          for (let i = 0; i < normalized.length; i += chunkSize) {
+
+             const chunk = normalized.slice(i, i + chunkSize);
+
+             const values = [];
+
+             const placeholders = [];
+
+             for (let j = 0; j < chunk.length; j++) {
+
+                const update = chunk[j];
+
+                const offset = j * 5;
+
+                values.push(budgetId, update.ledgerYear, update.id, update.runningBalance, update.ledgerAmount);
+
+                placeholders.push(`($${offset + 1}::text, $${offset + 2}::numeric, $${offset + 3}::text, $${offset + 4}::numeric, $${offset + 5}::numeric)`);
+
+             }
+
+             const result = await client.query(
+
+               `
+
+                 UPDATE confirmed_transactions
+
+                 SET running_balance_pln = v.running_balance_pln,
+
+                     ledger_amount = v.ledger_amount
+
+                 FROM (VALUES ${placeholders.join(', ')}) AS v(budget_id, ledger_year, id, running_balance_pln, ledger_amount)
+
+                 WHERE confirmed_transactions.budget_id = v.budget_id
+
+                   AND confirmed_transactions.ledger_year = v.ledger_year
+
+                   AND confirmed_transactions.id = v.id
+
+               `,
+
+               values
+
+             );
+
+             updated += Number(result?.rowCount || 0);
+
+          }
+
         }
         await client.query("COMMIT");
         return { updated };
@@ -2280,8 +3009,28 @@ export async function createPostgresBudgetStore(options = {}) {
     });
   }
 
+
+  async function saveBackupArtifact(budgetId, metadata, payloadText) {
+    return await service.withClient(async client => {
+      await client.query("BEGIN");
+      try {
+        await repositoryForClient(client).saveBackupArtifact(budgetId, metadata, payloadText);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  async function readBackupArtifact(budgetId, artifactId) {
+    return await service.withClient(client => repositoryForClient(client).readBackupArtifact(budgetId, artifactId));
+  }
+
   return {
     backend: "postgres",
+    readBackupArtifact,
+    saveBackupArtifact,
     checkReadiness,
     close: service.close,
     countRows,

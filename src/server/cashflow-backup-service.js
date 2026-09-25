@@ -1,4 +1,4 @@
-﻿import Database from "better-sqlite3";
+import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import {
@@ -38,7 +38,11 @@ const SOURCE_FIELDS = [
 ];
 const ACTIVE_LEDGER_DRIFT_EPSILON = 0.01;
 
+
+import { BUDGET_RUNTIME_LOCK_JOBS, budgetRuntimeLockName } from "./cashflow-runtime-locks.js";
+
 export function createCashflowBackupService({
+  lockService = null,
   backupDir,
   backupHook = null,
   backupRootDir,
@@ -697,12 +701,22 @@ export function createCashflowBackupService({
       .filter(entry => entry.isDirectory() && entry.name.startsWith("backup_") && !entry.name.endsWith(".tmp"))
       .map(entry => {
         const fullPath = path.join(dir, entry.name);
+        // Extract timestamp from backup_YYYY-MM-DDTHH-MM-SS-MMMZ_... if present
+        const match = entry.name.match(/^backup_([^_]+)_/);
+        const nameTimestamp = match ? match[1] : "";
         return {
           path: fullPath,
+          name: entry.name,
+          nameTimestamp,
           mtimeMs: fs.statSync(fullPath).mtimeMs
         };
       })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      .sort((a, b) => {
+        // Sort descending by embedded timestamp first, fallback to mtimeMs
+        const timeCompare = String(b.nameTimestamp).localeCompare(String(a.nameTimestamp));
+        if (timeCompare !== 0) return timeCompare;
+        return b.mtimeMs - a.mtimeMs;
+      });
 
     const toDelete = backups.slice(retention);
 
@@ -979,6 +993,8 @@ export function createCashflowBackupService({
       return createBackup(userId, options);
     }
 
+    const runBackup = async () => {
+
     const settings = await getSettingsAsync(userId);
     const dir = backupRootDir(userId, settings);
     const createdAt = now().toISOString();
@@ -1048,6 +1064,20 @@ export function createCashflowBackupService({
       });
       throw error;
     }
+    };
+
+    if (lockService && typeof lockService.withLock === "function") {
+      const lockResult = await lockService.withLock(
+        budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability),
+        runBackup,
+        { ttlMs: 300000 }
+      );
+      if (!lockResult?.acquired) {
+        throw new Error("An import or restore is already running for this budget (locked)");
+      }
+      return lockResult.result;
+    }
+    return await runBackup();
   }
 
   function importPlanningBackupIntoLiveDb(userId, backupPlanningPath) {
@@ -1162,11 +1192,11 @@ export function createCashflowBackupService({
     const { planningSource, backupLedgerYears } = validateBackupFolderForRestore(backupPath);
     const existingLedgerYears = listLedgerYears(userId);
 
-    importPlanningBackupIntoLiveDb(userId, planningSource);
-
     for (const year of backupLedgerYears) {
       importLedgerBackupIntoLiveDb(userId, path.join(backupPath, `ledger_${year}.sqlite`), year);
     }
+
+    importPlanningBackupIntoLiveDb(userId, planningSource);
 
     for (const year of existingLedgerYears) {
       if (!backupLedgerYears.includes(year)) {
@@ -1302,6 +1332,8 @@ export function createCashflowBackupService({
       return restoreBackup(userId, backupId);
     }
 
+    const runRestore = async () => {
+
     const rows = await budgetStore.listPlanningRows(userId, "backup_metadata");
     const row = rows.find(candidate => candidate.id === backupId);
     if (!row?.backup_path || !row.success) {
@@ -1377,6 +1409,20 @@ export function createCashflowBackupService({
       if (error?.details) rolledBack.details = error.details;
       throw rolledBack;
     }
+    };
+
+    if (lockService && typeof lockService.withLock === "function") {
+      const lockResult = await lockService.withLock(
+        budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability),
+        runRestore,
+        { ttlMs: 300000 }
+      );
+      if (!lockResult?.acquired) {
+        throw new Error("An import or restore is already running for this budget (locked)");
+      }
+      return lockResult.result;
+    }
+    return await runRestore();
   }
 
   return {

@@ -69,7 +69,7 @@ export function renderRecurringIncomeTab(locale, cashflow) {
     entityType: "recurring-income",
     date: r.anchor || r.period || r.anchor_type || "-",
     type: "income",
-    status: r.active ? "funded" : "pending",
+    status: r.active ? "funded" : "disabled",
     amount: Number(r.amount) || 0,
     currency: r.currency || DEFAULT_LEDGER_CURRENCY,
     note: r.period_setting ? t(locale, "Defines budget period") : ""

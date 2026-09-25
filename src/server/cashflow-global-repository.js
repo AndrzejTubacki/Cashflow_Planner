@@ -2,7 +2,6 @@ import crypto from "crypto";
 
 import {
   ensureLegacyBudget,
-  LEGACY_ADMIN_ACCOUNT_ID
 } from "./cashflow-global-schema.js";
 import { normalizeUserId, notFound } from "./cashflow-user-utils.js";
 
@@ -225,7 +224,7 @@ export function createSqliteGlobalRepository(db, {
           targetType,
           targetId,
           outcome,
-          JSON.stringify(details || {})
+          typeof details === "string" ? details : JSON.stringify(details || {})
         );
       }
     },
@@ -651,6 +650,16 @@ export function createSqliteGlobalRepository(db, {
               revoked_at = COALESCE(revoked_at, datetime('now')),
               updated_at = datetime('now')
           WHERE target_account_id = ?
+            AND status = 'pending'
+        `).run(normalizeUserId(accountId));
+      },
+      revokePendingIssuedByAccount(accountId) {
+        db.prepare(`
+          UPDATE budget_invitations
+          SET status = 'revoked',
+              revoked_at = COALESCE(revoked_at, datetime('now')),
+              updated_at = datetime('now')
+          WHERE invited_by_account_id = ?
             AND status = 'pending'
         `).run(normalizeUserId(accountId));
       }
@@ -1086,6 +1095,13 @@ export function createSqliteGlobalRepository(db, {
               revoked_at = COALESCE(revoked_at, datetime('now'))
           WHERE selected_budget_id = ?
         `).run(normalizeUserId(budgetId));
+      },
+      clearSelectedBudget(sessionId) {
+        return db.prepare(`
+          UPDATE auth_sessions
+          SET selected_budget_id = NULL
+          WHERE id = ?
+        `).run(sessionId).changes;
       },
       selectBudgetByTokenHash({
         budgetId,

@@ -6,7 +6,7 @@ import {
   SUPPORTED_FX_CURRENCIES,
   TIMEZONE_OPTIONS
 } from "./constants.js";
-import { formatMessage, t } from "./shared.js";
+import { formatMessage, t, renderCurrencyOptions, renderTimezoneDatalist, renderHolidayCountryOptions } from "./shared.js";
 
 function renderMessage(error = "", message = "") {
   if (error) return `<div class="detail-note cashflow-warning">${escapeHtml(error)}</div>`;
@@ -303,7 +303,7 @@ export function renderSetupPage({ cashflow = null, error = "", message = "" } = 
             <span>${escapeHtml(t(locale, "Timezone"))}</span>
             <input name="timezone" value="${escapeHtml(settings.timezone || DEFAULT_TIMEZONE)}" list="cashflow-setup-timezones">
             <datalist id="cashflow-setup-timezones">
-              ${TIMEZONE_OPTIONS.map(timezone => `<option value="${escapeHtml(timezone)}"></option>`).join("")}
+              ${renderTimezoneDatalist()}
             </datalist>
           </label>
           <label>

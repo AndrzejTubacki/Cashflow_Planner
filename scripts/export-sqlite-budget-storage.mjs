@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
+
 import Database from "better-sqlite3";
 
 import {
@@ -27,37 +29,6 @@ import {
 } from "../src/server/cashflow-schema.js";
 import { normalizeUserId } from "../src/server/cashflow-user-utils.js";
 
-function parseArgs(argv = process.argv.slice(2)) {
-  const options = {
-    budgetId: "",
-    dataDir: process.env.DATA_DIR || path.resolve("data"),
-    outputDir: path.resolve("external-database-exports"),
-    pretty: false
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === "--data-dir") {
-      options.dataDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--output-dir") {
-      options.outputDir = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--budget-id") {
-      options.budgetId = argv[index + 1] || "";
-      index += 1;
-    } else if (arg === "--pretty") {
-      options.pretty = true;
-    } else if (arg === "--help" || arg === "-h") {
-      options.help = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  if (options.budgetId) normalizeUserId(options.budgetId);
-  return options;
-}
 
 function usage() {
   return `Usage: npm run db:budget:export -- [--data-dir PATH] [--output-dir PATH] [--budget-id ID] [--pretty]
@@ -148,11 +119,10 @@ export async function createSqliteBudgetStorageExport({
     throw new Error("Budget storage export output directory must not be inside DATA_DIR");
   }
 
-  const normalizedBudgetId = budgetId ? normalizeUserId(budgetId) : "";
   const budgets = budgetsFromGlobalDb(rootDir)
-    .filter(budget => !normalizedBudgetId || budget.id === normalizedBudgetId);
-  if (normalizedBudgetId && !budgets.length) {
-    throw new Error(`Budget not found: ${normalizedBudgetId}`);
+    .filter(budget => !budgetId || budget.id === budgetId);
+  if (budgetId && !budgets.length) {
+    throw new Error(`Budget not found: ${budgetId}`);
   }
 
   fs.mkdirSync(targetRoot, { recursive: true });
@@ -259,7 +229,19 @@ export async function createSqliteBudgetStorageExport({
 }
 
 async function main() {
-  const options = parseArgs();
+  const options = parseCliArgs(process.argv.slice(2), {
+    string: ["--data-dir","--output-dir","--budget-id"],
+    boolean: ["--pretty"],
+    defaults: {
+    budgetId: "",
+    dataDir: process.env.DATA_DIR || path.resolve("data"),
+    outputDir: path.resolve("external-database-exports"),
+    pretty: false
+  }
+  });
+  if (options.budgetId) {
+    options.budgetId = normalizeUserId(options.budgetId);
+  }
   if (options.help) {
     console.log(usage());
     return;
@@ -269,7 +251,7 @@ async function main() {
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));
 }
 
-if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
+if (isMainModule(import.meta.url)) {
   main().catch(error => {
     console.error(error.message);
     process.exit(1);

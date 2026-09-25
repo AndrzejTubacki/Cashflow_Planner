@@ -1,4 +1,4 @@
-﻿import { sendApiError } from "./cashflow-error-utils.js";
+import { sendApiError } from "./cashflow-error-utils.js";
 import {
   CAPABILITIES,
   requireCapability as assertCapability
@@ -227,14 +227,12 @@ export function registerCashflowRoutes(app, {
 
     async function resolveRequestLocale(req) {
       try {
-        const hasBudgetHeader = Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-budget-id")
-          || Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-user-id");
-        if (!hasBudgetHeader && !sessionTokenFromRequest(req)) return "en";
+        // Error formatting must not open a budget selected by an untrusted
+        // header. Only successful membership resolution supplies this context.
         const context = req.cashflowContext && typeof req.cashflowContext.then !== "function"
           ? req.cashflowContext
           : null;
-        const userId = context?.budget?.id
-          || String(req.headers["x-cashflow-budget-id"] || req.headers["x-cashflow-user-id"] || "").trim();
+        const userId = context?.budget?.id;
         if (!userId) return "en";
         return (await getSettingsAsync(userId))?.locale || "en";
       } catch {
@@ -300,9 +298,10 @@ export function registerCashflowRoutes(app, {
       if ((await activeAuthMode()) !== "none" && !sessionTokenFromRequest(req)) {
         throw unauthorized();
       }
-      return typeof resolveRequestContext === "function"
-        ? await resolveRequestContext(req)
-        : null;
+      if (typeof resolveRequestContext !== "function") {
+        throw new Error("resolveRequestContext is not wired");
+      }
+      return await resolveRequestContext(req);
     }
 
     async function actorForRequest(req) {
@@ -817,6 +816,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.put("/api/budgets/:budgetId", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -833,6 +833,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.post("/api/budgets/:budgetId/archive", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -871,6 +872,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.post("/api/budgets/:budgetId/restore", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -887,6 +889,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.delete("/api/budgets/:budgetId", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -919,6 +922,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.put("/api/budgets/:budgetId/members/:accountId", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -940,6 +944,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.delete("/api/budgets/:budgetId/members/:accountId", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -955,6 +960,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.post("/api/budgets/:budgetId/leave", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -970,6 +976,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.post("/api/budgets/:budgetId/transfer-ownership", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -1006,6 +1013,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.post("/api/budgets/:budgetId/invitations", async (req, res) => {
       try {
         const actor = await requireActor(req);
@@ -1022,6 +1030,7 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Authorization is enforced by the service layer (requireMembershipRole)
     app.delete("/api/budgets/:budgetId/invitations/:invitationId", async (req, res) => {
       try {
         const actor = await requireActor(req);

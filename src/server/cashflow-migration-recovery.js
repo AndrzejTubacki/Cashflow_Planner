@@ -2,6 +2,13 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 
+/**
+ * Note: Despite the "recovery" naming, this module provides pre-migration backups
+ * (saving a snapshot before schema migration). It does not currently provide an
+ * automated restore-on-failure path. If a migration failure corrupts the database,
+ * an operator must manually restore from the snapshot created here.
+ */
+
 import {
   LEDGER_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION
@@ -73,11 +80,12 @@ function pendingRecoveryDirs(backupDir) {
 
 export function cleanupMigrationRecoveryFolders(backupDir, currentTime = Date.now()) {
   if (!fs.existsSync(backupDir) || !fs.statSync(backupDir).isDirectory()) {
-    return { completedDeleted: 0, staleTemporaryDeleted: 0 };
+    return { completedDeleted: 0, staleTemporaryDeleted: 0, stalePendingDeleted: 0 };
   }
 
   const completed = [];
   let staleTemporaryDeleted = 0;
+  let stalePendingDeleted = 0;
 
   for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -94,6 +102,15 @@ export function cleanupMigrationRecoveryFolders(backupDir, currentTime = Date.no
 
     if (!entry.name.startsWith("migration_backup_")) continue;
     const manifest = readManifest(fullPath);
+    
+    if (manifest?.status === "pending") {
+      if (currentTime - stat.mtimeMs > STALE_TEMP_AGE_MS) {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+        stalePendingDeleted += 1;
+      }
+      continue;
+    }
+
     if (manifest?.status === "completed") {
       completed.push({
         path: fullPath,
@@ -109,7 +126,8 @@ export function cleanupMigrationRecoveryFolders(backupDir, currentTime = Date.no
 
   return {
     completedDeleted: Math.max(0, completed.length - COMPLETED_RECOVERY_RETENTION),
-    staleTemporaryDeleted
+    staleTemporaryDeleted,
+    stalePendingDeleted
   };
 }
 

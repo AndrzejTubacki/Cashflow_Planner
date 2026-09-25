@@ -242,7 +242,7 @@ test("recurringOccurrencesInPeriod filters past dates and period bounds", () => 
   assert.deepEqual(occurrences, ["2026-06-15", "2026-07-15"]);
 });
 
-test("recurringOccurrencesInPeriod de-duplicates overlapping generated dates", () => {
+test("recurringOccurrencesInPeriod includes the previous cycle at the period start", () => {
   const occurrences = recurringOccurrencesInPeriod(
     {
       anchor_type: "month_end",
@@ -255,5 +255,36 @@ test("recurringOccurrencesInPeriod de-duplicates overlapping generated dates", (
     }
   );
 
-  assert.deepEqual(occurrences, ["2026-02-01"]);
+  assert.deepEqual(occurrences, ["2026-01-01", "2026-02-01"]);
+});
+
+
+test("recurrence period lookup includes shifted source months and preserves their repeat cadence", () => {
+  // Test final-date ownership, including holidays, both year boundaries and
+  // arbitrary offsets; eligibility still belongs to the original source month.
+  const monthEnd = { anchor_type: "month_end", anchor_holiday_country: "PL" };
+  const cases = [
+    [{ ...monthEnd, anchor_business_day_adjustment: "next" },
+      "2026-11-01", "2026-11-30", ["2026-11-02", "2026-11-30"]],
+    [{ anchor_type: "day_of_month", anchor_day_of_month: 1, anchor_business_day_adjustment: "previous" },
+      "2026-04-01", "2026-04-30", ["2026-04-01", "2026-04-30"]],
+    [{ anchor_type: "day_of_month", anchor_day_of_month: 1, anchor_business_day_adjustment: "previous" },
+      "2026-12-01", "2026-12-31", ["2026-12-01", "2026-12-31"]],
+    [{ ...monthEnd, anchor_offset_days: 2 },
+      "2027-01-01", "2027-01-31", ["2027-01-02"]],
+    [{ ...monthEnd, anchor_business_day_adjustment: "next", repeat_every_months: 3, start_month_year: "2026-10" },
+      "2026-11-01", "2027-01-31", ["2026-11-02"]],
+    [{ ...monthEnd, anchor_offset_days: 62 },
+      "2026-04-01", "2026-04-30", ["2026-04-03"]],
+    [{ ...monthEnd, anchor_offset_days: -62 },
+      "2026-01-01", "2026-01-31", ["2026-01-28"]],
+    [{ anchor_income_id: "salary", anchor_income: { ...monthEnd, anchor_offset_days: 62 }, anchor_offset_days: 62 },
+      "2026-06-01", "2026-06-30", ["2026-06-04"]]
+  ];
+  for (const [item, start, end, expected] of cases) {
+    assert.deepEqual(recurringOccurrencesInPeriod(item, { start, end }), expected, JSON.stringify(item));
+  }
+  assert.deepEqual(recurringOccurrencesInPeriod(cases[0][0], {
+    start: "2026-11-01", end: "2026-11-30"
+  }, "2026-11-03"), ["2026-11-30"]);
 });

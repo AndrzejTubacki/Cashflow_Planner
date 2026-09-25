@@ -108,6 +108,8 @@ export function buildBudgetPeriods(settings, recurringIncomes, today, futurePeri
   if (!selectedIncome) {
     const periods = [];
     const base = new Date(`${today}T00:00:00Z`);
+    // Month iteration must start on day one: the 29th–31st can overflow February.
+    base.setUTCDate(1);
 
     for (let i = 0; i < futurePeriods; i++) {
       const d = new Date(base);
@@ -137,6 +139,8 @@ export function buildBudgetPeriods(settings, recurringIncomes, today, futurePeri
     ? options.anchorOverrides
     : new Map(Object.entries(options.anchorOverrides || {}));
   const base = new Date(`${today}T00:00:00Z`);
+  // Use calendar months independently of today's day-of-month when finding anchors.
+  base.setUTCDate(1);
 
   // Wide search window so incomes repeating every X months still produce enough period boundaries.
   for (let i = -24; i <= futurePeriods * 12 + 24; i++) {

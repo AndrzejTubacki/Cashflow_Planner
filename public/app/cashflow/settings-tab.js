@@ -7,7 +7,7 @@ import {
   SUPPORTED_FX_CURRENCIES,
   TIMEZONE_OPTIONS
 } from "./constants.js";
-import { hasCapability, renderHelpPopover, t } from "./shared.js";
+import { hasCapability, renderHelpPopover, t, renderCurrencyOptions, renderTimezoneDatalist, renderHolidayCountryOptions } from "./shared.js";
 
 function parseArraySetting(value) {
   if (Array.isArray(value)) return value;
@@ -201,11 +201,7 @@ export function renderSettingsTab(locale, cashflow) {
     <label>
       ${fieldLabel(locale, "Ledger currency", "Ledger currency is used for balances, summaries, and projections. Changing it creates a pending conversion row.")}
       <select name="ledger_currency" data-ledger-currency>
-        ${SUPPORTED_FX_CURRENCIES.map(currency => `
-          <option value="${escapeHtml(currency)}"${currency === ledgerCurrency ? " selected" : ""}>
-            ${escapeHtml(currency)}
-          </option>
-        `).join("")}
+        ${renderCurrencyOptions(ledgerCurrency)}
       </select>
     </label>
 
@@ -213,9 +209,7 @@ export function renderSettingsTab(locale, cashflow) {
       ${fieldLabel(locale, "Timezone", "Timezone controls the app's idea of today and background schedule dates.")}
       <input name="timezone" value="${escapeHtml(settings.timezone || DEFAULT_TIMEZONE)}" list="cashflow-timezones">
       <datalist id="cashflow-timezones">
-        ${TIMEZONE_OPTIONS.map(timezone => `
-          <option value="${escapeHtml(timezone)}"></option>
-        `).join("")}
+        ${renderTimezoneDatalist()}
       </datalist>
     </label>
 

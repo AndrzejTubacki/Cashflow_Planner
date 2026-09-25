@@ -1,4 +1,6 @@
+import { resolveCashflowDbConfig } from "./cashflow-db-config.js";
 import { createPostgresGlobalStore } from "./cashflow-postgres-global-store.js";
+import { createInProcessLockService } from "./cashflow-sqlite-global-store.js";
 
 const SUPPORTED_RUNTIME_LOCK_BACKENDS = new Set(["none", "postgres"]);
 
@@ -31,17 +33,25 @@ export async function createCashflowRuntimeLockService({
   env = process.env,
   logError = () => {},
   logServerEvent = () => {},
-  pgModule = null
+  pgModule = null,
+  globalStore = null
 } = {}) {
   const config = describeCashflowRuntimeLockConfig(env);
   if (!config.enabled) {
+    if (resolveCashflowDbConfig(env).backend === "postgres") {
+      logError("cashflow_postgres_runtime_locks_disabled", {
+        backend: "postgres",
+        lockBackend: config.backend,
+        message: "Set CASHFLOW_RUNTIME_LOCK_BACKEND=postgres before running multiple replicas; background jobs and budget operations otherwise run without distributed locks."
+      });
+    }
     logServerEvent("cashflow_runtime_lock_service_disabled", {
       backend: config.backend
     });
     return {
       close: async () => {},
       config,
-      lockService: null
+      lockService: createInProcessLockService()
     };
   }
 
@@ -66,13 +76,19 @@ export async function createCashflowRuntimeLockService({
     }
 
     const ownerId = String(env.CASHFLOW_RUNTIME_LOCK_OWNER_ID || "").trim() || undefined;
-    const store = await createPostgresGlobalStore({
-      databaseUrl,
-      logError,
-      logServerEvent,
-      pgModule
+    const shared = globalStore?.backend === "postgres"
+      && databaseUrl === String(env.CASHFLOW_DATABASE_URL || "").trim();
+    const store = shared ? globalStore : await createPostgresGlobalStore({
+      databaseUrl, logError, logServerEvent, pgModule
     });
-    await store.initialize();
+    if (!shared) {
+      try {
+        await store.initializeLockSchema();
+      } catch (error) {
+        await store.close();
+        throw error;
+      }
+    }
     const lockService = store.createLockService({ ownerId });
     logServerEvent("cashflow_runtime_lock_service_enabled", {
       backend: config.backend,
@@ -80,7 +96,7 @@ export async function createCashflowRuntimeLockService({
     });
 
     return {
-      close: store.close,
+      close: shared ? async () => {} : store.close,
       config,
       lockService
     };

@@ -99,7 +99,7 @@ export default function UserMenu({ budgetLabel, canAdmin, canMaintain, canValida
     try {
       await apiFetch("/api/logout", { method: "POST" });
     } catch {
-      // Logging out is a best-effort call to clear the server session; proceed regardless.
+      window.alert("Couldn't confirm logout with the server — close your browser to be safe.");
     }
     localStorage.removeItem("cashflow_budget_id");
     localStorage.removeItem("cashflow_user_id");

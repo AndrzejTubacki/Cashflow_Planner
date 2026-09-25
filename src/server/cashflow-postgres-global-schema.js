@@ -6,7 +6,8 @@ import {
 export const POSTGRES_GLOBAL_SCHEMA_VERSION = GLOBAL_SCHEMA_VERSION;
 export const POSTGRES_GLOBAL_TABLES = [...GLOBAL_TABLE_NAMES];
 export const POSTGRES_COORDINATION_TABLES = [
-  "cashflow_runtime_locks"
+  "cashflow_runtime_locks",
+  "cashflow_auth_rate_limits"
 ];
 export const POSTGRES_GLOBAL_COLUMNS = {
   users: [
@@ -181,6 +182,14 @@ CREATE TABLE IF NOT EXISTS cashflow_global_schema_version (
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS cashflow_auth_rate_limits (
+  key TEXT PRIMARY KEY,
+  total_hits BIGINT NOT NULL,
+  reset_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cashflow_auth_rate_limits_reset_at
+  ON cashflow_auth_rate_limits(reset_at);
+
 CREATE TABLE IF NOT EXISTS cashflow_runtime_locks (
   name TEXT PRIMARY KEY,
   owner_id TEXT NOT NULL,
@@ -231,9 +240,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_email_lower
   WHERE email IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS account_global_roles (
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   role TEXT NOT NULL CHECK (role IN ('system_admin')),
-  granted_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  granted_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE
   created_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (account_id, role)
 );
@@ -244,7 +253,7 @@ CREATE TABLE IF NOT EXISTS budgets (
   display_name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'archived', 'deleted')),
-  created_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  created_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   archived_at TIMESTAMPTZ,
@@ -252,10 +261,10 @@ CREATE TABLE IF NOT EXISTS budgets (
 );
 
 CREATE TABLE IF NOT EXISTS budget_memberships (
-  budget_id TEXT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  budget_id TEXT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   role TEXT NOT NULL CHECK (role IN ('owner', 'manager', 'editor', 'viewer')),
-  invited_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  invited_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (budget_id, account_id)
@@ -267,14 +276,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_memberships_single_owner
 
 CREATE TABLE IF NOT EXISTS budget_invitations (
   id TEXT PRIMARY KEY,
-  budget_id TEXT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
-  target_account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+  budget_id TEXT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
+  target_account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   target_email TEXT,
   role TEXT NOT NULL CHECK (role IN ('manager', 'editor', 'viewer')),
   token_hash TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'accepted', 'revoked', 'expired')),
-  invited_by_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  invited_by_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   expires_at TIMESTAMPTZ NOT NULL,
   accepted_at TIMESTAMPTZ,
   revoked_at TIMESTAMPTZ,
@@ -288,7 +297,7 @@ CREATE INDEX IF NOT EXISTS idx_budget_invitations_email_lower
 
 CREATE TABLE IF NOT EXISTS auth_identities (
   id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   provider_id TEXT NOT NULL,
   subject TEXT NOT NULL,
   email TEXT,
@@ -301,7 +310,7 @@ CREATE TABLE IF NOT EXISTS auth_identities (
 );
 
 CREATE TABLE IF NOT EXISTS password_credentials (
-  account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   password_hash TEXT NOT NULL,
   password_changed_at TIMESTAMPTZ NOT NULL,
   failed_attempts INTEGER NOT NULL DEFAULT 0,
@@ -312,7 +321,7 @@ CREATE TABLE IF NOT EXISTS password_credentials (
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
   id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   token_hash TEXT NOT NULL UNIQUE,
   purpose TEXT NOT NULL DEFAULT 'password_reset'
     CHECK (purpose IN ('password_setup', 'password_reset')),
@@ -320,17 +329,17 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     CHECK (status IN ('pending', 'consumed', 'revoked', 'expired')),
   expires_at TIMESTAMPTZ NOT NULL,
   consumed_at TIMESTAMPTZ,
-  created_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  created_by_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
   id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   token_hash TEXT NOT NULL UNIQUE,
   csrf_token_hash TEXT NOT NULL,
-  selected_budget_id TEXT REFERENCES budgets(id) ON DELETE SET NULL,
+  selected_budget_id TEXT REFERENCES budgets(id) ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE
   auth_method TEXT NOT NULL DEFAULT 'none',
   created_at TIMESTAMPTZ NOT NULL,
   last_seen_at TIMESTAMPTZ NOT NULL,
@@ -355,8 +364,8 @@ CREATE TABLE IF NOT EXISTS auth_providers (
 CREATE TABLE IF NOT EXISTS auth_oauth_states (
   id TEXT PRIMARY KEY,
   state_hash TEXT NOT NULL UNIQUE,
-  provider_id TEXT NOT NULL REFERENCES auth_providers(id) ON DELETE CASCADE,
-  account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
+  provider_id TEXT NOT NULL REFERENCES auth_providers(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
+  account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE DEFERRABLE INITIALLY IMMEDIATE
   purpose TEXT NOT NULL CHECK (purpose IN ('login', 'link')),
   code_verifier TEXT NOT NULL,
   nonce TEXT NOT NULL,
@@ -385,7 +394,7 @@ CREATE TABLE IF NOT EXISTS auth_config (
 
 CREATE TABLE IF NOT EXISTS security_audit_log (
   id TEXT PRIMARY KEY,
-  actor_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  actor_account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL DEFERRABLE INITIALLY IMMEDIATE
   action TEXT NOT NULL,
   target_type TEXT,
   target_id TEXT,

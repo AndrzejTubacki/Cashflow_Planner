@@ -1468,8 +1468,13 @@ test("projection allocates goals before same-priority discretionary operating it
     db.prepare(`
       UPDATE flex_transactions
       SET created_at = '2026-01-01T00:00:00.000Z'
-      WHERE id IN (?, ?)
-    `).run(flexA.id, flexB.id);
+      WHERE id = ?
+    `).run(flexA.id);
+    db.prepare(`
+      UPDATE flex_transactions
+      SET created_at = '2026-01-01T00:00:01.000Z'
+      WHERE id = ?
+    `).run(flexB.id);
   } finally {
     db.close();
   }
@@ -1972,3 +1977,106 @@ test("a reserve-transfer expense already pending keeps its claim amount fixed ac
   const goalRow = snapshot.goals.find(g => g.name === "Gadget");
   assert.equal(goalRow.future_allocated_ledger, 100);
 }));
+
+
+for (const incomeAnchored of [false, true]) {
+  test(`projection retains shifted recurrences in ${incomeAnchored ? "income-anchored" : "calendar"} periods in both engines`, async () => withHarness(async harness => {
+    // Both engines write/read actual SQLite storage; route mutations exercise
+    // the production sync path, then the backend-neutral engine rebuilds it.
+    await configureManualFx(harness, { future_periods: incomeAnchored ? 2 : 3, fx_buffer_percent: 0 });
+    const anchor = {
+      currency: "PLN", active: 1, prediction_strategy: "fixed", repeat_every_months: 1,
+      anchor_type: "month_end", anchor_offset_days: 0,
+      anchor_business_day_adjustment: "next", anchor_holiday_country: "PL"
+    };
+    const income = await harness.api("/api/recurring-incomes", {
+      method: "POST", body: { ...anchor, name: "Shifted salary", amount: 1000, period_setting: incomeAnchored ? 1 : 0 }
+    });
+    if (incomeAnchored) await configureManualFx(harness, {
+      future_periods: 2, fx_buffer_percent: 0, budget_period_income_id: income.id
+    });
+    const expense = await harness.api("/api/recurring-expenses", {
+      method: "POST", body: { ...anchor, name: "Shifted rent", amount: 100, necessary: 1, priority: 1 }
+    });
+    const linked = await harness.api("/api/recurring-expenses", {
+      method: "POST", body: {
+        ...anchor, name: "Salary plus one day", amount: 50, necessary: 1, priority: 2,
+        anchor_income_id: income.id, anchor_offset_days: 1, anchor_business_day_adjustment: "none"
+      }
+    });
+    const readRows = () => {
+      const db = harness.openPlanningDb();
+      try {
+        return [...db.prepare("SELECT * FROM pending_transactions").all(),
+          ...db.prepare("SELECT * FROM future_transactions").all()];
+      } finally { db.close(); }
+    };
+    const datesFor = (rows, field, id) => rows.filter(row => row[field] === id).map(row => row.date).sort();
+    const expectedDates = incomeAnchored ? ["2026-11-02", "2026-11-30"] : ["2026-11-02", "2026-11-30", "2026-12-31"];
+    const assertOccurrences = rows => {
+      assert.deepEqual(datesFor(rows, "source_recurring_income_id", income.id), expectedDates);
+      assert.deepEqual(datesFor(rows, "source_recurring_expense_id", expense.id), expectedDates);
+      assert.equal(rows.filter(row => row.source_recurring_income_id === income.id)
+        .reduce((sum, row) => sum + row.ledger_amount, 0), expectedDates.length * 1000);
+      assert.equal(rows.filter(row => row.source_recurring_expense_id === expense.id)
+        .reduce((sum, row) => sum + row.ledger_amount, 0), expectedDates.length * 100);
+      assert.deepEqual(datesFor(rows, "source_recurring_expense_id", linked.id),
+        incomeAnchored ? ["2026-11-03", "2026-12-01"] : ["2026-10-01", "2026-11-03", "2026-12-01"]);
+      assert.equal(new Set(rows.map(row => row.occurrence_key)).size, rows.length);
+    };
+    const syncRows = readRows();
+    assertOccurrences(syncRows);
+    const asyncEngine = buildRealSqliteAsyncProjectionEngine(harness);
+    await asyncEngine.regenerateProjectionsAsync(harness.userId);
+    assertOccurrences(readRows());
+    await asyncEngine.regenerateProjectionsAsync(harness.userId);
+    assertOccurrences(readRows());
+
+    // Confirm the shifted income, then verify neither engine regenerates it.
+    let snapshot = await harness.api("/api");
+    let pending = snapshot.pendingTransactions.find(row => row.source_recurring_income_id === income.id && row.date === "2026-11-02");
+    if (!pending) {
+      const future = snapshot.futureTransactions.find(row => row.source_recurring_income_id === income.id && row.date === "2026-11-02");
+      snapshot = await harness.api(`/api/future/${encodeURIComponent(future.id)}/move-to-pending`, {
+        method: "POST", body: { occurrenceKey: future.occurrence_key }
+      });
+      pending = snapshot.pendingTransactions.find(row => row.occurrence_key === future.occurrence_key);
+    }
+    await harness.api(`/api/pending/${encodeURIComponent(pending.id)}/confirm`, {
+      method: "POST", body: { amount: 1000, confirmed_date: "2026-11-02" }
+    });
+    assert.equal(readRows().some(row => row.occurrence_key === pending.occurrence_key), false);
+    await asyncEngine.regenerateProjectionsAsync(harness.userId);
+    assert.equal(readRows().some(row => row.occurrence_key === pending.occurrence_key), false);
+    const ledger = harness.openLedgerDb(2026);
+    try {
+      assert.equal(ledger.prepare("SELECT COUNT(*) AS count FROM confirmed_transactions WHERE occurrence_key = ?").get(pending.occurrence_key).count, 1);
+    } finally { ledger.close(); }
+  }, { today: incomeAnchored ? "2026-11-02" : "2026-10-01" }));
+}
+
+for (const incomeAnchored of [false, true]) {
+  test(`projection on the 31st retains February in ${incomeAnchored ? "income-anchored" : "calendar"} periods`, async () => withHarness(async harness => {
+    await configureManualFx(harness, { future_periods: 3, fx_buffer_percent: 0 });
+    const income = await harness.api("/api/recurring-incomes", {
+      method: "POST", body: {
+        name: "Monthly salary", currency: "PLN", amount: 1000, active: 1,
+        period_setting: incomeAnchored ? 1 : 0, anchor_type: "day_of_month", anchor_day_of_month: 28,
+        anchor_business_day_adjustment: "none", repeat_every_months: 1
+      }
+    });
+    if (incomeAnchored) await configureManualFx(harness, {
+      future_periods: 3, fx_buffer_percent: 0, budget_period_income_id: income.id
+    });
+    const assertDates = () => {
+      const db = harness.openPlanningDb();
+      try {
+        const rows = db.prepare("SELECT date FROM future_transactions WHERE source_recurring_income_id = ? ORDER BY date").all(income.id);
+        assert.deepEqual(rows.map(row => row.date), ["2026-02-28", "2026-03-28"]);
+      } finally { db.close(); }
+    };
+    assertDates();
+    await buildRealSqliteAsyncProjectionEngine(harness).regenerateProjectionsAsync(harness.userId);
+    assertDates();
+  }, { today: "2026-01-31" }));
+}

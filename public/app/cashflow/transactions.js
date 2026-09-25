@@ -1,6 +1,6 @@
 import { escapeHtml } from "../utils.js";
 import { DEFAULT_LEDGER_CURRENCY } from "./constants.js";
-import { asNumber, formatMoney, renderStatusBadge, t, transactionTypeLabel } from "./shared.js";
+import { asNumber, formatMoneyHtml, renderStatusBadge, t, transactionTypeLabel } from "./shared.js";
 
 const EMPTY_VALUE = "-";
 
@@ -20,9 +20,9 @@ function renderMoneyStack(amount, currency, locale, ledgerAmount = null, ledgerC
 
   return `
     <div class="cashflow-amount-cell">
-      <strong>${formatMoney(amount, displayCurrency, locale)}</strong>
+      <strong>${formatMoneyHtml(amount, displayCurrency, locale)}</strong>
       ${shouldShowLedgerEquivalent
-        ? `<small>(${formatMoney(ledgerAmount, normalizedLedgerCurrency, locale)})</small>`
+        ? `<small>(${formatMoneyHtml(ledgerAmount, normalizedLedgerCurrency, locale)})</small>`
         : ""}
     </div>
   `;
@@ -55,11 +55,11 @@ function renderAmountCell(tx, locale) {
   if (requested !== undefined && requested !== null && asNumber(requested) !== amount) {
     return `
       <div class="cashflow-amount-cell">
-        <strong>${formatMoney(funded ?? amount, currency, locale)}</strong>
+        <strong>${formatMoneyHtml(funded ?? amount, currency, locale)}</strong>
         ${normalizeCurrencyCode(currency) !== normalizeCurrencyCode(ledgerCurrency) && hasMoneyValue(ledgerAmount)
-          ? `<small>(${formatMoney(ledgerAmount, ledgerCurrency, locale)})</small>`
+          ? `<small>(${formatMoneyHtml(ledgerAmount, ledgerCurrency, locale)})</small>`
           : ""}
-        <small>${escapeHtml(t(locale, "of"))} ${formatMoney(requested, currency, locale)}</small>
+        <small>${escapeHtml(t(locale, "of"))} ${formatMoneyHtml(requested, currency, locale)}</small>
       </div>
     `;
   }
@@ -101,10 +101,10 @@ function renderLedgerCell(tx, locale) {
   return `
     <div class="cashflow-ledger-cell">
       ${ledgerAmount !== undefined && ledgerAmount !== null
-        ? `<small>${escapeHtml(ledgerCurrency)}: ${formatMoney(ledgerAmount, ledgerCurrency, locale)}</small>`
+        ? `<small>${escapeHtml(ledgerCurrency)}: ${formatMoneyHtml(ledgerAmount, ledgerCurrency, locale)}</small>`
         : ""}
       ${runningBalance !== undefined && runningBalance !== null
-        ? `<small>${escapeHtml(t(locale, "Balance"))}: ${formatMoney(runningBalance, ledgerCurrency, locale)}</small>`
+        ? `<small>${escapeHtml(t(locale, "Balance"))}: ${formatMoneyHtml(runningBalance, ledgerCurrency, locale)}</small>`
         : ""}
     </div>
   `;
@@ -167,7 +167,7 @@ function renderTransactionRow(tx, locale, options = {}) {
       ${showRunningBalance
         ? `<td>${
             runningBalance !== undefined && runningBalance !== null
-              ? `<strong>${formatMoney(runningBalance, tx.ledger_currency || tx.ledgerCurrency || DEFAULT_LEDGER_CURRENCY, locale)}</strong>`
+              ? `<strong>${formatMoneyHtml(runningBalance, tx.ledger_currency || tx.ledgerCurrency || DEFAULT_LEDGER_CURRENCY, locale)}</strong>`
               : EMPTY_VALUE
           }</td>`
         : ""}

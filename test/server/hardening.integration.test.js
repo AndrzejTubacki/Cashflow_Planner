@@ -1000,7 +1000,7 @@ test("background tick isolates one user's timeout and continues with later users
   assert.deepEqual(result, { skipped: false, users: 2 });
   assert.deepEqual(sentUsers, ["timeout_user", "healthy_user"]);
   assert.ok(errors.some(item =>
-    item.kind === "cashflow_background_user_failed"
+    item.kind === "cashflow_background_job_failed"
       && item.details.userId === "timeout_user"
       && item.details.error === "External request timed out"
   ));

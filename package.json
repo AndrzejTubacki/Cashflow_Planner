@@ -1,12 +1,13 @@
 {
   "name": "cashflow",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node server.mjs",
     "test": "npm run test:node && npm run test:browser",
     "test:node": "node --test \"test/**/*.test.js\" \"test/**/*.integration.test.js\"",
+    "test:container": "CASHFLOW_ENABLE_CONTAINER_TESTS=1 node --test test/server/container-runtime.integration.test.js",
     "test:postgres": "node scripts/run-postgres-tests.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
     "smoke": "node scripts/smoke.mjs",
