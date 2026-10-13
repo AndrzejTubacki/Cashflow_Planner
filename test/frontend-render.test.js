@@ -131,6 +131,26 @@ test("UI preferences normalize and apply theme and density attributes", () => {
   assert.equal(target.style.colorScheme, "light dark");
 });
 
+test("create account form keeps a rejected draft and uses a pattern browsers can compile", async () => {
+  await loadLocale("en");
+
+  const html = renderUserSelectionPage({
+    error: "User ID must use 1-64 letters, numbers, underscores, or hyphens.",
+    createAccountDraft: { userId: "bad id!", displayName: "Ann <\"Q\">" }
+  });
+  assert.match(html, /name="userId"[^>]*value="bad id!"/);
+  assert.match(html, /name="displayName"[^>]*value="Ann &lt;&quot;Q&quot;&gt;"/);
+
+  const blank = renderUserSelectionPage({});
+  assert.match(blank, /name="userId"[^>]*value=""/);
+
+  // Browsers compile pattern attributes with the `v` flag and ignore patterns that fail to compile.
+  const pattern = html.match(/name="userId"[^>]*pattern="([^"]+)"/)[1];
+  const compiled = new RegExp(`^(?:${pattern})$`, "v");
+  assert.equal(compiled.test("good_id-1"), true);
+  assert.equal(compiled.test("bad id!"), false);
+});
+
 test("session and setup pages render auth-ready controls", async () => {
   await loadLocale("en");
 
@@ -616,7 +636,7 @@ test("admin tab renders global options controls", async () => {
   assert.match(html, /data-cashflow-admin-account-rename="admin-account"/);
   assert.match(html, /data-cashflow-admin-password-token="admin-account" data-purpose="password_reset"/);
   assert.match(html, /data-cashflow-admin-password-token="regular-account" data-purpose="password_setup"/);
-  assert.match(html, /data-cashflow-admin-password-token-output="admin-account"/);
+  assert.match(html, /data-cashflow-admin-password-token="admin-account" data-purpose="password_reset" data-account-label="Admin Account" data-account-email="admin@example.com"/);
   assert.match(html, /data-cashflow-admin-account-status="admin-account" data-next-status="disabled"/);
   assert.match(html, /data-cashflow-admin-account-status="regular-account" data-next-status="active"/);
   assert.match(html, /data-cashflow-admin-account-admin="admin-account" data-enabled="0"/);

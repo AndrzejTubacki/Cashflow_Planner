@@ -46,6 +46,8 @@ const AUTH_PROVIDER_KINDS = new Set(["oidc", "google", "github", "facebook"]);
 const SECRET_FIELD_PATTERN = /(secret|token|password|clientsecret|client_secret|privatekey|private_key)/i;
 const PASSWORD_TOKEN_BYTES = 32;
 const PASSWORD_TOKEN_TTL_HOURS = 24;
+const PASSWORD_TOKEN_MIN_TTL_HOURS = 1;
+const PASSWORD_TOKEN_MAX_TTL_HOURS = 720;
 const PASSWORD_MIN_LENGTH = 12;
 const PASSWORD_MAX_LENGTH = 1024;
 const PASSWORD_LOCK_THRESHOLD = 5;
@@ -3030,9 +3032,15 @@ export function createCashflowGlobalService({
     const email = Object.prototype.hasOwnProperty.call(input, "email")
       ? normalizeAccountEmail(input.email, "email")
       : null;
+    const expiresInHours = input.expiresInHours === undefined || input.expiresInHours === null || input.expiresInHours === ""
+      ? PASSWORD_TOKEN_TTL_HOURS
+      : normalizeAuthInteger(input.expiresInHours, "expiresInHours", {
+          min: PASSWORD_TOKEN_MIN_TTL_HOURS,
+          max: PASSWORD_TOKEN_MAX_TTL_HOURS
+        });
     const token = randomAuthToken();
     const tokenHash = authTokenHash(token);
-    const expiresAt = addHoursIso(PASSWORD_TOKEN_TTL_HOURS);
+    const expiresAt = addHoursIso(expiresInHours);
 
     // Full merge is unsafe: Postgres requires await for all repo operations,
     // but SQLite requires a strictly synchronous transaction closure.

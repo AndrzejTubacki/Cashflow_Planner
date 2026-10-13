@@ -6,7 +6,7 @@ import {
 } from "./actions.js";
 import { escapeHtml } from "../utils.js";
 import { DEFAULT_LEDGER_CURRENCY, FX_PROVIDER_NOTES } from "./constants.js";
-import { normalizeCashflowNumericInput, openCashflowModal } from "./modal.js";
+import { normalizeCashflowNumericInput, openCashflowModal, openPasswordTokenModal } from "./modal.js";
 import { formatMessage, localeOf, t } from "./shared.js";
 
 function selectedOptionValues(select) {
@@ -870,15 +870,14 @@ export function attachCashflowHandlers(root, props = {}) {
       const purpose = button.getAttribute("data-purpose") || "password_reset";
       if (!accountId) return;
 
-      withBusyButton(button, "Working...", async () => {
-        const result = await apiClient.json(`/api/admin/accounts/${encodeURIComponent(accountId)}/password-reset-token`, {
-          method: "POST",
-          body: { purpose }
-        });
-        const output = root.querySelector(`[data-cashflow-admin-password-token-output="${cssEscape(accountId)}"]`);
-        if (output) {
-          output.innerHTML = `${t(locale, "Password token")}: <code>${escapeHtml(result.token || "")}</code>`;
-        }
+      openPasswordTokenModal({
+        apiClient,
+        locale,
+        accountId,
+        accountLabel: button.getAttribute("data-account-label") || accountId,
+        email: button.getAttribute("data-account-email") || "",
+        purpose,
+        internalLoginActive: cashflow?.admin?.authConfig?.activeMode === "internal"
       });
     });
   });

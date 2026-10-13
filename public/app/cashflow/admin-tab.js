@@ -110,7 +110,6 @@ function renderAdminAccounts(locale, accounts = []) {
                   <div class="cashflow-admin-account-stat">
                     <span>${escapeHtml(t(locale, "Internal password"))}</span>
                     <strong>${account.hasPasswordCredential ? escapeHtml(t(locale, "Configured")) : escapeHtml(t(locale, "Not configured"))}</strong>
-                    <small data-cashflow-admin-password-token-output="${escapeHtml(accountId)}"></small>
                   </div>
                   <div class="cashflow-admin-account-stat">
                     <span>${escapeHtml(t(locale, "Budgets"))}</span>
@@ -125,8 +124,8 @@ function renderAdminAccounts(locale, accounts = []) {
 
                 <div class="cashflow-row-actions cashflow-row-actions--wrap">
                   ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-account-rename="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Save account"))}</button>` : ""}
-                  ${!deleted && !account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_setup">${escapeHtml(t(locale, "Create password setup token"))}</button>` : ""}
-                  ${!deleted && account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_reset">${escapeHtml(t(locale, "Create password reset token"))}</button>` : ""}
+                  ${!deleted && !account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_setup" data-account-label="${escapeHtml(account.display_name || accountId)}" data-account-email="${escapeHtml(account.email || "")}">${escapeHtml(t(locale, "Create password setup token"))}</button>` : ""}
+                  ${!deleted && account.hasPasswordCredential ? `<button type="button" class="btn-small" data-cashflow-admin-password-token="${escapeHtml(accountId)}" data-purpose="password_reset" data-account-label="${escapeHtml(account.display_name || accountId)}" data-account-email="${escapeHtml(account.email || "")}">${escapeHtml(t(locale, "Create password reset token"))}</button>` : ""}
                   ${!deleted ? `<button type="button" class="btn-small" data-cashflow-admin-external-link="${escapeHtml(accountId)}">${escapeHtml(t(locale, "Link external identity"))}</button>` : ""}
                   ${!deleted && status === "active" ? `<button type="button" class="btn-small" data-cashflow-admin-account-status="${escapeHtml(accountId)}" data-next-status="disabled">${escapeHtml(t(locale, "Disable account"))}</button>` : ""}
                   ${!deleted && status === "disabled" ? `<button type="button" class="btn-small" data-cashflow-admin-account-status="${escapeHtml(accountId)}" data-next-status="active">${escapeHtml(t(locale, "Enable account"))}</button>` : ""}

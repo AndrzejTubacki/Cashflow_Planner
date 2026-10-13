@@ -1730,6 +1730,43 @@ fieldset legend {
   margin-top: 0.25rem;
 }
 
+.cashflow-modal__form p {
+  margin: 0;
+}
+
+.cashflow-token-copy {
+  display: flex;
+  gap: 0.55rem;
+  align-items: stretch;
+}
+
+.cashflow-token-copy input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.cashflow-token-status:empty {
+  display: none;
+}
+
+.cashflow-token-instructions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cashflow-token-instructions h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.cashflow-token-instructions ol {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
 .cashflow-details-panel {
   min-width: 0;
   overflow: hidden;

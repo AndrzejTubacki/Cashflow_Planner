@@ -2339,6 +2339,56 @@ test("internal authentication uses admin-issued tokens, Argon2 credentials, and 
   }
 });
 
+test("admin password tokens honor a requested expiry within bounds and default to 24 hours", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: {
+        userId: "expiry_admin",
+        displayName: "Expiry Admin",
+        email: "expiry@example.com"
+      }
+    });
+
+    const hoursUntil = expiresAt => (Date.parse(expiresAt) - Date.now()) / 3_600_000;
+    const issue = body => harness.request("/api/admin/accounts/expiry_admin/password-reset-token", {
+      method: "POST",
+      useSession: true,
+      body: { purpose: "password_setup", ...body }
+    });
+
+    const defaulted = await issue({});
+    assert.equal(defaulted.response.status, 200);
+    assert.ok(Math.abs(hoursUntil(defaulted.body.expiresAt) - 24) < 0.1);
+
+    const week = await issue({ expiresInHours: 168 });
+    assert.equal(week.response.status, 200);
+    assert.ok(Math.abs(hoursUntil(week.body.expiresAt) - 168) < 0.1);
+
+    const db = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
+    try {
+      const stored = db.prepare(`
+        SELECT expires_at
+        FROM password_reset_tokens
+        WHERE account_id = 'expiry_admin' AND status = 'pending'
+      `).all();
+      assert.equal(stored.length, 1, "issuing a new token revokes the earlier pending one");
+      assert.equal(Date.parse(stored[0].expires_at), Date.parse(week.body.expiresAt));
+    } finally {
+      db.close();
+    }
+
+    for (const expiresInHours of [0, 721, 1.5, "soon"]) {
+      const rejected = await issue({ expiresInHours });
+      assert.equal(rejected.response.status, 400, `expiresInHours=${expiresInHours}`);
+      assert.match(rejected.body.error, /expiresInHours must be an integer from 1 to 720/);
+    }
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("external authentication uses trusted proxy headers and explicit identity links", async () => {
   const oldSecret = process.env.CASHFLOW_TEST_EXTERNAL_SECRET;
   process.env.CASHFLOW_TEST_EXTERNAL_SECRET = "shared-external-secret";

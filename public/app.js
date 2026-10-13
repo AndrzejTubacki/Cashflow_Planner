@@ -46,6 +46,7 @@ const state = {
     members: []
   },
   cashflow: null,
+  createAccountDraft: { userId: "", displayName: "" },
   csrfToken: "",
   error: "",
   message: "",
@@ -88,6 +89,7 @@ function clearSelectedUserState() {
   state.selectedAccountId = "";
   state.accountSession = null;
   state.cashflow = null;
+  state.createAccountDraft = { userId: "", displayName: "" };
   state.csrfToken = "";
   state.error = "";
   state.message = "";
@@ -175,7 +177,8 @@ function render() {
       users: state.users,
       auth: state.auth,
       error: state.error,
-      message: state.message
+      message: state.message,
+      createAccountDraft: state.createAccountDraft
     });
     attachShellHandlers();
     return;
@@ -576,10 +579,16 @@ function attachShellHandlers() {
       state.selectedAccountId = String(result?.session?.accountId || formData.get("userId") || "").trim();
       state.accountSession = result?.session || null;
       state.budgets = Array.isArray(result?.budgets) ? result.budgets : [];
+      state.createAccountDraft = { userId: "", displayName: "" };
       localStorage.setItem("cashflow_account_id", state.selectedAccountId);
       refreshUiPreferences({ useDefaultTab: true });
       render();
     } catch (error) {
+      // render() rebuilds the form from scratch, so keep what was typed.
+      state.createAccountDraft = {
+        userId: String(formData.get("userId") || ""),
+        displayName: String(formData.get("displayName") || "")
+      };
       state.error = error.message || t(null, "Failed to create account");
       render();
     }

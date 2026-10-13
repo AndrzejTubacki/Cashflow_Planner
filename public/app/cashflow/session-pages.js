@@ -135,8 +135,9 @@ function renderExternalLoginPage(locale) {
   `;
 }
 
-export function renderUserSelectionPage({ users = [], accounts = users, auth = null, error = "", message = "" } = {}) {
+export function renderUserSelectionPage({ users = [], accounts = users, auth = null, error = "", message = "", createAccountDraft = {} } = {}) {
   const locale = null;
+  const draft = createAccountDraft || {};
   const accountRows = Array.isArray(accounts) ? accounts : [];
   const internalMode = auth?.activeMode === "internal";
   const externalMode = auth?.activeMode === "external";
@@ -173,11 +174,11 @@ export function renderUserSelectionPage({ users = [], accounts = users, auth = n
           <h3>${escapeHtml(t(locale, "Create account"))}</h3>
           <label>
             <span>${escapeHtml(t(locale, "Account ID"))}</span>
-            <input name="userId" required maxlength="64" pattern="[A-Za-z0-9_-]{1,64}" autocomplete="username">
+            <input name="userId" required maxlength="64" pattern="[A-Za-z0-9_\\-]{1,64}" autocomplete="username" value="${escapeHtml(draft.userId || "")}">
           </label>
           <label>
             <span>${escapeHtml(t(locale, "Display name"))}</span>
-            <input name="displayName" maxlength="120">
+            <input name="displayName" maxlength="120" value="${escapeHtml(draft.displayName || "")}">
           </label>
           <button type="submit" class="cashflow-action cashflow-action--primary">
             ${escapeHtml(t(locale, "Create and continue"))}
