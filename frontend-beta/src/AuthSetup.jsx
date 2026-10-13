@@ -169,6 +169,20 @@ function CopyBlock({ label, text }) {
   );
 }
 
+function RestartSteps({ restart }) {
+  if (!restart || typeof restart !== "object") return null;
+  return (
+    <div className="beta-restart-steps">
+      <h4>2. Restart Cashflow</h4>
+      <p className="beta-hint">
+        Cashflow reads environment variables only when it starts, so the new secret is used after a restart. {restart.summary}
+      </p>
+      {(restart.commands || []).map(item => <CopyBlock key={item.command} label={item.label} text={item.command} />)}
+      {restart.after ? <p className="beta-hint">{restart.after}</p> : null}
+    </div>
+  );
+}
+
 function SecretStoreResult({ result }) {
   if (!result) return null;
   if (result.stored) {
@@ -192,8 +206,8 @@ function SecretStoreResult({ result }) {
       <p className="beta-hint">Add it yourself instead:</p>
       {manual.kind === "kubernetes" ? (
         <>
-          <CopyBlock label="Run, replacing the placeholder with the secret" text={manual.command} />
-          <p className="beta-hint">{manual.restart}</p>
+          <CopyBlock label="1. Add the secret: run this, replacing the placeholder with the secret" text={manual.command} />
+          <RestartSteps restart={manual.restart} />
           <details className="beta-details">
             <summary>{forbidden ? "Let Cashflow save secrets automatically next time" : "Permissions for automatic saving"}</summary>
             <p className="beta-hint">
@@ -205,8 +219,8 @@ function SecretStoreResult({ result }) {
         </>
       ) : (
         <>
-          <CopyBlock label={manual.envFile ? `Add to ${manual.envFile} or the container's environment` : "Add to Cashflow's environment"} text={manual.line} />
-          <p className="beta-hint">{manual.restart}</p>
+          <CopyBlock label={manual.envFile ? `1. Add the secret to ${manual.envFile} or the container's environment` : "1. Add the secret to Cashflow's environment"} text={manual.line} />
+          <RestartSteps restart={manual.restart} />
         </>
       )}
     </div>

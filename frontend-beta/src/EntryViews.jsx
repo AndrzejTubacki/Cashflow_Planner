@@ -5,9 +5,9 @@ import { DEFAULT_TIMEZONE, HOLIDAY_COUNTRIES, SUPPORTED_FX_CURRENCIES, TIMEZONE_
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_\\-]{1,64}";
 
-function EntryFrame({ title, subtitle, onSignOut, children }) {
+function EntryFrame({ title, subtitle, onSignOut, centered = false, children }) {
   return (
-    <div className="beta-entry">
+    <div className={centered ? "beta-entry beta-entry--centered" : "beta-entry"}>
       <header className="beta-entry-head">
         <div className="beta-wordmark">
           <span className="beta-mark">&#8353;</span>
@@ -394,14 +394,14 @@ export function SignInView({ auth, notice, onSignedIn }) {
 
   if (mode === "internal" && screen.name === "register") {
     return (
-      <EntryFrame title="Create your account" subtitle="Use the invitation you were sent.">
+      <EntryFrame centered title="Create your account" subtitle="Use the invitation you were sent.">
         <RegisterView onSignedIn={onSignedIn} onBack={() => setScreen({ name: "login" })} />
       </EntryFrame>
     );
   }
   if (mode === "internal" && screen.name === "set-password") {
     return (
-      <EntryFrame title={screen.purpose === "password_reset" ? "Reset your password" : "Create your password"}>
+      <EntryFrame centered title={screen.purpose === "password_reset" ? "Reset your password" : "Create your password"}>
         <PasswordSetupView
           email={screen.email}
           token={screen.token}
@@ -415,6 +415,7 @@ export function SignInView({ auth, notice, onSignedIn }) {
 
   return (
     <EntryFrame
+      centered={mode !== "none"}
       title={mode === "none" ? "Choose an account" : "Sign in"}
       subtitle={mode === "none" ? "This instance runs without sign-in, so pick an account or create one." : null}
     >

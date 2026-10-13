@@ -178,7 +178,76 @@ function storeInDotenv({ target, name, value, fsImpl }) {
   }
 }
 
-function manualInstructions(targets, name) {
+// A pod created by a Deployment is named <deployment>-<replicaset hash>-<suffix>.
+function deploymentFromPodName(podName) {
+  const match = String(podName || "").match(/^(.+)-[a-z0-9]{5,10}-[a-z0-9]{5}$/);
+  return match ? match[1] : "";
+}
+
+// Works out how this Cashflow process is run, so the steps can name the real thing to restart.
+export function detectRuntime({ env = process.env, fsImpl = fs, cgroupPath = "/proc/self/cgroup", dockerEnvPath = "/.dockerenv" } = {}) {
+  const cgroup = readFileIfPresent(fsImpl, cgroupPath);
+  if (env.KUBERNETES_SERVICE_HOST) {
+    return { kind: "kubernetes", deployment: deploymentFromPodName(env.HOSTNAME) };
+  }
+  let inDocker = false;
+  try {
+    inDocker = fsImpl.existsSync(dockerEnvPath);
+  } catch {
+    inDocker = false;
+  }
+  if (inDocker || /docker|containerd|libpod/.test(cgroup)) {
+    return { kind: "docker", container: String(env.HOSTNAME || "").trim() };
+  }
+  const unit = cgroup.match(/\/([A-Za-z0-9@._-]+\.service)(?:\/|$)/m)?.[1] || "";
+  if (unit && !/^(user@|session-)/.test(unit)) {
+    return { kind: "systemd", unit };
+  }
+  return { kind: "process" };
+}
+
+export function restartInstructions(runtime, namespace = "") {
+  const after = "When Cashflow is back, reopen Admin > Sign-in providers: the provider shows \"Secret found\" once Cashflow can read the secret.";
+  if (runtime.kind === "kubernetes") {
+    const deployment = runtime.deployment || "<cashflow-deployment>";
+    const ns = namespace ? `-n ${namespace} ` : "";
+    return {
+      summary: runtime.deployment
+        ? `Restart the ${deployment} deployment so its pods load the new value (the name comes from this pod; adjust it if yours differs).`
+        : "Restart the Cashflow deployment so its pods load the new value.",
+      commands: [
+        { label: "Restart", command: `kubectl ${ns}rollout restart deployment/${deployment}` },
+        { label: "Wait until it's done", command: `kubectl ${ns}rollout status deployment/${deployment}` }
+      ],
+      after
+    };
+  }
+  if (runtime.kind === "docker") {
+    const container = runtime.container || "<cashflow-container>";
+    return {
+      summary: "Restart the Cashflow container. If you use Docker Compose, restart its service instead.",
+      commands: [
+        { label: "Docker", command: `docker restart ${container}` },
+        { label: "Docker Compose (from the folder with your compose file)", command: "docker compose restart cashflow" }
+      ],
+      after
+    };
+  }
+  if (runtime.kind === "systemd") {
+    return {
+      summary: `Cashflow runs as the systemd service ${runtime.unit}. Restart it:`,
+      commands: [{ label: "Restart", command: `sudo systemctl restart ${runtime.unit}` }],
+      after
+    };
+  }
+  return {
+    summary: "Stop Cashflow (Ctrl+C in the terminal it runs in, or however you normally stop it) and start it again from the Cashflow folder:",
+    commands: [{ label: "Start", command: "npm start" }],
+    after
+  };
+}
+
+function manualInstructions(targets, name, runtime) {
   const kubernetes = targets.find(target => target.kind === "kubernetes");
   if (kubernetes) {
     return {
@@ -187,7 +256,7 @@ function manualInstructions(targets, name) {
       secretName: kubernetes.secretName,
       serviceAccount: kubernetes.serviceAccount,
       command: `kubectl -n ${kubernetes.namespace} patch secret ${kubernetes.secretName} --type merge -p '{"stringData":{"${name}":"<paste the secret here>"}}'`,
-      restart: "Then restart the Cashflow deployment so it picks up the new value.",
+      restart: restartInstructions(runtime, kubernetes.namespace),
       rbac: [
         "apiVersion: rbac.authorization.k8s.io/v1",
         "kind: Role",
@@ -221,7 +290,8 @@ function manualInstructions(targets, name) {
     kind: "env",
     envFile: dotenv?.path || "",
     line: `${name}=<paste the secret here>`,
-    restart: "Add this to Cashflow's environment (the .env file or your container settings), then restart Cashflow."
+    note: "Add it to Cashflow's environment: the .env file in the Cashflow folder, or your container's environment settings.",
+    restart: restartInstructions(runtime)
   };
 }
 
@@ -230,7 +300,9 @@ export function createSecretStore({
   envFilePath = null,
   fsImpl = fs,
   serviceAccountDir = SERVICE_ACCOUNT_DIR,
-  requestImpl = null
+  requestImpl = null,
+  cgroupPath = "/proc/self/cgroup",
+  dockerEnvPath = "/.dockerenv"
 } = {}) {
   const kubeRequest = requestImpl || (options => kubernetesRequest({ ...options, serviceAccountDir, fsImpl }));
 
@@ -257,7 +329,8 @@ export function createSecretStore({
         return { stored: true, name: secret.name, target: attempt.target, attempts };
       }
     }
-    return { stored: false, name: secret.name, attempts, manual: manualInstructions(targets, secret.name) };
+    const runtime = detectRuntime({ env, fsImpl, cgroupPath, dockerEnvPath });
+    return { stored: false, name: secret.name, attempts, manual: manualInstructions(targets, secret.name, runtime) };
   }
 
   return { describe, store };

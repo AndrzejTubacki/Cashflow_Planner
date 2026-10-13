@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import dotenv from "dotenv";
 
-import { createSecretStore, normalizeStorableSecret } from "../../src/server/cashflow-secret-store.js";
+import { createSecretStore, detectRuntime, normalizeStorableSecret, restartInstructions } from "../../src/server/cashflow-secret-store.js";
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "cashflow-secret-store-"));
@@ -60,11 +60,18 @@ test("a writable .env gets the secret added or replaced, keeps its other lines, 
 
 test("without a usable .env or Kubernetes access, storing returns manual steps and why automatic storage failed", async () => {
   const dir = tempDir();
-  const missing = await createSecretStore({ env: {}, envFilePath: path.join(dir, ".env") }).store("CASHFLOW_GOOGLE_CLIENT_SECRET", "v");
+  const missing = await createSecretStore({
+    env: {},
+    envFilePath: path.join(dir, ".env"),
+    cgroupPath: path.join(dir, "no-cgroup"),
+    dockerEnvPath: path.join(dir, "no-dockerenv")
+  }).store("CASHFLOW_GOOGLE_CLIENT_SECRET", "v");
   assert.equal(missing.stored, false);
   assert.equal(missing.attempts[0].reason, "missing");
   assert.equal(missing.manual.kind, "env");
   assert.equal(missing.manual.line, "CASHFLOW_GOOGLE_CLIENT_SECRET=<paste the secret here>");
+  assert.deepEqual(missing.manual.restart.commands, [{ label: "Start", command: "npm start" }]);
+  assert.match(missing.manual.restart.after, /Secret found/);
 
   const envFilePath = path.join(dir, ".env");
   fs.writeFileSync(envFilePath, "PORT=3000\n");
@@ -106,6 +113,7 @@ test("in Kubernetes the secret is patched into the Secret, and missing permissio
   assert.equal(forbidden.attempts[0].reason, "forbidden");
   assert.match(forbidden.attempts[0].message, /cashflow-sa/);
   assert.equal(forbidden.manual.kind, "kubernetes");
+  assert.match(forbidden.manual.restart.commands[0].command, /^kubectl -n money rollout restart deployment\//);
   assert.equal(forbidden.manual.secretName, "my-secrets");
   assert.match(forbidden.manual.command, /kubectl -n money patch secret my-secrets/);
   assert.doesNotMatch(forbidden.manual.command, /k8s-value/, "instructions never echo the secret");
@@ -116,4 +124,38 @@ test("in Kubernetes the secret is patched into the Secret, and missing permissio
   status = 404;
   const notFound = await makeStore({ KUBERNETES_SERVICE_HOST: "10.0.0.1" }).store("CASHFLOW_GOOGLE_CLIENT_SECRET", "v");
   assert.equal(notFound.attempts[0].reason, "not_found");
+});
+
+test("restart steps name what actually runs Cashflow", () => {
+  const dir = tempDir();
+  const cgroup = (text) => {
+    const file = path.join(dir, `cgroup-${Math.random()}`);
+    fs.writeFileSync(file, text);
+    return file;
+  };
+  const none = path.join(dir, "absent");
+
+  const kube = detectRuntime({ env: { KUBERNETES_SERVICE_HOST: "10.0.0.1", HOSTNAME: "cashflow-6d8f7c9b5d-x2k4p" }, cgroupPath: none, dockerEnvPath: none });
+  assert.deepEqual(kube, { kind: "kubernetes", deployment: "cashflow" });
+  assert.deepEqual(restartInstructions(kube, "money").commands.map(c => c.command), [
+    "kubectl -n money rollout restart deployment/cashflow",
+    "kubectl -n money rollout status deployment/cashflow"
+  ]);
+  const oddPod = detectRuntime({ env: { KUBERNETES_SERVICE_HOST: "10.0.0.1", HOSTNAME: "cashflow-0" }, cgroupPath: none, dockerEnvPath: none });
+  assert.match(restartInstructions(oddPod, "money").commands[0].command, /deployment\/<cashflow-deployment>$/);
+
+  const docker = detectRuntime({ env: { HOSTNAME: "3f2a9c1d7e44" }, cgroupPath: cgroup("0::/system.slice/docker-3f2a9c1d7e44.scope\n"), dockerEnvPath: none });
+  assert.deepEqual(docker, { kind: "docker", container: "3f2a9c1d7e44" });
+  assert.equal(restartInstructions(docker).commands[0].command, "docker restart 3f2a9c1d7e44");
+
+  const dockerEnvFile = path.join(dir, ".dockerenv");
+  fs.writeFileSync(dockerEnvFile, "");
+  assert.equal(detectRuntime({ env: { HOSTNAME: "abc" }, cgroupPath: cgroup("0::/\n"), dockerEnvPath: dockerEnvFile }).kind, "docker");
+
+  const systemd = detectRuntime({ env: {}, cgroupPath: cgroup("0::/system.slice/cashflow.service\n"), dockerEnvPath: none });
+  assert.deepEqual(systemd, { kind: "systemd", unit: "cashflow.service" });
+  assert.equal(restartInstructions(systemd).commands[0].command, "sudo systemctl restart cashflow.service");
+
+  const desktop = detectRuntime({ env: {}, cgroupPath: cgroup("0::/user.slice/user-1000.slice/user@1000.service/app.slice/vte-spawn-1.scope\n"), dockerEnvPath: none });
+  assert.deepEqual(desktop, { kind: "process" });
 });

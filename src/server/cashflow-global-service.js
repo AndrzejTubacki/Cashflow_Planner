@@ -74,7 +74,8 @@ const PROVIDER_PRESETS = {
     displayName: "GitHub",
     emailField: "email",
     emailVerifiedField: "email_verified",
-    issuer: "https://github.com",
+    // GitHub's published OAuth metadata issuer; its callbacks carry it as ?iss= (RFC 9207) since April 2026.
+    issuer: "https://github.com/login/oauth",
     scope: "read:user user:email",
     subjectField: "id",
     tokenEndpoint: "https://github.com/login/oauth/access_token",
@@ -2603,7 +2604,26 @@ export function createCashflowGlobalService({
     };
   }
 
-  async function oidcConfigurationForProvider(provider, explicitSecret = null) {
+  // Plain OAuth2 providers have no discovery document, so the issuer comes from the preset or settings.
+  // A provider saved before GitHub's change stored "https://github.com", which GitHub no longer sends.
+  // An iss returned on the provider's own authorization host is accepted (Facebook, GitHub Enterprise);
+  // any other issuer is still rejected by openid-client, which keeps the mix-up protection.
+  function oauthIssuerFor(provider, returnedIssuer = "") {
+    const configured = provider.kind === "github" && (!provider.issuer || provider.issuer === "https://github.com")
+      ? PROVIDER_PRESETS.github.issuer
+      : provider.issuer || provider.id;
+    if (!returnedIssuer || returnedIssuer === configured) return configured;
+    try {
+      const returned = new URL(returnedIssuer);
+      const authorization = new URL(provider.config.authorizationEndpoint);
+      if (returned.protocol === "https:" && returned.host === authorization.host) return returnedIssuer;
+    } catch {
+      // Not a URL: fall through and let the issuer check reject it.
+    }
+    return configured;
+  }
+
+  async function oidcConfigurationForProvider(provider, explicitSecret = null, { returnedIssuer = "" } = {}) {
     const secret = explicitSecret === null ? providerSecret(provider.id) : explicitSecret;
     const metadata = providerClientMetadata(provider, secret);
     if (provider.kind === "oidc" || provider.kind === "google") {
@@ -2614,7 +2634,7 @@ export function createCashflowGlobalService({
     }
     const config = new oidcClient.Configuration({
       authorization_endpoint: provider.config.authorizationEndpoint,
-      issuer: provider.issuer || provider.id,
+      issuer: oauthIssuerFor(provider, returnedIssuer),
       token_endpoint: provider.config.tokenEndpoint,
       userinfo_endpoint: provider.config.userInfoEndpoint
     }, provider.clientId, metadata);
@@ -2660,7 +2680,9 @@ export function createCashflowGlobalService({
         return hooked.accessToken ? await enrichOAuthProfile(provider, hooked.profile, hooked.accessToken) : hooked.profile;
       }
     }
-    const config = await oidcConfigurationForProvider(provider, secret);
+    const config = await oidcConfigurationForProvider(provider, secret, {
+      returnedIssuer: String(new URL(callbackUrl).searchParams.get("iss") || "")
+    });
     const tokens = await oidcClient.authorizationCodeGrant(
       config,
       new URL(callbackUrl),

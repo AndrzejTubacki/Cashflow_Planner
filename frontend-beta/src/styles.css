@@ -1257,6 +1257,32 @@ body {
   padding: 0 2px;
 }
 
+/* Single-card screens (sign-in, create account, create password) sit in the middle of the viewport. */
+.beta-entry--centered {
+  min-height: 100dvh;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+}
+
+.beta-entry--centered > * {
+  width: 100%;
+  max-width: 460px;
+}
+
+.beta-entry--centered .beta-entry-head {
+  justify-content: center;
+}
+
+.beta-entry--centered .beta-entry-title p {
+  margin-inline: auto;
+}
+
+.beta-entry--centered .beta-signin-card,
+.beta-entry--centered .beta-entry-narrow {
+  text-align: left;
+}
+
 /* ---- internal sign-in card ---- */
 .beta-signin-card {
   width: 100%;
@@ -1436,6 +1462,21 @@ body {
   white-space: pre;
 }
 
+.beta-restart-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.beta-restart-steps h4 {
+  margin: 4px 0 0;
+  font-size: 13.5px;
+}
+
+.beta-restart-steps .beta-hint {
+  margin: 0;
+}
+
 /* ---- password token popup ---- */
 .beta-token-row {
   display: flex;
@@ -1512,7 +1553,7 @@ body {
     gap: 6px;
   }
 
-  .beta-wordmark,
+  .beta-rail .beta-wordmark,
   .beta-rail-footer {
     display: none;
   }

@@ -602,7 +602,13 @@ export function registerCashflowRoutes(app, {
         res.redirect("/?cashflow_auth=provider");
       } catch (error) {
         // The browser arrives here from the provider, so send it back to the app with a readable reason, not JSON.
-        logError("cashflow_provider_callback_failed", error);
+        // openid-client wraps the useful reason (e.g. an unexpected iss) in error.cause.
+        logError("cashflow_provider_callback_failed", {
+          message: error?.message || String(error),
+          code: error?.code || null,
+          cause: error?.cause?.message || null,
+          stack: error?.stack || null
+        });
         const message = error?.status && error.status < 500 ? error.message : "Provider sign-in failed. Try again or ask your administrator.";
         res.redirect(`/?cashflow_auth_error=${encodeURIComponent(message || "Provider sign-in failed.")}#account`);
       }

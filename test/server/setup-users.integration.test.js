@@ -3828,3 +3828,60 @@ test("admins can store a provider secret from the UI; it lands in .env, works at
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("GitHub callbacks carrying the RFC 9207 iss parameter are accepted, including for providers saved with the old issuer", async () => {
+  const previous = process.env.CASHFLOW_TEST_ISS_GITHUB_SECRET;
+  process.env.CASHFLOW_TEST_ISS_GITHUB_SECRET = "iss-github-secret";
+  const json = body => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  // Answers for the preset's real GitHub endpoints, so nothing here overrides the GitHub configuration.
+  const harness = await createCashflowTestHarness({
+    initializeUser: false,
+    fetchImpl: async (url, init = {}) => {
+      const target = String(url);
+      if (target === "https://github.com/login/oauth/access_token") return json({ access_token: "iss-token", token_type: "bearer" });
+      if (target === "https://api.github.com/user") return json({ id: 9207, login: "rfc", name: "RFC", email: null });
+      if (target === "https://api.github.com/user/emails") return json([{ email: "rfc@example.com", primary: true, verified: true }]);
+      return fetch(url, init);
+    }
+  });
+
+  async function callback(startPath, useSession, iss) {
+    const started = await harness.request(startPath, { method: "POST", useSession, skipUserHeader: true, body: {} });
+    assert.equal(started.response.status, 200, JSON.stringify(started.body));
+    const state = new URL(started.body.authorizationUrl).searchParams.get("state");
+    const query = new URLSearchParams({ code: "iss-code", state, ...(iss ? { iss } : {}) });
+    const result = await harness.request(`/api/auth/providers/github/callback?${query}`, { skipUserHeader: true, redirect: "manual" });
+    return decodeURIComponent(result.response.headers.get("location") || "");
+  }
+
+  try {
+    await harness.api("/api/accounts", { method: "POST", body: { userId: "iss_owner", displayName: "Owner", email: "owner@example.com" } });
+    await harness.api("/api/account/password", { method: "POST", useSession: true, body: { newPassword: "iss owner correct horse" } });
+    await harness.api("/api/admin/auth/providers/github", {
+      method: "PUT",
+      useSession: true,
+      body: {
+        kind: "github",
+        displayName: "GitHub",
+        enabled: true,
+        issuer: "https://github.com",
+        clientId: "iss-client",
+        secretEnv: "CASHFLOW_TEST_ISS_GITHUB_SECRET",
+        redirectUri: `${harness.baseUrl()}/api/auth/providers/github/callback`
+      }
+    });
+    await harness.api("/api/admin/auth/draft", { method: "PUT", useSession: true, body: { draftMode: "internal" } });
+    await harness.api("/api/admin/auth/activate", { method: "POST", useSession: true, body: {} });
+    await harness.api("/api/auth/internal/login", { method: "POST", skipUserHeader: true, body: { email: "owner@example.com", password: "iss owner correct horse" } });
+
+    assert.equal(await callback("/api/auth/providers/github/link/start", true, "https://github.com/login/oauth"), "/?cashflow_auth=linked#account");
+    assert.match(await callback("/api/auth/providers/github/login/start", false, "https://evil.example.test/login/oauth"), /cashflow_auth_error=/,
+      "an issuer from another host is still rejected");
+    assert.equal(await callback("/api/auth/providers/github/login/start", false, "https://github.com/login/oauth"), "/?cashflow_auth=provider");
+    assert.equal(await callback("/api/auth/providers/github/login/start", false, ""), "/?cashflow_auth=provider", "callbacks without iss still work");
+  } finally {
+    if (previous === undefined) delete process.env.CASHFLOW_TEST_ISS_GITHUB_SECRET;
+    else process.env.CASHFLOW_TEST_ISS_GITHUB_SECRET = previous;
+    await harness.cleanup();
+  }
+});
