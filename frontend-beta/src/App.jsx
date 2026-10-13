@@ -8,10 +8,12 @@ import TargetsView from "./TargetsView.jsx";
 import BudgetView from "./BudgetView.jsx";
 import SettingsView from "./SettingsView.jsx";
 import AdminView from "./AdminView.jsx";
+import AccountView from "./AccountView.jsx";
+import { BudgetPickerView, SetupView, SignInView } from "./EntryViews.jsx";
 import PlaceholderView from "./PlaceholderView.jsx";
 import UserMenu from "./UserMenu.jsx";
 import { NAV_SECTIONS } from "./NAV_SECTIONS.js";
-import { fetchSession, fetchSnapshot, setCsrfToken } from "./api.js";
+import { apiFetch, fetchSession, fetchSnapshot, setCsrfToken } from "./api.js";
 import { applyUiPreferences, currentPreferenceScope, loadUiPreferences } from "./uiPreferences.js";
 
 function useHashSection() {
@@ -28,10 +30,20 @@ function useHashSection() {
   return [section, select];
 }
 
+function clearStoredSelection() {
+  localStorage.removeItem("cashflow_budget_id");
+  localStorage.removeItem("cashflow_user_id");
+}
+
 export default function App() {
+  // loading -> signin | budgets | app; error only when the server can't be reached at all.
   const [status, setStatus] = useState("loading");
+  const [auth, setAuth] = useState(null);
+  const [session, setSession] = useState(null);
   const [snapshot, setSnapshot] = useState(null);
   const [errorMessage, setErrorMessage] = useState("");
+  const [signInNotice, setSignInNotice] = useState("");
+  const [pickingBudget, setPickingBudget] = useState(false);
   const [section, selectSection] = useHashSection();
 
   useEffect(() => {
@@ -48,28 +60,90 @@ export default function App() {
   const loadCounter = useRef(0);
   const load = useCallback(async () => {
     const currentRequestId = ++loadCounter.current;
+    const isCurrent = () => currentRequestId === loadCounter.current;
     try {
-      const sessionResult = await fetchSession();
+      const authResult = await apiFetch("/api/auth/config", { cache: "no-store", scoped: false })
+        .catch(() => ({ auth: { activeMode: "none" } }));
+      const authConfig = authResult?.auth || { activeMode: "none" };
+      if (isCurrent()) setAuth(authConfig);
+      let sessionResult = await fetchSession();
+
+      // Browsers that only ever used the budget header (no session cookie) get one
+      // re-established for the budget they already had, instead of a sign-in screen.
+      const storedBudget = localStorage.getItem("cashflow_budget_id") || localStorage.getItem("cashflow_user_id") || "";
+      if (!sessionResult?.session?.authenticated && authConfig.activeMode === "none" && storedBudget) {
+        const recovered = await apiFetch("/api/session/select", {
+          method: "POST",
+          body: { budgetId: storedBudget },
+          scoped: false
+        }).catch(() => null);
+        if (!recovered) clearStoredSelection();
+        sessionResult = await fetchSession();
+      }
+
       if (currentRequestId === loadCounter.current && sessionResult?.csrfToken) {
         setCsrfToken(sessionResult.csrfToken);
       }
+      if (!isCurrent()) return;
+      const nextSession = sessionResult?.session || {};
+      setSession(nextSession);
 
+      if (!nextSession.authenticated) {
+        clearStoredSelection();
+        setStatus("signin");
+        return;
+      }
+
+      const budgetId = String(nextSession.budgetId || nextSession.userId || "").trim();
+      if (!budgetId) {
+        clearStoredSelection();
+        setStatus("budgets");
+        return;
+      }
+
+      localStorage.setItem("cashflow_budget_id", budgetId);
+      localStorage.setItem("cashflow_user_id", budgetId);
       const data = await fetchSnapshot();
-      if (currentRequestId === loadCounter.current) {
+      if (isCurrent()) {
         setSnapshot(data);
-        setStatus("ready");
+        setSignInNotice("");
+        setStatus("app");
         localStorage.setItem("cashflow_preferred_ui", "beta");
       }
     } catch (err) {
-      if (currentRequestId === loadCounter.current) {
-        setErrorMessage(err.message || "Could not load your budget.");
-        setStatus("error");
+      if (!isCurrent()) return;
+      if (err?.status === 401 || err?.status === 404) {
+        clearStoredSelection();
+        setSignInNotice("Your previous session has ended. Sign in again to continue.");
+        setStatus("signin");
+        return;
       }
+      setErrorMessage(err.message || "Could not load your budget.");
+      setStatus("error");
     }
   }, []);
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  const signOut = useCallback(async () => {
+    try {
+      await apiFetch("/api/logout", { method: "POST", scoped: false });
+    } catch {
+      window.alert("Couldn't confirm sign-out with the server. Close your browser to be safe.");
+    }
+    clearStoredSelection();
+    localStorage.removeItem("cashflow_account_id");
+    setSnapshot(null);
+    setPickingBudget(false);
+    setSignInNotice("");
+    await load();
+  }, [load]);
+
+  const afterBudgetSelected = useCallback(async () => {
+    setPickingBudget(false);
+    await load();
   }, [load]);
 
   if (status === "loading") {
@@ -85,15 +159,20 @@ export default function App() {
     return (
       <div className="beta-loading">
         <div className="beta-error-card">
-          <h2>Couldn&rsquo;t load your budget here</h2>
+          <h2>Couldn&rsquo;t reach Cashflow</h2>
           <p>{errorMessage}</p>
-          <p>
-            Open the <a href="/">legacy app</a> first to sign in and pick a budget, then come back
-            to <code>/beta</code>. Sessions are shared between both.
-          </p>
+          <button type="button" className="beta-btn-primary" onClick={() => { setStatus("loading"); load(); }}>Try again</button>
         </div>
       </div>
     );
+  }
+
+  if (status === "signin") {
+    return <SignInView auth={auth} notice={signInNotice} onSignedIn={load} />;
+  }
+
+  if (status === "budgets" || pickingBudget) {
+    return <BudgetPickerView session={session} onSelected={afterBudgetSelected} onSignOut={signOut} />;
   }
 
   const settings = snapshot?.settings || {};
@@ -102,6 +181,18 @@ export default function App() {
     || snapshot?.session?.userId
     || "This budget";
   const setupRequired = Boolean(snapshot?.setup_required);
+
+  if (setupRequired) {
+    return (
+      <SetupView
+        snapshot={snapshot}
+        onDone={load}
+        onSignOut={signOut}
+        onSwitchBudget={() => setPickingBudget(true)}
+      />
+    );
+  }
+
   const canAdmin = (snapshot?.session?.permissions || []).includes("admin");
   const capabilities = snapshot?.session?.capabilities || [];
   const canMaintain = capabilities.includes("budget:maintain");
@@ -126,6 +217,7 @@ export default function App() {
           canValidate={canValidate}
           onSelectSection={selectSection}
           onRefresh={load}
+          onSignOut={signOut}
         />
       </header>
 
@@ -135,19 +227,6 @@ export default function App() {
         <AdminView snapshot={snapshot} onRefresh={load} />
       ) : section === "admin" ? (
         <LedgerView snapshot={snapshot} onRefresh={load} />
-      ) : setupRequired ? (
-        <section className="beta-view">
-          <div className="beta-view-head">
-            <h1>This budget needs first-time setup</h1>
-            <p>Beta doesn&rsquo;t have the first-run setup form yet.</p>
-          </div>
-          <div className="beta-placeholder">
-            <strong>Finish setup in the legacy app, or switch budgets</strong>
-            Open the <a href="/">legacy app</a> to set an opening balance and finish setup for this
-            budget, then come back &mdash; or use the <a href="#budget" onClick={() => selectSection("budget")}>Budget tab</a> to
-            switch to one that&rsquo;s already set up.
-          </div>
-        </section>
       ) : section === "ledger" ? (
         <LedgerView snapshot={snapshot} onRefresh={load} />
       ) : section === "recurring" ? (
@@ -158,6 +237,8 @@ export default function App() {
         <PrioritiesView snapshot={snapshot} onRefresh={load} />
       ) : section === "targets" ? (
         <TargetsView snapshot={snapshot} onRefresh={load} />
+      ) : section === "account" ? (
+        <AccountView onRefresh={load} />
       ) : section === "settings" ? (
         <SettingsView snapshot={snapshot} onRefresh={load} />
       ) : (

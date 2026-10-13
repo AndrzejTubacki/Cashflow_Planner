@@ -166,6 +166,9 @@ export function registerCashflowRoutes(app, {
   updateRecurringIncome,
   updateAdminAccount = null,
   updateAdminAccountAsync = null,
+  getOwnAccount = null,
+  updateOwnAccount = null,
+  changeOwnPassword = null,
   updateAdminAuthDraft = null,
   updateAdminAuthDraftAsync = null,
   upsertAdminAuthProvider = null,
@@ -247,6 +250,8 @@ export function registerCashflowRoutes(app, {
     }
 
     async function fail(req, res, error, fallback, logKind = null) {
+      // An expired or revoked cookie would otherwise fail every later request too.
+      if (error?.code === "CASHFLOW_SESSION_INVALID") clearSessionCookie(req, res);
       await sendApiError({
         req,
         res,
@@ -309,7 +314,8 @@ export function registerCashflowRoutes(app, {
         ? await resolveRequestActor(req)
         : null;
       if (actor) return actor;
-      return (await activeAuthMode()) === "none" ? await contextForRequest(req) : null;
+      // Without a session or a budget header there is no actor; callers turn that into 401.
+      return (await activeAuthMode()) === "none" && hasBudgetSelector(req) ? await contextForRequest(req) : null;
     }
 
     async function requireActor(req) {
@@ -669,6 +675,36 @@ export function registerCashflowRoutes(app, {
         });
       } catch (error) {
         await fail(req, res, error, "Failed to register account", "cashflow_internal_register_failed");
+      }
+    });
+
+    app.get("/api/account", async (req, res) => {
+      try {
+        const actor = await requireActor(req);
+        if (typeof getOwnAccount !== "function") throw new Error("Account service is unavailable");
+        res.json({ account: await getOwnAccount(actor.account.id) });
+      } catch (error) {
+        await fail(req, res, error, "Failed to load account", "cashflow_account_load_failed");
+      }
+    });
+
+    app.put("/api/account", async (req, res) => {
+      try {
+        const actor = await requireActor(req);
+        if (typeof updateOwnAccount !== "function") throw new Error("Account service is unavailable");
+        res.json({ account: await updateOwnAccount(actor.account.id, req.body || {}) });
+      } catch (error) {
+        await fail(req, res, error, "Failed to update account", "cashflow_account_update_failed");
+      }
+    });
+
+    app.post("/api/account/password", async (req, res) => {
+      try {
+        const actor = await requireActor(req);
+        if (typeof changeOwnPassword !== "function") throw new Error("Account service is unavailable");
+        res.json({ account: await changeOwnPassword(actor.account.id, actor.authSession.id, req.body || {}) });
+      } catch (error) {
+        await fail(req, res, error, "Failed to change password", "cashflow_account_password_failed");
       }
     });
 

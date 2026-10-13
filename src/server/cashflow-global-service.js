@@ -23,6 +23,7 @@ import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js"
 import {
   badRequest,
   conflict,
+  createHttpError,
   forbidden,
   normalizeUserId,
   notFound,
@@ -998,6 +999,213 @@ export function createCashflowGlobalService({
       });
       return await accountSummaryForRepo(repo, normalizedId);
     }, () => updateAdminAccount(actorAccountId, normalizedId, input));
+  }
+
+  function ownAccountView(account, credential, authMode) {
+    return {
+      id: account.id,
+      displayName: account.display_name || account.id,
+      email: account.email || "",
+      hasPasswordCredential: Boolean(credential),
+      authMode
+    };
+  }
+
+  async function readOwnAccountState(accountId) {
+    return await withGlobalRepository(async repo => {
+      const account = await repo.accounts.require(accountId);
+      if (account.status !== "active") throw forbidden("This account is not active");
+      const credential = await repo.passwordCredentials.getForAccount(accountId);
+      const modeRow = await repo.authConfig.getActiveMode();
+      return { account, credential, authMode: String(modeRow?.active_mode || "none") };
+    });
+  }
+
+  async function getOwnAccount(accountId) {
+    const { account, credential, authMode } = await readOwnAccountState(normalizeUserId(accountId));
+    return ownAccountView(account, credential, authMode);
+  }
+
+  // Shares the login lockout counters, so this check can't be used to guess around them.
+  async function verifyOwnCurrentPassword(accountId, credential, currentPassword) {
+    if (credential.locked_until && Date.parse(credential.locked_until) > Date.now()) {
+      throw createHttpError("Too many incorrect password attempts. Try again later.", 429);
+    }
+    const verified = typeof currentPassword === "string" && currentPassword.length > 0
+      && await argon2.verify(credential.password_hash, passwordMaterial(currentPassword));
+    if (verified) return;
+
+    const attempts = Number(credential.failed_attempts || 0) + 1;
+    const record = {
+      accountId,
+      attempts,
+      lockThreshold: PASSWORD_LOCK_THRESHOLD,
+      lockUntil: addMinutesIso(PASSWORD_LOCK_MINUTES)
+    };
+    await withExternalGlobalTransaction(async repo => {
+      await repo.passwordCredentials.recordFailedLogin(record);
+      await repo.audit.insertSecurityEvent({
+        action: "account_current_password_check",
+        actorAccountId: accountId,
+        outcome: "failure",
+        targetId: accountId,
+        targetType: "account"
+      });
+    }, () => {
+      const db = openGlobalDb();
+      try {
+        db.transaction(() => {
+          globalRepository(db).passwordCredentials.recordFailedLogin(record);
+          auditGlobalSecurity(db, {
+            action: "account_current_password_check",
+            actorAccountId: accountId,
+            outcome: "failure",
+            targetId: accountId,
+            targetType: "account"
+          });
+        })();
+      } finally {
+        db.close();
+      }
+    });
+    throw badRequest("Current password is incorrect", [{
+      field: "currentPassword",
+      reason: "incorrect"
+    }]);
+  }
+
+  // The hash read before the async argon2 work must still be current when the write lands.
+  function assertCredentialUnchanged(before, after) {
+    if ((before?.password_hash || null) !== (after?.password_hash || null)) {
+      throw conflict("Your password was changed elsewhere. Reload and try again.");
+    }
+  }
+
+  function emailConflictError(error) {
+    if (String(error?.message || "").includes("UNIQUE") || error?.code === "23505") {
+      return conflict("Email is already assigned to another account", [{
+        field: "email",
+        reason: "not_unique"
+      }]);
+    }
+    return error;
+  }
+
+  async function updateOwnAccount(accountId, input = {}) {
+    const normalizedId = normalizeUserId(accountId);
+    const updates = prepareAdminAccountUpdate({
+      ...(Object.prototype.hasOwnProperty.call(input, "displayName") ? { displayName: input.displayName } : {}),
+      ...(Object.prototype.hasOwnProperty.call(input, "email") ? { email: input.email } : {})
+    });
+    const { account, credential, authMode } = await readOwnAccountState(normalizedId);
+    const emailChanged = Boolean(updates.email) && updates.email !== account.email;
+
+    if (emailChanged) {
+      if (authMode === "external") {
+        throw forbidden("Your email is managed by your sign-in provider");
+      }
+      if (credential) await verifyOwnCurrentPassword(normalizedId, credential, input.currentPassword);
+    }
+
+    const audit = {
+      action: "account_self_update",
+      actorAccountId: normalizedId,
+      details: {
+        changedDisplayName: Boolean(updates.displayName),
+        changedEmail: emailChanged
+      },
+      targetId: normalizedId,
+      targetType: "account"
+    };
+
+    await withExternalGlobalTransaction(async repo => {
+      if (emailChanged) assertCredentialUnchanged(credential, await repo.passwordCredentials.getForAccount(normalizedId));
+      if (updates.displayName) {
+        await repo.accounts.updateDisplayName(normalizedId, updates.displayName);
+        await repo.users.setDisplayName(normalizedId, updates.displayName);
+      }
+      if (emailChanged) {
+        try {
+          await repo.accounts.updateEmail(normalizedId, updates.email);
+        } catch (error) {
+          throw emailConflictError(error);
+        }
+      }
+      await repo.audit.insertSecurityEvent(audit);
+    }, () => {
+      const db = openGlobalDb();
+      try {
+        db.transaction(() => {
+          const repo = globalRepository(db);
+          if (emailChanged) assertCredentialUnchanged(credential, repo.passwordCredentials.getForAccount(normalizedId));
+          if (updates.displayName) {
+            repo.accounts.updateDisplayName(normalizedId, updates.displayName);
+            repo.users.setDisplayName(normalizedId, updates.displayName);
+          }
+          if (emailChanged) {
+            try {
+              repo.accounts.updateEmail(normalizedId, updates.email);
+            } catch (error) {
+              throw emailConflictError(error);
+            }
+          }
+          auditGlobalSecurity(db, audit);
+        })();
+      } finally {
+        db.close();
+      }
+    });
+
+    return await getOwnAccount(normalizedId);
+  }
+
+  async function changeOwnPassword(accountId, currentSessionId, input = {}) {
+    const normalizedId = normalizeUserId(accountId);
+    const newPassword = normalizePassword(input.newPassword, "newPassword");
+    const { account, credential, authMode } = await readOwnAccountState(normalizedId);
+
+    if (authMode === "external") {
+      throw forbidden("Your password is managed by your sign-in provider");
+    }
+    if (!account.email) {
+      throw conflict("Add an email to your account before setting a password", [{
+        field: "email",
+        reason: "required"
+      }]);
+    }
+    if (credential) await verifyOwnCurrentPassword(normalizedId, credential, input.currentPassword);
+
+    const passwordHash = await argon2.hash(passwordMaterial(newPassword), { type: argon2.argon2id });
+    const audit = {
+      action: credential ? "account_password_change" : "account_password_set",
+      actorAccountId: normalizedId,
+      targetId: normalizedId,
+      targetType: "account"
+    };
+
+    await withExternalGlobalTransaction(async repo => {
+      assertCredentialUnchanged(credential, await repo.passwordCredentials.getForAccount(normalizedId));
+      await repo.passwordCredentials.upsert({ accountId: normalizedId, passwordHash });
+      await repo.passwordResetTokens.revokePendingForAccount(normalizedId);
+      await repo.sessions.revokeOthersForAccount(normalizedId, currentSessionId);
+      await repo.audit.insertSecurityEvent(audit);
+    }, () => {
+      const db = openGlobalDb();
+      try {
+        db.transaction(() => {
+          const repo = globalRepository(db);
+          assertCredentialUnchanged(credential, repo.passwordCredentials.getForAccount(normalizedId));
+          repo.passwordCredentials.upsert({ accountId: normalizedId, passwordHash });
+          repo.passwordResetTokens.revokePendingForAccount(normalizedId);
+          repo.sessions.revokeOthersForAccount(normalizedId, currentSessionId);
+          auditGlobalSecurity(db, audit);
+        })();
+      } finally {
+        db.close();
+      }
+    });
+
+    return await getOwnAccount(normalizedId);
   }
 
   function setAccountSystemAdmin(actorAccountId, accountId, enabledValue) {
@@ -3310,11 +3518,10 @@ export function createCashflowGlobalService({
     });
 
     const verified = await argon2.verify(row.password_hash, passwordMaterial(input.password));
-    // Full merge is unsafe: Postgres requires await for all repo operations,
-    // but SQLite requires a strictly synchronous transaction closure.
-    return await withExternalGlobalTransaction(async repo => {
-      if (!verified) {
-        const attempts = Number(row.failed_attempts || 0) + 1;
+    if (!verified) {
+      // Committed before rejecting: throwing inside the transaction would roll back the lockout count.
+      const attempts = Number(row.failed_attempts || 0) + 1;
+      await withExternalGlobalTransaction(async repo => {
         await repo.passwordCredentials.recordFailedLogin({
           accountId: row.account_id,
           attempts,
@@ -3328,8 +3535,12 @@ export function createCashflowGlobalService({
           targetId: row.account_id,
           targetType: "account"
         });
-        throw genericLoginError();
-      }
+      });
+      throw genericLoginError();
+    }
+    // Full merge is unsafe: Postgres requires await for all repo operations,
+    // but SQLite requires a strictly synchronous transaction closure.
+    return await withExternalGlobalTransaction(async repo => {
 
       const activeAccount = await repo.accounts.getStatus(row.account_id);
       if (!activeAccount || activeAccount.status !== "active") throw genericLoginError();
@@ -4175,6 +4386,9 @@ export function createCashflowGlobalService({
     updateAdminAuthDraftAsync,
     updateAdminAccount,
     updateAdminAccountAsync,
+    getOwnAccount,
+    updateOwnAccount,
+    changeOwnPassword,
     userExists,
     updateGlobalOptions,
     updateGlobalOptionsAsync

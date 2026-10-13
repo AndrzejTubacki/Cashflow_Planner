@@ -842,6 +842,13 @@ export function createSqliteGlobalRepository(db, {
           LIMIT 1
         `).get(accountId));
       },
+      getForAccount(accountId) {
+        return db.prepare(`
+          SELECT account_id, password_hash, failed_attempts, locked_until
+          FROM password_credentials
+          WHERE account_id = ?
+        `).get(normalizeUserId(accountId)) || null;
+      },
       getLoginByEmail(email) {
         return db.prepare(`
           SELECT a.id AS account_id, a.status, pc.password_hash,
@@ -1077,6 +1084,15 @@ export function createSqliteGlobalRepository(db, {
           WHERE account_id = ?
             AND revoked_at IS NULL
         `).run(normalizeUserId(accountId));
+      },
+      revokeOthersForAccount(accountId, keepSessionId) {
+        db.prepare(`
+          UPDATE auth_sessions
+          SET revoked_at = COALESCE(revoked_at, datetime('now'))
+          WHERE account_id = ?
+            AND id <> ?
+            AND revoked_at IS NULL
+        `).run(normalizeUserId(accountId), String(keepSessionId || ""));
       },
       revokeForAccountBudget(accountId, budgetId) {
         db.prepare(`

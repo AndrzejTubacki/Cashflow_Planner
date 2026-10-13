@@ -2389,6 +2389,203 @@ test("admin password tokens honor a requested expiry within bounds and default t
   }
 });
 
+async function rawSessionFor(harness, accountId) {
+  const probe = await harness.request("/api/auth/config", { skipUserHeader: true });
+  const base = new URL(probe.response.url).origin;
+  const response = await fetch(`${base}/api/session/select-account`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ accountId })
+  });
+  assert.equal(response.status, 200);
+  const cookie = response.headers.get("set-cookie").split(";")[0];
+  return {
+    get: pathname => fetch(`${base}${pathname}`, { headers: { cookie } })
+  };
+}
+
+test("account settings let the signed-in account bootstrap its own password and turn on internal login", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "self_admin", displayName: "Self Admin" }
+    });
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "other_user", displayName: "Other", email: "taken@example.com" }
+    });
+    await harness.api("/api/session/select-account", {
+      method: "POST",
+      skipUserHeader: true,
+      body: { accountId: "self_admin" }
+    });
+    const me = opts => harness.request("/api/account", { useSession: true, ...opts });
+
+    const anonymous = await harness.request("/api/account", { skipUserHeader: true });
+    assert.equal(anonymous.response.status, 401);
+
+    const initial = await me();
+    assert.equal(initial.response.status, 200);
+    assert.deepEqual(initial.body.account, {
+      id: "self_admin",
+      displayName: "Self Admin",
+      email: "",
+      hasPasswordCredential: false,
+      authMode: "none"
+    });
+
+    const passwordWithoutEmail = await harness.request("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: "correct horse battery staple" }
+    });
+    assert.equal(passwordWithoutEmail.response.status, 409);
+
+    const duplicate = await me({ method: "PUT", body: { email: "TAKEN@example.com" } });
+    assert.equal(duplicate.response.status, 409);
+
+    const renamed = await me({ method: "PUT", body: { displayName: "Renamed Admin", email: "Self@Example.com" } });
+    assert.equal(renamed.response.status, 200);
+    assert.equal(renamed.body.account.displayName, "Renamed Admin");
+    assert.equal(renamed.body.account.email, "self@example.com");
+
+    const otherSession = await rawSessionFor(harness, "self_admin");
+    assert.equal((await otherSession.get("/api/account")).status, 200);
+
+    const tooShort = await harness.request("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: "short" }
+    });
+    assert.equal(tooShort.response.status, 400);
+
+    const firstPassword = "correct horse battery staple";
+    const setFirst = await harness.request("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: firstPassword }
+    });
+    assert.equal(setFirst.response.status, 200);
+    assert.equal(setFirst.body.account.hasPasswordCredential, true);
+    assert.equal((await otherSession.get("/api/account")).status, 401, "other sessions are signed out");
+    assert.equal((await me()).response.status, 200, "the current session stays signed in");
+
+    const changeWithoutCurrent = await harness.request("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: "a different long passphrase" }
+    });
+    assert.equal(changeWithoutCurrent.response.status, 400);
+    assert.match(changeWithoutCurrent.body.error, /Current password is incorrect/);
+
+    const emailWithoutCurrent = await me({ method: "PUT", body: { email: "new@example.com" } });
+    assert.equal(emailWithoutCurrent.response.status, 400);
+    const renameOnly = await me({ method: "PUT", body: { displayName: "No Password Needed" } });
+    assert.equal(renameOnly.response.status, 200);
+
+    const finalPassword = "a different long passphrase";
+    const changed = await harness.request("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { currentPassword: firstPassword, newPassword: finalPassword }
+    });
+    assert.equal(changed.response.status, 200);
+
+    const emailChanged = await me({ method: "PUT", body: { email: "new@example.com", currentPassword: finalPassword } });
+    assert.equal(emailChanged.response.status, 200);
+    assert.equal(emailChanged.body.account.email, "new@example.com");
+
+    await harness.api("/api/admin/auth/draft", {
+      method: "PUT",
+      useSession: true,
+      body: { draftMode: "internal" }
+    });
+    await harness.api("/api/admin/auth/activate", { method: "POST", useSession: true, body: {} });
+
+    const login = await harness.request("/api/auth/internal/login", {
+      method: "POST",
+      skipUserHeader: true,
+      body: { email: "new@example.com", password: finalPassword }
+    });
+    assert.equal(login.response.status, 200);
+    assert.equal(login.body.session.accountId, "self_admin");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("a request with an expired or revoked session cookie gets 401 and the dead cookie cleared", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "stale_user", displayName: "Stale" }
+    });
+    const probe = await harness.request("/api/auth/config", { skipUserHeader: true });
+    const base = new URL(probe.response.url).origin;
+    const login = await fetch(`${base}/api/session/select-account`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: "stale_user" })
+    });
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+
+    const db = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
+    try {
+      db.prepare("UPDATE auth_sessions SET revoked_at = datetime('now') WHERE account_id = 'stale_user'").run();
+    } finally {
+      db.close();
+    }
+
+    for (const pathname of ["/api/session", "/api/account"]) {
+      const stale = await fetch(`${base}${pathname}`, { headers: { cookie } });
+      assert.equal(stale.status, 401, pathname);
+      assert.match(stale.headers.get("set-cookie") || "", /^cashflow_session=;.*Max-Age=0/, `${pathname} clears the dead cookie`);
+    }
+
+    const fresh = await fetch(`${base}/api/session`);
+    assert.equal(fresh.status, 200, "once the dead cookie is gone the session lookup works again");
+    assert.equal((await fresh.json()).session.authenticated, false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("wrong current passwords on account settings count toward the login lockout", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "lock_user", displayName: "Lock", email: "lock@example.com" }
+    });
+    const password = "correct horse battery staple";
+    await harness.api("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: password }
+    });
+
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const wrong = await harness.request("/api/account/password", {
+        method: "POST",
+        useSession: true,
+        body: { currentPassword: `wrong guess ${attempt}`, newPassword: "irrelevant long value" }
+      });
+      assert.equal(wrong.response.status, 400, `attempt ${attempt}`);
+    }
+
+    const locked = await harness.request("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { currentPassword: password, newPassword: "irrelevant long value" }
+    });
+    assert.equal(locked.response.status, 429);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("external authentication uses trusted proxy headers and explicit identity links", async () => {
   const oldSecret = process.env.CASHFLOW_TEST_EXTERNAL_SECRET;
   process.env.CASHFLOW_TEST_EXTERNAL_SECRET = "shared-external-secret";

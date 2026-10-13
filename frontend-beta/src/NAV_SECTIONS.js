@@ -6,5 +6,6 @@ export const NAV_SECTIONS = [
   { id: "targets", label: "Targets", ready: true },
   { id: "budget", label: "Budget", ready: true },
   { id: "settings", label: "Settings", ready: true, hideFromNav: true },
+  { id: "account", label: "Account", ready: true, hideFromNav: true },
   { id: "admin", label: "Admin", ready: true, adminOnly: true, hideFromNav: true }
 ];

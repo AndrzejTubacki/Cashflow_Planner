@@ -140,3 +140,15 @@ test("legacy cashflow load guards budget-manager assignment against stale reques
   assert.match(legacyApp, /expectedCashflowSeq !== cashflowLoadSeq\) return false;\s*state\.budgetManager = manager;/);
   assert.match(legacyApp, /expectedCashflowSeq: seq[\s\S]*seq !== cashflowLoadSeq \|\| !managerLoaded/);
 });
+
+test("beta account ID pattern compiles the way browsers compile pattern attributes", () => {
+  const repoRoot = path.resolve(import.meta.dirname, "..");
+  const entry = fs.readFileSync(path.join(repoRoot, "frontend-beta/src/EntryViews.jsx"), "utf8");
+  const source = entry.match(/const ACCOUNT_ID_PATTERN = "((?:[^"\\]|\\.)*)";/)[1];
+  const pattern = JSON.parse(`"${source}"`);
+  // Browsers ignore a pattern that fails to compile with the `v` flag, silently disabling the check.
+  const compiled = new RegExp(`^(?:${pattern})$`, "v");
+  assert.equal(compiled.test("admin_1-a"), true);
+  assert.equal(compiled.test("bad id!"), false);
+  assert.equal(compiled.test("a".repeat(65)), false);
+});

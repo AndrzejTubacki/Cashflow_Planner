@@ -5,21 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Cashflow</title>
 <script>
-  // Remember an explicit choice to use the beta UI so returning here
-  // doesn't bounce the user back to legacy every time. ?ui=legacy always
-  // wins (a way back even with a stored preference), and ?ui=beta jumps to
-  // beta immediately even on a first visit with nothing stored yet.
+  // The beta UI is the default. Staying on legacy needs an explicit choice:
+  // ?ui=legacy for this visit, or the stored preference the beta's
+  // "legacy" links set.
   (function () {
+    var preferred = null;
     try {
-      var params = new URLSearchParams(window.location.search);
-      var override = params.get("ui");
-      if (override === "legacy") return;
-      if (override === "beta" || localStorage.getItem("cashflow_preferred_ui") === "beta") {
-        window.location.replace("/beta/");
-      }
+      preferred = localStorage.getItem("cashflow_preferred_ui");
     } catch (err) {
-      // Storage can be unavailable in private contexts; just stay on legacy.
+      // Storage can be unavailable in private contexts; fall through to the default.
     }
+    var override = new URLSearchParams(window.location.search).get("ui");
+    if (override === "legacy" || (override !== "beta" && preferred === "legacy")) return;
+    window.location.replace("/beta/");
   })();
 </script>
 <link rel="icon" type="image/png" href="/favicon.png">

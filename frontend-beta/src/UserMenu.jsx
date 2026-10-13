@@ -27,7 +27,7 @@ function describeValidation(result) {
   return lines.join("\n");
 }
 
-export default function UserMenu({ budgetLabel, canAdmin, canMaintain, canValidate, onSelectSection, onRefresh }) {
+export default function UserMenu({ budgetLabel, canAdmin, canMaintain, canValidate, onSelectSection, onRefresh, onSignOut }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const scope = currentPreferenceScope();
@@ -96,15 +96,8 @@ export default function UserMenu({ budgetLabel, canAdmin, canMaintain, canValida
 
   async function handleLogout() {
     setBusy(true);
-    try {
-      await apiFetch("/api/logout", { method: "POST" });
-    } catch {
-      window.alert("Couldn't confirm logout with the server — close your browser to be safe.");
-    }
-    localStorage.removeItem("cashflow_budget_id");
-    localStorage.removeItem("cashflow_user_id");
-    localStorage.removeItem("cashflow_preferred_ui");
-    window.location.href = "/";
+    setOpen(false);
+    await onSignOut();
   }
 
   return (
@@ -140,8 +133,9 @@ export default function UserMenu({ budgetLabel, canAdmin, canMaintain, canValida
           </div>
 
           <div className="beta-user-menu-section">
+            <button type="button" role="menuitem" onClick={() => go("account")}>Account settings</button>
             <button type="button" role="menuitem" onClick={() => go("budget")}>Switch budget</button>
-            <button type="button" role="menuitem" onClick={() => go("settings")}>Settings</button>
+            <button type="button" role="menuitem" onClick={() => go("settings")}>Budget settings</button>
             {canAdmin ? <button type="button" role="menuitem" onClick={() => go("admin")}>Admin</button> : null}
           </div>
 
@@ -158,7 +152,7 @@ export default function UserMenu({ budgetLabel, canAdmin, canMaintain, canValida
 
           <div className="beta-user-menu-section">
             <button type="button" role="menuitem" onClick={switchToLegacy}>Switch to legacy UI</button>
-            <button type="button" role="menuitem" disabled={busy} onClick={handleLogout}>Logout</button>
+            <button type="button" role="menuitem" disabled={busy} onClick={handleLogout}>Sign out</button>
           </div>
         </div>
       ) : null}

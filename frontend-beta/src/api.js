@@ -124,7 +124,8 @@ export async function downloadFile(url, fallbackName) {
 }
 
 export async function fetchSession() {
-  return apiFetch("/api/session", { cache: "no-store", scoped: false });
+  // App.jsx decides what a missing or revoked session means; no automatic re-select here.
+  return apiFetch("/api/session", { cache: "no-store", scoped: false, _retriedAfterRecovery: true });
 }
 
 export async function fetchSnapshot() {

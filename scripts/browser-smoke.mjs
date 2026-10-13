@@ -749,7 +749,8 @@ async function runBrowserSmoke(baseUrl, {
       }, userId);
     }
 
-    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    // "/" defaults to the beta UI; this smoke covers the legacy app.
+    await page.goto(`${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
 
     if (!deployed) {
       userId = await createLocalSmokeUserAndCompleteSetup(page);

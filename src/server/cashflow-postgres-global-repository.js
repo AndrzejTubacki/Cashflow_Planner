@@ -961,6 +961,13 @@ export function createPostgresGlobalRepository(client, {
           LIMIT 1
         `, [normalizeUserId(accountId)]));
       },
+      async getForAccount(accountId) {
+        return await one(`
+          SELECT account_id, password_hash, failed_attempts, locked_until
+          FROM password_credentials
+          WHERE account_id = $1
+        `, [normalizeUserId(accountId)]) || null;
+      },
       async getLoginByEmail(email) {
         return await one(`
           SELECT a.id AS account_id, a.status, pc.password_hash,
@@ -988,8 +995,8 @@ export function createPostgresGlobalRepository(client, {
       }) {
         await run(`
           UPDATE password_credentials
-          SET failed_attempts = $2,
-              locked_until = CASE WHEN $2 >= $3 THEN $4 ELSE locked_until END,
+          SET failed_attempts = $2::integer,
+              locked_until = CASE WHEN $2::integer >= $3::integer THEN $4::timestamptz ELSE locked_until END,
               updated_at = $5
           WHERE account_id = $1
         `, [
@@ -1203,6 +1210,15 @@ export function createPostgresGlobalRepository(client, {
           WHERE account_id = $1
             AND revoked_at IS NULL
         `, [normalizeUserId(accountId), nowIso(now)]);
+      },
+      async revokeOthersForAccount(accountId, keepSessionId) {
+        await run(`
+          UPDATE auth_sessions
+          SET revoked_at = COALESCE(revoked_at, $3)
+          WHERE account_id = $1
+            AND id <> $2
+            AND revoked_at IS NULL
+        `, [normalizeUserId(accountId), String(keepSessionId || ""), nowIso(now)]);
       },
       async revokeForAccountBudget(accountId, budgetId) {
         const timestamp = nowIso(now);

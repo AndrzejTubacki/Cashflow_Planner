@@ -421,6 +421,9 @@ async function createCashflowModule({
     updateAdminAuthDraftAsync,
     updateAdminAccount,
     updateAdminAccountAsync,
+    getOwnAccount,
+    updateOwnAccount,
+    changeOwnPassword,
     updateGlobalOptions,
     updateGlobalOptionsAsync
   } = createCashflowGlobalService({
@@ -952,6 +955,9 @@ async function createCashflowModule({
       updateRecurringIncome,
       updateAdminAccount,
       updateAdminAccountAsync,
+      getOwnAccount,
+      updateOwnAccount,
+      changeOwnPassword,
       updateAdminAuthDraft,
       updateAdminAuthDraftAsync,
       updateSettings,
@@ -1168,6 +1174,7 @@ async function createCashflowModule({
     if (token && !tokenContext) {
       const error = new Error("Authentication required");
       error.status = 401;
+      error.code = "CASHFLOW_SESSION_INVALID";
       throw error;
     }
     req.cashflowActorContext = tokenContext;

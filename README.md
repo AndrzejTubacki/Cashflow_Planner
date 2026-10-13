@@ -187,6 +187,9 @@ reachable by anyone but you:
 
 Cashflow also supports admin-configured internal email/password login and
 trusted reverse-proxy SSO as an alternative to relying entirely on your proxy.
+To switch on internal login, first set your own email and password under
+Account settings (beta UI account menu), then activate internal login in the
+Admin authentication panel.
 See [Security](docs/security.md) for the full threat model and working
 reverse-proxy examples (Caddy Basic Auth, Caddy/Nginx/Traefik forward-auth,
 oauth2-proxy, Authelia, Authentik).

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { apiFetch } from "./api.js";
+import PasswordTokenModal from "./PasswordTokenModal.jsx";
 import {
   AUTH_MODE_OPTIONS,
   AUTH_PROVIDER_KINDS,
@@ -41,14 +42,14 @@ function AccountSessions({ account, busy, onRevoke }) {
   );
 }
 
-function AdminAccountCard({ account, expanded, onToggle, onChanged }) {
+function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLoginActive, currentAccountId }) {
   const [name, setName] = useState(account.display_name || account.id);
   const [email, setEmail] = useState(account.email || "");
   const externalIdentity = (account.identities || []).find(i => String(i.provider_id || "").startsWith("external_")) || null;
   const [externalSubject, setExternalSubject] = useState(externalIdentity?.subject || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [tokenOutput, setTokenOutput] = useState("");
+  const [tokenPurpose, setTokenPurpose] = useState("");
   const deleted = account.status === "deleted";
   const admin = isSystemAdmin(account);
 
@@ -73,15 +74,9 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged }) {
     });
   }
 
-  async function createPasswordToken(purpose) {
-    await withBusy(async () => {
-      const result = await apiFetch(`/api/admin/accounts/${encodeURIComponent(account.id)}/password-reset-token`, {
-        method: "POST",
-        body: { purpose }
-      });
-      setTokenOutput(result.token || "");
-      setTimeout(() => setTokenOutput(""), 60000);
-    });
+  function createPasswordToken(purpose) {
+    setError("");
+    setTokenPurpose(purpose);
   }
 
   async function linkExternalIdentity() {
@@ -166,7 +161,6 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged }) {
         <div className="beta-field">
           <span>Internal password</span>
           <strong>{account.hasPasswordCredential ? "Configured" : "Not configured"}</strong>
-          {tokenOutput ? <small className="beta-hint">Password token: <code>{tokenOutput}</code></small> : null}
         </div>
         <div className="beta-field">
           <span>Budgets</span>
@@ -178,6 +172,16 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged }) {
           <AccountSessions account={account} busy={busy} onRevoke={revokeSession} />
         </div>
       </div>
+
+      {tokenPurpose ? (
+        <PasswordTokenModal
+          account={account}
+          purpose={tokenPurpose}
+          internalLoginActive={internalLoginActive}
+          isSelf={account.id === currentAccountId}
+          onClose={() => setTokenPurpose("")}
+        />
+      ) : null}
 
       {!deleted ? (
         <div className="beta-row-actions beta-row-actions-wrap">
@@ -211,7 +215,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged }) {
   );
 }
 
-function AdminAccountsPanel({ accounts, onChanged }) {
+function AdminAccountsPanel({ accounts, onChanged, internalLoginActive, currentAccountId }) {
   const [query, setQuery] = useState("");
   const [expandedIds, setExpandedIds] = useState(() => new Set());
 
@@ -265,6 +269,8 @@ function AdminAccountsPanel({ accounts, onChanged }) {
                   expanded={expandedIds.has(account.id)}
                   onToggle={() => toggle(account.id)}
                   onChanged={onChanged}
+                  internalLoginActive={internalLoginActive}
+                  currentAccountId={currentAccountId}
                 />
               ))}
             </div>
@@ -453,8 +459,9 @@ function AdminAuthPanel({ authConfig, onChanged }) {
         </div>
         <small className="beta-hint">
           Internal activation requires a system administrator with an email/password credential or
-          linked enabled provider. External activation requires an assertion secret and linked
-          administrator identity.
+          linked enabled provider. Set your own email and password under Account settings in the
+          account menu. External activation requires an assertion secret and linked administrator
+          identity.
         </small>
       </form>
     </div>
@@ -706,7 +713,12 @@ export default function AdminView({ snapshot, onRefresh }) {
         <p>Instance-wide account and authentication administration. Changes here affect every user.</p>
       </div>
 
-      <AdminAccountsPanel accounts={accounts} onChanged={onRefresh} />
+      <AdminAccountsPanel
+        accounts={accounts}
+        onChanged={onRefresh}
+        internalLoginActive={String(admin.authConfig?.activeMode || "none") === "internal"}
+        currentAccountId={snapshot?.session?.accountId || ""}
+      />
       <AdminAuthPanel authConfig={admin.authConfig} onChanged={onRefresh} />
       <AdminProvidersPanel providers={providers} onChanged={onRefresh} />
       <AdminOptionsPanel options={options} onChanged={onRefresh} />
