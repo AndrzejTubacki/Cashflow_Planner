@@ -1142,7 +1142,7 @@ async function createCashflowModule({
       ? budgetHeader
       : hasLegacyHeader
         ? legacyHeader
-        : tokenContext?.budget?.id || (tokenContext ? "" : "local");
+        : tokenContext?.budget?.id || "";
     if (!budgetId) {
       throw badRequest("Budget selection required");
     }

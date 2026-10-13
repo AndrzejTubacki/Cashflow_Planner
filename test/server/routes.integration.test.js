@@ -318,12 +318,14 @@ test("read routes reject unknown users without creating profile data", async () 
   }
 });
 
-test("session lookup is read-only and session select initializes local only explicitly", async () => {
+test("session lookup is read-only and session select initializes storage only explicitly", async () => {
   const harness = await createCashflowTestHarness({ initializeUser: false });
   try {
+    // A fresh install has no implicit default user - not even "local" - so
+    // listing starts empty, and listing itself must never create anything.
     const listed = await harness.request("/api/users", { skipUserHeader: true });
     assert.equal(listed.response.status, 200);
-    assert.ok(listed.body.users.some(user => user.id === "local"));
+    assert.deepEqual(listed.body.users, []);
     assert.equal(fs.existsSync(planningDbPath(harness.dataDir, "local")), false);
 
     const missingSession = await harness.request("/api/session", {
@@ -344,6 +346,27 @@ test("session lookup is read-only and session select initializes local only expl
     assert.equal(selectMissing.response.status, 404);
     assert.equal(fs.existsSync(path.join(harness.dataDir, "ghost")), false);
 
+    // "local" is no longer special - selecting it before it has been
+    // created through /api/users fails exactly like any other unknown id.
+    const selectLocalBeforeCreate = await harness.request("/api/session/select", {
+      method: "POST",
+      skipUserHeader: true,
+      body: {
+        userId: "local"
+      }
+    });
+    assert.equal(selectLocalBeforeCreate.response.status, 404);
+    assert.equal(fs.existsSync(planningDbPath(harness.dataDir, "local")), false);
+
+    const created = await harness.request("/api/users", {
+      method: "POST",
+      skipUserHeader: true,
+      body: {
+        userId: "local"
+      }
+    });
+    assert.equal(created.response.status, 200);
+
     const selected = await harness.request("/api/session/select", {
       method: "POST",
       skipUserHeader: true,
@@ -354,6 +377,18 @@ test("session lookup is read-only and session select initializes local only expl
     assert.equal(selected.response.status, 200);
     assert.equal(selected.body.session.userId, "local");
     assert.equal(fs.existsSync(planningDbPath(harness.dataDir, "local")), true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("a request with no budget header and no session gets a clear selection error, not a guess at local", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  try {
+    const bare = await harness.request("/api", { skipUserHeader: true });
+    assert.equal(bare.response.status, 400);
+    assert.equal(bare.body.error, "Budget selection required");
+    assert.equal(fs.existsSync(path.join(harness.dataDir, "local")), false);
   } finally {
     await harness.cleanup();
   }

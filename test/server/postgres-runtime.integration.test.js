@@ -2601,6 +2601,27 @@ test("createUserAsync and selectUserAsync run the none-mode bootstrap path again
         /not found/i
       );
 
+      // "local" has no special status on any backend: listUsersAsync()
+      // never seeds it, and selecting it before it has been created through
+      // createUserAsync fails exactly like any other unknown id. A real
+      // first-run install always goes through account creation.
+      const freshUsers = await globalService.listUsersAsync();
+      assert.ok(!freshUsers.some(user => user.id === "local"));
+      await assert.rejects(
+        () => globalService.selectUserAsync("local"),
+        /not found/i
+      );
+      const budgetsBeforeLocalCreate = await globalStore.listRows("budgets");
+      assert.equal(budgetsBeforeLocalCreate.filter(row => row.id === "local").length, 0);
+
+      const localSession = await globalService.createUserAsync({ userId: "local" });
+      assert.equal(localSession.authenticated, true);
+      assert.equal(localSession.userId, "local");
+      const reselectedLocal = await globalService.selectUserAsync("local");
+      assert.equal(reselectedLocal.authenticated, true);
+      assert.equal(reselectedLocal.userId, "local");
+      assert.equal(reselectedLocal.budgetRole, "owner");
+
       // createBudgetAsync shares initializeBudgetStorageAsync with
       // createUserAsync above, but was reordered (budgets row before
       // settings insert, not after) to avoid the same FK-ordering bug —

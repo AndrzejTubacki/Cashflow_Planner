@@ -638,18 +638,11 @@ export function createCashflowGlobalService({
     }
   }
 
-  function checkLocalUserExists(userId) {
-    const normalizedId = normalizeUserId(userId);
-    if (normalizedId === "local") return { exists: true, normalizedId };
-    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) {
-      return { exists: true, normalizedId };
-    }
-    return { exists: false, normalizedId };
-  }
-
   function userExists(userId) {
-    const { exists, normalizedId } = checkLocalUserExists(userId);
-    if (exists) return true;
+    const normalizedId = normalizeUserId(userId);
+    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) {
+      return true;
+    }
 
     const db = openGlobalDb();
     try {
@@ -660,9 +653,11 @@ export function createCashflowGlobalService({
   }
 
   async function userExistsAsync(userId) {
-    const { exists, normalizedId } = checkLocalUserExists(userId);
-    if (exists) return true;
-    
+    const normalizedId = normalizeUserId(userId);
+    if (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId)) {
+      return true;
+    }
+
     return await withGlobalRepository(async repo => Boolean(await repo.users.getMetadata(normalizedId)));
   }
 
@@ -732,7 +727,7 @@ export function createCashflowGlobalService({
   function listUsers() {
     const db = openGlobalDb();
     try {
-      const ids = new Set(["local", ...listCashflowUserIds()]);
+      const ids = new Set(listCashflowUserIds());
       db.transaction(() => {
         for (const userId of ids) {
           ensureUserMetadata(db, userId);
@@ -757,7 +752,7 @@ export function createCashflowGlobalService({
       return listUsers();
     }
     return await withGlobalRepository(async repo => {
-      const ids = new Set(["local", ...listCashflowUserIds()]);
+      const ids = new Set(listCashflowUserIds());
       for (const userId of ids) {
         await repo.users.ensureMetadata(userId);
         const metadata = await repo.users.getMetadata(userId);
@@ -1453,7 +1448,7 @@ export function createCashflowGlobalService({
 
   function selectUser(userId = "") {
     const normalizedId = normalizeUserId(userId);
-    if (normalizedId !== "local" && !userExists(normalizedId)) {
+    if (!userExists(normalizedId)) {
       throw userNotFoundError(normalizedId);
     }
 
@@ -1487,7 +1482,7 @@ export function createCashflowGlobalService({
     }
 
     const normalizedId = normalizeUserId(userId);
-    if (normalizedId !== "local" && !(await userExistsAsync(normalizedId))) {
+    if (!(await userExistsAsync(normalizedId))) {
       throw userNotFoundError(normalizedId);
     }
 
@@ -1626,8 +1621,8 @@ export function createCashflowGlobalService({
       const repo = globalRepository(db);
       let budget = budgetMetadata(db, normalizedId);
       if (!budget) {
-        const storageExists = normalizedId === "local"
-          || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId));
+        const storageExists = typeof cashflowUserStorageExists === "function"
+          && cashflowUserStorageExists(normalizedId);
         if (!storageExists) {
           throw userNotFoundError(normalizedId);
         }
@@ -1715,8 +1710,8 @@ export function createCashflowGlobalService({
     return await withGlobalRepository(async repo => {
       let budget = await repo.budgets.get(normalizedId);
       if (!budget) {
-        const storageExists = normalizedId === "local"
-          || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(normalizedId));
+        const storageExists = typeof cashflowUserStorageExists === "function"
+          && cashflowUserStorageExists(normalizedId);
         if (!storageExists) {
           throw userNotFoundError(normalizedId);
         }
