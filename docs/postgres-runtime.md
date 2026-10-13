@@ -14,14 +14,25 @@ CASHFLOW_RUNTIME_LOCK_BACKEND=postgres
 
 Provision and initialize the database before starting the app. The app does not
 create databases, manage the Postgres server, or migrate its application schema
-at startup. Treat database URLs as secrets. SQLite files must never be shared
-between multiple app replicas, even if Postgres runtime locks are enabled.
+at startup. For a fresh database, generate the complete global and budget DDL
+and apply it with `psql`:
+
+```sh
+npm run db:postgres:schema -- --output /tmp/cashflow-schema.sql
+psql "$CASHFLOW_DATABASE_URL" -f /tmp/cashflow-schema.sql
+```
+
+`npm run db:postgres:schema` prints the same DDL when `--output` is omitted; it
+does not connect to Postgres or apply anything itself. Treat database URLs as
+secrets. SQLite files must never be shared between multiple app replicas, even
+if Postgres runtime locks are enabled.
 
 For v1.0.1, apply the additive, repeatable
 [`postgres-v1.0.1.sql`](../scripts/migrations/postgres-v1.0.1.sql) migration before
 rolling out the new code. It adds shared backup artifacts and auth rate-limit
-windows without replacing financial or account rows. This is an operator action;
-starting a replica does not apply it. Existing backup metadata remains valid.
+windows plus the income-anchor column for recurring expenses without replacing
+financial or account rows. This is an operator action; starting a replica does
+not apply it. Existing backup metadata remains valid.
 
 ## Replica coordination and connections
 
@@ -56,8 +67,11 @@ scaling that configuration is unsupported. Sessions, CSRF, setup, credentials,
 and login-failure state are DB-backed. Internal-auth HTTP throttling now uses
 atomic Postgres-time windows shared across replicas (20 attempts per IP per
 15 minutes). Store failure returns 503; it never falls back to per-process
-throttling. SQLite retains its process-local limiter. Client IPs follow the
-existing Express proxy trust configuration; do not blindly trust forwarded IPs.
+throttling. SQLite retains its process-local limiter. Client IPs (and
+therefore this per-IP throttling) only reflect a forwarded address when the
+operator opts in with `CASHFLOW_TRUST_PROXY`; by default the app trusts no
+proxy and keys on the direct socket peer. See the configuration docs for the
+accepted values.
 
 SIGTERM stops accepting new requests and new background ticks, drains the
 current tick and HTTP requests, then closes all owned pools. A 10-second hard

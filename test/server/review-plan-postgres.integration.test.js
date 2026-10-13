@@ -84,7 +84,14 @@ test("Postgres confirmations recheck shared balance under lock without rolling b
     const outcomes = await Promise.allSettled(services.map((service, index) =>
       service.confirmPendingTransaction("review_a", index ? "expense_b" : "expense_a")));
     clearTimeout(timer);
-    assert.deepEqual(preflights, [false, false]);
+    // Each replica checks twice: once before taking the lock (both see the
+    // untouched balance, so both are false) and once more after acquiring
+    // it. The loser's lock acquisition cannot return until the winner has
+    // committed, so the winner's post-lock recheck always lands before the
+    // loser's and always comes out false (nothing has changed yet for it),
+    // while the loser's always comes out true (the winner's write is now
+    // visible) - this ordering is deterministic, not a race.
+    assert.deepEqual(preflights, [false, false, false, true]);
     assert.equal(outcomes.filter(result => result.status === "fulfilled").length, 1);
     const denied = outcomes.find(result => result.status === "rejected");
     assert.equal(denied.reason.status, 400);

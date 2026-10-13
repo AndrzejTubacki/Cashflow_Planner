@@ -13,6 +13,7 @@ import {
 import {
   createCashflowRuntimeLockService
 } from "./src/server/cashflow-runtime-lock-service.js";
+import { configureTrustProxy } from "./src/server/cashflow-trust-proxy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -171,6 +172,8 @@ try {
 }
 
 const app = express();
+
+configureTrustProxy(app, process.env.CASHFLOW_TRUST_PROXY, { logError, logServerEvent });
 
 app.disable("x-powered-by");
 if (helmet) {

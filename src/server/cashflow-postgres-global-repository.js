@@ -1352,7 +1352,12 @@ export function createPostgresGlobalRepository(client, {
               WHEN EXCLUDED.display_name != EXCLUDED.id THEN EXCLUDED.display_name
               ELSE users.display_name
             END,
-            permissions = COALESCE(NULLIF(users.permissions, ''), EXCLUDED.permissions),
+            -- permissions is JSONB NOT NULL with its own default, so it can
+            -- never actually be an empty string the way a plain TEXT column
+            -- could (comparing it to '' fails with "invalid input syntax
+            -- for type json" since Postgres tries to parse '' as JSON to
+            -- make the comparison). Keep the existing row's value as-is.
+            permissions = users.permissions,
             updated_at = $4
         `, [normalizedId, name, jsonValue(permissions, '["admin"]'), timestamp]);
         return normalizedId;

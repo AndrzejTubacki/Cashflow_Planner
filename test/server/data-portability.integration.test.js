@@ -131,9 +131,9 @@ test("full export omits operational settings by default and includes them by opt
     method: "PUT",
     body: {
       notification_channel: "discord",
-      ntfy_url: "https://ntfy.example.com/cashflow-test",
+      ntfy_url: "https://1.1.1.1/cashflow-test",
       ntfy_auth_token: "tk_export_test",
-      discord_webhook_url: "https://discord.example.com/api/webhooks/export-test",
+      discord_webhook_url: "https://1.1.1.1/api/webhooks/export-test",
       auto_backup_enabled: 1,
       backup_interval_minutes: 30,
       notify_income_missing: 0
@@ -154,9 +154,9 @@ test("full export omits operational settings by default and includes them by opt
   const optInSettings = optInExport.planning.settings[0];
   assert.equal(optInExport.operationalSettingsIncluded, true);
   assert.equal(optInSettings.notification_channel, "discord");
-  assert.equal(optInSettings.ntfy_url, "https://ntfy.example.com/cashflow-test");
+  assert.equal(optInSettings.ntfy_url, "https://1.1.1.1/cashflow-test");
   assert.equal(optInSettings.ntfy_auth_token, "tk_export_test");
-  assert.equal(optInSettings.discord_webhook_url, "https://discord.example.com/api/webhooks/export-test");
+  assert.equal(optInSettings.discord_webhook_url, "https://1.1.1.1/api/webhooks/export-test");
   assert.equal(optInSettings.auto_backup_enabled, 1);
   assert.equal(optInSettings.notify_income_missing, 0);
 }));
@@ -240,8 +240,8 @@ test("full import ignores operational settings by default and restores them by o
     method: "PUT",
     body: {
       notification_channel: "discord",
-      ntfy_url: "https://ntfy.example.com/exported",
-      discord_webhook_url: "https://discord.example.com/api/webhooks/exported",
+      ntfy_url: "https://1.1.1.1/exported",
+      discord_webhook_url: "https://1.1.1.1/api/webhooks/exported",
       auto_backup_enabled: 1,
       notify_income_missing: 0
     }
@@ -292,8 +292,8 @@ test("full import ignores operational settings by default and restores them by o
     }
   });
   assert.equal(optInImport.settings.notification_channel, "discord");
-  assert.equal(optInImport.settings.ntfy_url, "https://ntfy.example.com/exported");
-  assert.equal(optInImport.settings.discord_webhook_url, "https://discord.example.com/api/webhooks/exported");
+  assert.equal(optInImport.settings.ntfy_url, "https://1.1.1.1/exported");
+  assert.equal(optInImport.settings.discord_webhook_url, "https://1.1.1.1/api/webhooks/exported");
   assert.equal(optInImport.settings.auto_backup_enabled, 1);
   assert.equal(optInImport.settings.notify_income_missing, 0);
 }));
@@ -312,8 +312,8 @@ test("default replace and sample imports preserve target operational settings", 
     method: "PUT",
     body: {
       notification_channel: "ntfy",
-      ntfy_url: "https://ntfy.example.com/target",
-      discord_webhook_url: "https://discord.example.com/api/webhooks/target",
+      ntfy_url: "https://1.1.1.1/target",
+      discord_webhook_url: "https://1.1.1.1/api/webhooks/target",
       auto_backup_enabled: 1,
       backup_interval_minutes: 120,
       backup_retention_count: 7,

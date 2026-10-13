@@ -1956,17 +1956,11 @@ export function registerCashflowRoutes(app, {
           req.body?.mode || "replace",
           { includeOperationalSettings: Boolean(req.body?.includeOperationalSettings) }
         ];
-        const result = await withBudgetRouteLock(
-          userId,
-          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
-          () => typeof importFullDataAsync === "function"
-            ? importFullDataAsync(...importArgs)
-            : importFullData(...importArgs),
-          {
-            message: "An import or restore is already running for this budget",
-            ttlMs: 300000
-          }
-        );
+        // Full import owns the shared data-portability lock in the service;
+        // acquiring that same lock here would reject this uncontended call.
+        const result = typeof importFullDataAsync === "function"
+          ? await importFullDataAsync(...importArgs)
+          : importFullData(...importArgs);
         res.json({
           ...(await snapshotForUser(userId)),
           import: result
@@ -2034,17 +2028,11 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
         const userId = await resolveRequestUser(req);
-        const result = await withBudgetRouteLock(
-          userId,
-          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
-          () => typeof importSampleDataAsync === "function"
-            ? importSampleDataAsync(userId)
-            : importSampleData(userId),
-          {
-            message: "An import or restore is already running for this budget",
-            ttlMs: 300000
-          }
-        );
+        // Sample import delegates to full import, whose service layer owns
+        // the shared data-portability lock for the complete operation.
+        const result = typeof importSampleDataAsync === "function"
+          ? await importSampleDataAsync(userId)
+          : importSampleData(userId);
         res.json({
           ...(await snapshotForUser(userId)),
           import: result
@@ -2068,17 +2056,11 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
         const userId = await resolveRequestUser(req);
-        const result = await withBudgetRouteLock(
-          userId,
-          BUDGET_RUNTIME_LOCK_JOBS.dataPortability,
-          () => typeof restoreBackupAsync === "function"
-            ? restoreBackupAsync(userId, req.params.backupId)
-            : restoreBackup(userId, req.params.backupId),
-          {
-            message: "An import or restore is already running for this budget",
-            ttlMs: 300000
-          }
-        );
+        // Restore owns the shared data-portability lock in the service;
+        // acquiring that same lock here would self-reject before restore runs.
+        const result = typeof restoreBackupAsync === "function"
+          ? await restoreBackupAsync(userId, req.params.backupId)
+          : restoreBackup(userId, req.params.backupId);
         res.json({
           ...(await snapshotForUser(userId)),
           restore: result
@@ -2088,4 +2070,3 @@ export function registerCashflowRoutes(app, {
       }
     });
 }
-

@@ -50,7 +50,9 @@ export default function App() {
     const currentRequestId = ++loadCounter.current;
     try {
       const sessionResult = await fetchSession();
-      if (sessionResult?.csrfToken) setCsrfToken(sessionResult.csrfToken);
+      if (currentRequestId === loadCounter.current && sessionResult?.csrfToken) {
+        setCsrfToken(sessionResult.csrfToken);
+      }
 
       const data = await fetchSnapshot();
       if (currentRequestId === loadCounter.current) {

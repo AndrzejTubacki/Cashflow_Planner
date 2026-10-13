@@ -76,6 +76,7 @@ The settings that matter for most self-hosted installs:
 | `CASHFLOW_BACKUP_ALLOWED_ROOTS` | unset (`/app/backups` in Compose) | Absolute paths allowed as custom per-budget backup locations |
 | `CASHFLOW_PASSWORD_PEPPER` | unset | Optional secret mixed into internal-login password hashing. Keep it stable and backed up once set, or existing password hashes become unverifiable |
 | `CASHFLOW_EXTERNAL_AUTH_SECRET` | unset | Shared secret your reverse proxy sends when using trusted-header (external SSO) auth mode |
+| `CASHFLOW_TRUST_PROXY` | unset (no proxy trusted) | Opt in to Express's `trust proxy` setting when running behind a reverse proxy, so `req.ip` (and anything keyed on it, like login rate limiting) reflects the real client instead of the proxy. See [Exposing It Safely](#exposing-it-safely) |
 
 `.env.example` documents the full list, including FX/notification request
 timeouts, recovery-artifact retention counts, and OAuth provider client
@@ -104,7 +105,15 @@ CASHFLOW_RUNTIME_LOCK_BACKEND=postgres   # needed for multiple replicas
 
 The database and its extensions/schema must already exist and be reachable.
 Cashflow does not manage the Postgres server itself, only the tables it owns
-inside the database you give it. `CASHFLOW_RUNTIME_LOCK_BACKEND=postgres`
+inside the database you give it. Initialize a fresh database before startup:
+
+```sh
+npm run db:postgres:schema -- --output /tmp/cashflow-schema.sql
+psql "$CASHFLOW_DATABASE_URL" -f /tmp/cashflow-schema.sql
+```
+
+The command writes the complete Cashflow Postgres DDL; it does not connect to
+or modify the database itself. `CASHFLOW_RUNTIME_LOCK_BACKEND=postgres`
 coordinates background jobs and projection regeneration across replicas;
 without it, scheduled work can run on multiple replicas at once. Startup
 logs `cashflow_postgres_runtime_locks_disabled` to `error.log` when Postgres
@@ -181,6 +190,15 @@ trusted reverse-proxy SSO as an alternative to relying entirely on your proxy.
 See [Security](docs/security.md) for the full threat model and working
 reverse-proxy examples (Caddy Basic Auth, Caddy/Nginx/Traefik forward-auth,
 oauth2-proxy, Authelia, Authentik).
+
+Cashflow trusts no proxy by default, so `req.ip` (and anything keyed on it,
+such as login rate limiting) is the direct socket peer - normally your
+reverse proxy's own address, not the real client's. Behind a reverse proxy,
+set `CASHFLOW_TRUST_PROXY` to the value Express's own `trust proxy` setting
+expects for your setup: a hop count (e.g. `1` for a single proxy directly in
+front of Cashflow), a comma-separated list of the proxy's IPs/CIDRs, or a
+named range like `loopback`. Never set it to `true`; an invalid value is
+rejected (logged as `cashflow_trust_proxy_invalid`) and trust stays off.
 
 ## What It Does
 

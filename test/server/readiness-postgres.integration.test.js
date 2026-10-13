@@ -5,8 +5,13 @@ import path from "node:path";
 import test from "node:test";
 
 import { createCashflowModule } from "../../src/cashflow.js";
+import { createPostgresBudgetStore } from "../../src/server/cashflow-budget-store.js";
 import { createPostgresBudgetDbService } from "../../src/server/cashflow-postgres-budget-db-service.js";
 import { createPostgresGlobalDbService } from "../../src/server/cashflow-postgres-global-db-service.js";
+import {
+  POSTGRES_LEDGER_SCHEMA_VERSION,
+  POSTGRES_PLANNING_SCHEMA_VERSION
+} from "../../src/server/cashflow-postgres-budget-schema.js";
 import {
   postgresRuntimeTestsEnabled,
   withDisposablePostgresDb
@@ -50,6 +55,46 @@ async function seedSettingsRow(budgetDb, budgetId) {
     [budgetId]
   ));
 }
+
+test("Postgres budget-store readiness forwards the requested budget ID to the database service", async () => {
+  const queries = [];
+  const client = {
+    async query(sql, params = []) {
+      queries.push({ sql, params });
+      if (sql.includes("cashflow_budget_schema_version")) {
+        return {
+          rows: [{
+            ledger_version: POSTGRES_LEDGER_SCHEMA_VERSION,
+            planning_version: POSTGRES_PLANNING_SCHEMA_VERSION
+          }]
+        };
+      }
+      if (sql.includes("FROM settings")) return { rows: [] };
+      return { rows: [] };
+    },
+    release() {}
+  };
+  class FakePool {
+    async connect() { return client; }
+    async end() {}
+  }
+  const store = await createPostgresBudgetStore({
+    databaseUrl: "postgres://unused/readiness",
+    pgModule: { Pool: FakePool }
+  });
+  try {
+    await assert.rejects(
+      () => store.checkReadiness("local"),
+      error => error.code === "CASHFLOW_POSTGRES_BUDGET_NOT_FOUND"
+    );
+    assert.deepEqual(
+      queries.find(query => query.sql.includes("FROM settings"))?.params,
+      ["local"]
+    );
+  } finally {
+    await store.close();
+  }
+});
 
 test(
   "postgres checkReadiness(budgetId) verifies the specific budget's settings row, not just schema version",

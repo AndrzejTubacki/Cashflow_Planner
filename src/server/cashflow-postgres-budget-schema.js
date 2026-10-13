@@ -730,10 +730,12 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'settings_budget_period_income_fk'
   ) THEN
+    -- SET NULL would also null the composite key's NOT NULL budget_id;
+    -- deferred NO ACTION permits transactional delete-and-reinsert instead.
     ALTER TABLE settings
       ADD CONSTRAINT settings_budget_period_income_fk
       FOREIGN KEY (budget_id, budget_period_income_id)
-      REFERENCES recurring_incomes(budget_id, id) ON DELETE SET NULL
+      REFERENCES recurring_incomes(budget_id, id)
       DEFERRABLE INITIALLY DEFERRED;
   END IF;
 END;

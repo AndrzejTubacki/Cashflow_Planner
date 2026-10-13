@@ -74,4 +74,60 @@ test("FX Cache stale rate bounding", async (t) => {
     assert.strictEqual(err.details?.code, "stale_fx_rate", "Error code should be stale_fx_rate");
     assert.strictEqual(Math.floor(err.details?.ageDays), 15, "Error ageDays should be 15");
   });
+
+  await t.test("rejects stale rates when building a SQLite cached snapshot", () => {
+    const fxService = createCashflowFxCacheService({
+      budgetStore: null,
+      openPlanningDb: () => ({
+        close() {},
+        prepare(sql) {
+          if (sql.includes("FROM settings")) {
+            return { get: () => ({ fx_provider: "nbp", ledger_currency: "PLN", timezone: "UTC" }) };
+          }
+          return {
+            all: () => [{
+              base_currency: "EUR",
+              quote_currency: "PLN",
+              rate: 4.5,
+              rate_date: "2026-01-01"
+            }]
+          };
+        }
+      }),
+      normalizeCurrency: value => String(value || "").trim().toUpperCase()
+    });
+
+    assert.throws(
+      () => fxService.getCachedFxSnapshot("test-user", "2026-01-16"),
+      error => error.status === 409 && error.details?.code === "stale_fx_rate"
+    );
+  });
+
+  await t.test("rejects stale rates when building a Postgres cached snapshot", async () => {
+    const fxService = createCashflowFxCacheService({
+      budgetStore: {
+        backend: "postgres",
+        async listPlanningRows(_userId, table) {
+          if (table === "settings") {
+            return [{ id: 1, fx_provider: "nbp", ledger_currency: "PLN", timezone: "UTC" }];
+          }
+          if (table === "fx_rates_cache") {
+            return [{
+              base_currency: "EUR",
+              quote_currency: "PLN",
+              rate: 4.5,
+              rate_date: "2026-01-01"
+            }];
+          }
+          return [];
+        }
+      },
+      normalizeCurrency: value => String(value || "").trim().toUpperCase()
+    });
+
+    await assert.rejects(
+      () => fxService.getCachedFxSnapshotAsync("test-user", "2026-01-16"),
+      error => error.status === 409 && error.details?.code === "stale_fx_rate"
+    );
+  });
 });

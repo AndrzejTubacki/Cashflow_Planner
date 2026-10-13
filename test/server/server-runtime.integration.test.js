@@ -433,3 +433,152 @@ test("server starts and serves requests with a real Postgres backend against a d
 
   await rm(runtimeRoot, { recursive: true, force: true });
 });
+
+// Drives the real rate limiter (keyed by req.ip) through the loopback TCP
+// connection the test itself makes to the real child process, so a spoofed
+// X-Forwarded-For header only changes req.ip when CASHFLOW_TRUST_PROXY says
+// it should - this exercises the actual "trust proxy" wiring, not a mock.
+async function loginAttemptStatuses(baseUrl, count, forwardedForValues) {
+  const statuses = [];
+  for (let index = 0; index < count; index += 1) {
+    const forwardedFor = typeof forwardedForValues === "function"
+      ? forwardedForValues(index)
+      : forwardedForValues;
+    const response = await fetch(`${baseUrl}/api/auth/internal/login`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(forwardedFor ? { "x-forwarded-for": forwardedFor } : {})
+      },
+      body: JSON.stringify({
+        email: "trust-proxy@example.com",
+        password: "not the password"
+      })
+    });
+    statuses.push(response.status);
+    await response.text();
+  }
+  return statuses;
+}
+
+test("trust proxy defaults to the direct socket peer, so a spoofed X-Forwarded-For is ignored", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-runtime-test-"));
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let output = "";
+  const child = spawn(process.execPath, ["server.mjs"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATA_DIR: path.join(runtimeRoot, "data"),
+      LOGS_DIR: path.join(runtimeRoot, "logs")
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  child.stdout.on("data", chunk => { output += chunk.toString(); });
+  child.stderr.on("data", chunk => { output += chunk.toString(); });
+
+  try {
+    await waitForHealth(baseUrl, child, () => output);
+
+    // Every request claims a different spoofed client IP. If trust proxy
+    // were honored by default, each would get its own 20-request bucket and
+    // none of these 21 requests would ever hit the limit.
+    const statuses = await loginAttemptStatuses(
+      baseUrl,
+      21,
+      index => `203.0.113.${index + 1}`
+    );
+
+    assert.equal(statuses.slice(0, 20).every(status => status !== 429), true);
+    assert.equal(statuses[20], 429, "expected the real socket peer to still be rate-limited as one client");
+  } finally {
+    await stopServer(child);
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test("CASHFLOW_TRUST_PROXY=1 makes the rate limiter key on the client from X-Forwarded-For", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-runtime-test-"));
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let output = "";
+  const child = spawn(process.execPath, ["server.mjs"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATA_DIR: path.join(runtimeRoot, "data"),
+      LOGS_DIR: path.join(runtimeRoot, "logs"),
+      CASHFLOW_TRUST_PROXY: "1"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  child.stdout.on("data", chunk => { output += chunk.toString(); });
+  child.stderr.on("data", chunk => { output += chunk.toString(); });
+
+  try {
+    await waitForHealth(baseUrl, child, () => output);
+
+    const firstClientStatuses = await loginAttemptStatuses(baseUrl, 21, "203.0.113.50");
+    assert.equal(firstClientStatuses.slice(0, 20).every(status => status !== 429), true);
+    assert.equal(firstClientStatuses[20], 429, "expected the forwarded client to be rate-limited");
+
+    const secondClientStatuses = await loginAttemptStatuses(baseUrl, 1, "203.0.113.51");
+    assert.notEqual(
+      secondClientStatuses[0],
+      429,
+      "expected a different X-Forwarded-For client to have its own bucket"
+    );
+
+    const log = await readFile(path.join(runtimeRoot, "logs", "server-events.log"), "utf8");
+    assert.match(log, /"kind":"cashflow_trust_proxy_configured"/);
+  } finally {
+    await stopServer(child);
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+test("an invalid CASHFLOW_TRUST_PROXY value does not silently enable trust", async () => {
+  const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-runtime-test-"));
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let output = "";
+  const child = spawn(process.execPath, ["server.mjs"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATA_DIR: path.join(runtimeRoot, "data"),
+      LOGS_DIR: path.join(runtimeRoot, "logs"),
+      CASHFLOW_TRUST_PROXY: "not-a-valid-value!!"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  child.stdout.on("data", chunk => { output += chunk.toString(); });
+  child.stderr.on("data", chunk => { output += chunk.toString(); });
+
+  try {
+    await waitForHealth(baseUrl, child, () => output);
+
+    const statuses = await loginAttemptStatuses(
+      baseUrl,
+      21,
+      index => `203.0.113.${100 + index}`
+    );
+    assert.equal(statuses.slice(0, 20).every(status => status !== 429), true);
+    assert.equal(
+      statuses[20],
+      429,
+      "expected proxy trust to stay disabled, so spoofed clients still share one bucket"
+    );
+
+    const errorLog = await readFile(path.join(runtimeRoot, "logs", "error.log"), "utf8");
+    assert.match(errorLog, /"kind":"cashflow_trust_proxy_invalid"/);
+    assert.match(errorLog, /"value":"not-a-valid-value!!"/);
+  } finally {
+    await stopServer(child);
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});

@@ -412,7 +412,9 @@ function addMinutesIso(minutes) {
   return new Date(Date.now() + minutes * 60 * 1000).toISOString();
 }
 
-function databaseTimestampMs(value) {
+export function databaseTimestampMs(value) {
+  // pg returns TIMESTAMPTZ columns as Date objects; preserve that parsed instant directly.
+  if (value instanceof Date) return value.getTime();
   const text = String(value || "").trim();
   if (!text) return NaN;
   if (/[zZ]|[+-]\d\d:?\d\d$/.test(text)) return Date.parse(text);
@@ -2618,6 +2620,7 @@ export function createCashflowGlobalService({
       return await completeAuthProviderCallbackSqlite(providerId, callbackUrl);
     }
 
+    // Backend dispatch is complete above; both transaction phases are external-store-only.
     const id = normalizeAuthProviderId(providerId);
     const currentUrl = new URL(callbackUrl);
     const state = String(currentUrl.searchParams.get("state") || "");
@@ -2641,8 +2644,7 @@ export function createCashflowGlobalService({
         secret: secretValueFromRef(providerRow.secret_ref || ""),
         stateRow
       };
-    }, () => null);
-    if (!prepared) return await completeAuthProviderCallbackSqlite(providerId, callbackUrl);
+    });
 
     const profile = await providerProfileFromCallback(
       prepared.provider,
@@ -2733,7 +2735,7 @@ export function createCashflowGlobalService({
 
       await repo.oauthStates.markConsumed(freshState.id);
       return result;
-    }, () => completeAuthProviderCallbackSqlite(providerId, callbackUrl));
+    });
   }
 
   function setAdminProviderIdentity(actorAccountId, accountId, providerId, input = {}) {
@@ -3275,6 +3277,7 @@ export function createCashflowGlobalService({
       return await authenticateInternalLoginSqlite(input);
     }
 
+    // Backend dispatch is complete above; credential reads and writes stay on the external store.
     let email;
     try {
       email = normalizeAccountEmail(input.email, "email");
@@ -3338,7 +3341,7 @@ export function createCashflowGlobalService({
       return {
         accountId: row.account_id
       };
-    }, () => authenticateInternalLoginSqlite(input));
+    });
   }
 
   function registerInternalAccountWithInvitationSqlite({

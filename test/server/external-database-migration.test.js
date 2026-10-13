@@ -1342,7 +1342,7 @@ test("Postgres budget store facade updates and deletes planning rows transaction
         : String(entry.sql).includes('DELETE FROM "one_off_transactions"') ? "DELETE"
           : "OTHER"
     ),
-    ["BEGIN", "UPDATE", "COMMIT", "BEGIN", "DELETE", "COMMIT"]
+    ["BEGIN", "OTHER", "UPDATE", "COMMIT", "BEGIN", "DELETE", "COMMIT"]
   );
 
   await store.close();
@@ -1731,7 +1731,7 @@ test("Postgres budget store facade updates and deletes confirmed ledger rows tra
         : String(entry.sql).includes("DELETE FROM confirmed_transactions") ? "DELETE"
           : "OTHER"
     ),
-    ["BEGIN", "UPDATE", "COMMIT", "BEGIN", "DELETE", "COMMIT"]
+    ["BEGIN", "OTHER", "UPDATE", "COMMIT", "BEGIN", "DELETE", "COMMIT"]
   );
 
   await store.close();

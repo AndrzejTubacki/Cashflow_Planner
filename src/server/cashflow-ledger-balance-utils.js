@@ -69,11 +69,16 @@ export function confirmedRowsWithRunningBalances(rows = [], {
 export function wouldConfirmedRowsGoNegative(rows = [], {
   openingBalance = 0
 } = {}) {
-  for (const row of confirmedRowsWithRunningBalances(rows, { openingBalance })) {
-    if (row.running_balance_pln < -0.005) return true;
-  }
-
-  return false;
+  // Only the final/latest balance matters here, not every historical point in
+  // the sequence: a real ledger can legitimately dip below zero briefly (an
+  // expense landing a few days before the income that covers it) and recover
+  // — that's normal cash flow, not something a future, unrelated confirmation
+  // should be blocked by forever after. Scanning every row would make any
+  // ledger with one resolved historical dip permanently refuse to confirm
+  // anything, including income.
+  const withBalances = confirmedRowsWithRunningBalances(rows, { openingBalance });
+  const last = withBalances.at(-1);
+  return Boolean(last) && last.running_balance_pln < -0.005;
 }
 
 export function latestBalanceFromConfirmedRows(rows = [], {

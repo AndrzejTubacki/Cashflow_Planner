@@ -11,7 +11,7 @@ function canOwn(role) {
   return role === "owner";
 }
 
-function BudgetRow({ budget, isCurrent, onSwitch, onRename, onArchive, onRestore, onPurge, busy }) {
+function BudgetRow({ budget, isCurrent, onSwitch, onRename, onExport, onArchive, onRestore, onPurge, busy }) {
   const [name, setName] = useState(budget.display_name || budget.id);
   const isActive = budget.status === "active";
   const isArchived = budget.status === "archived";
@@ -43,13 +43,7 @@ function BudgetRow({ budget, isCurrent, onSwitch, onRename, onArchive, onRestore
           type="button"
           className="beta-btn-small"
           disabled={busy}
-          onClick={() => {
-            setBusy(true);
-            setError("");
-            downloadFile(`/api/budgets/${encodeURIComponent(budget.id)}/export`, `cashflow-${budget.id}-full-export.json`)
-              .catch(err => setError(`Export failed: ${err.message}`))
-              .finally(() => setBusy(false));
-          }}
+          onClick={() => onExport(budget.id)}
         >
           Export
         </button>
@@ -429,6 +423,22 @@ export default function BudgetView({ snapshot, onRefresh }) {
     }
   }
 
+  async function handleExport(budgetId) {
+    // Keep row actions coordinated by the parent so one busy/error state covers the whole list.
+    setBusy(true);
+    setActionError("");
+    try {
+      await downloadFile(
+        `/api/budgets/${encodeURIComponent(budgetId)}/export`,
+        `cashflow-${budgetId}-full-export.json`
+      );
+    } catch (err) {
+      setActionError(`Export failed: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleCreate(event) {
     event.preventDefault();
     setCreating(true);
@@ -547,6 +557,7 @@ export default function BudgetView({ snapshot, onRefresh }) {
                 isCurrent={budget.id === currentBudgetId}
                 onSwitch={handleSwitch}
                 onRename={handleRename}
+                onExport={handleExport}
                 onArchive={handleArchive}
                 onRestore={handleRestore}
                 onPurge={handlePurge}

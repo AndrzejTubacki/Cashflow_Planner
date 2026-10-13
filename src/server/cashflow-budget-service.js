@@ -36,7 +36,9 @@ function inviteTokenHash(value) {
   return crypto.createHash("sha256").update(String(value || ""), "utf8").digest("hex");
 }
 
-function invitationExpiryMs(value) {
+export function invitationExpiryMs(value) {
+  // pg returns TIMESTAMPTZ columns as Date objects; preserve that parsed instant directly.
+  if (value instanceof Date) return value.getTime();
   const text = String(value || "").trim();
   if (!text) return NaN;
   const normalized = text.includes("T") ? text : text.replace(" ", "T");
@@ -569,6 +571,7 @@ export function createCashflowBudgetService({
       return purgeBudget(actorAccountId, budgetId);
     }
 
+    // Backend dispatch is complete above; every transaction below is external-store-only.
     const normalizedBudgetId = normalizeUserId(budgetId);
 
     await withExternalGlobalTransaction(async repo => {
@@ -577,7 +580,7 @@ export function createCashflowBudgetService({
       if (budget.status !== "archived") {
         throw conflict("Budget must be archived before purge");
       }
-    }, () => purgeBudget(actorAccountId, normalizedBudgetId));
+    });
 
     const safetyBackup = typeof createBudgetBackupAsync === "function"
       ? await createBudgetBackupAsync(normalizedBudgetId)

@@ -223,6 +223,39 @@ test("safe current FX snapshot can read provider settings through the budget-sto
   }]);
 });
 
+test("safe current FX snapshot contains asynchronous host-hook failures", async () => {
+  const loggedErrors = [];
+  const fx = createCashflowFxCacheService({
+    budgetStore: {
+      async listPlanningRows() {
+        return [{
+          id: 1,
+          fx_provider: "nbp",
+          ledger_currency: "PLN",
+          timezone: "UTC"
+        }];
+      }
+    },
+    getCurrentFxSnapshot: async () => {
+      throw new Error("host snapshot unavailable");
+    },
+    listCashflowUserIds: () => [],
+    logCashflowError: (...args) => loggedErrors.push(args),
+    logError: () => {},
+    logServerEvent: () => {},
+    normalizeCurrency: value => String(value || "").trim().toUpperCase(),
+    openPlanningDb: () => {
+      throw new Error("SQLite planning DB should not be opened for async safe FX snapshots");
+    },
+    regenerateProjectionsAfterMutation: () => {}
+  });
+
+  assert.equal(await fx.safeGetCurrentFxSnapshotAsync("household"), null);
+  assert.equal(loggedErrors.length, 1);
+  assert.equal(loggedErrors[0][0], "cashflow_current_fx_snapshot_disabled");
+  assert.match(loggedErrors[0][1].message, /host snapshot unavailable/);
+});
+
 test("all-user FX refresh can use the async projection status hook", async () => {
   let asyncProjectionCalls = 0;
   let syncProjectionCalls = 0;

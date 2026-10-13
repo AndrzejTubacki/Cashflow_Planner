@@ -23,9 +23,13 @@ ENV SQLITE_TMPDIR=/app/data/tmp
 # COPY preserves host permissions; make root-owned application files readable
 # and directories traversable by the runtime user even from a private checkout.
 RUN chmod -R a+rX /app
-# Named volumes inherit these owners. Bind mounts must be writable by UID 1000.
+# Named volumes inherit these owners; a fresh bind mount is fixed up by
+# docker-entrypoint.sh at container start instead, since it's created by
+# Docker as root:root before this build-time step ever runs.
 RUN mkdir -p /app/data/tmp /app/logs /app/backups && chown -R node:node /app/data /app/logs /app/backups
-USER node
+# Deliberately stays root here: docker-entrypoint.sh needs root to chown a
+# fresh bind-mounted volume, then drops privileges to node via setpriv before
+# exec-ing the app. See scripts/docker-entrypoint.sh.
 EXPOSE 3000
 VOLUME ["/app/data", "/app/logs"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

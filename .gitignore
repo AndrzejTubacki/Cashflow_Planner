@@ -15,8 +15,4 @@ local/
 !.env.example
 *.sqlite
 *.sqlite-*
-todo.md
-context.md
-review.md
-CHANGELOG.md
 dev/

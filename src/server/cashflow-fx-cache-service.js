@@ -36,6 +36,20 @@ export function createCashflowFxCacheService({
     return String(date || todayInTimezone(timezone)).slice(0, 10);
   }
 
+  function assertCachedRateFresh(rateDate, cachedRateDate, baseCurrency, quoteCurrency) {
+    // Snapshot and single-rate consumers must enforce the same bounded-cache policy.
+    const cachedDate = String(cachedRateDate || "").slice(0, 10);
+    const rateAgeDays = (
+      new Date(`${rateDate}T00:00:00Z`) - new Date(`${cachedDate}T00:00:00Z`)
+    ) / (1000 * 60 * 60 * 24);
+    if (rateAgeDays > 14) {
+      const err = new Error(`FX rate cache is stale for ${baseCurrency}/${quoteCurrency}`);
+      err.status = 409;
+      err.details = { code: "stale_fx_rate", ageDays: rateAgeDays };
+      throw err;
+    }
+  }
+
   function fxSettingsFromRow(settings = {}) {
     const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
 
@@ -213,7 +227,8 @@ export function createCashflowFxCacheService({
     }
 
     try {
-      const snapshot = getCurrentFxSnapshot();
+      // Await host hooks here so asynchronous failures reach the same circuit breaker as sync throws.
+      const snapshot = await getCurrentFxSnapshot();
 
       if (snapshot && typeof snapshot === "object") {
         return snapshot;
@@ -357,7 +372,7 @@ export function createCashflowFxCacheService({
 
     try {
       const rows = db.prepare(`
-        SELECT base_currency, quote_currency, currency, rate, effective_date, source
+        SELECT base_currency, quote_currency, currency, rate, rate_date, effective_date, source
         FROM fx_rates_cache
         WHERE rate_date <= ?
         ORDER BY base_currency ASC, quote_currency ASC, rate_date DESC
@@ -371,6 +386,7 @@ export function createCashflowFxCacheService({
         const pair = `${currency}/${quote}`;
         if (seen.has(pair)) continue;
 
+        assertCachedRateFresh(rateDate, row.rate_date, currency, quote);
         seen.add(pair);
         const entry = {
           currency,
@@ -528,6 +544,7 @@ export function createCashflowFxCacheService({
       const pair = `${currency}/${quote}`;
       if (seen.has(pair)) continue;
 
+      assertCachedRateFresh(rateDate, row.rate_date, currency, quote);
       seen.add(pair);
       const entry = {
         currency,

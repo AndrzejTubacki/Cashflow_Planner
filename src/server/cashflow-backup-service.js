@@ -22,7 +22,7 @@ import {
 } from "./cashflow-fx-provider-utils.js";
 import { cleanupMigrationRecoveryFolders } from "./cashflow-migration-recovery.js";
 import { addMoneyAmounts, multiplyMoney, roundMoneyAmount, subtractMoneyAmounts } from "./cashflow-money-utils.js";
-import { badRequest, notFound } from "./cashflow-user-utils.js";
+import { badRequest, conflict, notFound } from "./cashflow-user-utils.js";
 
 const PROJECTION_SNAPSHOT_RETENTION = 100;
 const EVENT_LOG_RETENTION = 2_000;
@@ -37,6 +37,16 @@ const SOURCE_FIELDS = [
   "source_goal_id"
 ];
 const ACTIVE_LEDGER_DRIFT_EPSILON = 0.01;
+
+// The service owns this cross-operation lock, so contention must retain the
+// same typed HTTP conflict contract the former route wrapper exposed.
+function dataPortabilityLockConflict(userId) {
+  return conflict("An import or restore is already running for this budget", [{
+    field: "operation",
+    reason: "locked",
+    lock: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability)
+  }]);
+}
 
 
 import { BUDGET_RUNTIME_LOCK_JOBS, budgetRuntimeLockName } from "./cashflow-runtime-locks.js";
@@ -63,19 +73,27 @@ export function createCashflowBackupService({
   regenerateProjectionsAfterMutation,
   regenerateProjectionsAfterMutationAsync = null
 }) {
+  // Deliberately not async: the SQLite failure-injection tests rely on a
+  // hook throwing synchronously and being caught by the caller's own local
+  // try/catch. Wrapping that in an async function would turn the throw into
+  // a rejected promise instead, which a non-awaiting (SQLite, synchronous)
+  // caller below would never catch. Returning the hook's result unwrapped
+  // lets an async caller (the Postgres path) still `await` it to pause
+  // mid-operation for its own tests, while a sync caller that doesn't await
+  // keeps today's synchronous-throw behavior exactly as before.
   function runBackupHook(phase, details = {}) {
-    if (typeof backupHook === "function") backupHook({ phase, ...details });
+    if (typeof backupHook === "function") return backupHook({ phase, ...details });
   }
 
   // Postgres has no VACUUM INTO / file-copy equivalent, so its backup path
-  // stores a JSON budget-store snapshot instead of a folder of .sqlite files,
-  // and tracks metadata as a backup_metadata planning row instead of a local
-  // SQL row. Both paths share the same backup root directory, retention
-  // count, and rollback-on-restore-failure contract.
+  // stores a JSON budget-store snapshot in the shared artifact table. The
+  // logical reference is retained in backup_metadata for discovery/restore.
   function usesPostgresBudgetStoreForBackup() {
     return budgetStore?.backend === "postgres"
       && typeof budgetStore.listPlanningRows === "function"
       && typeof budgetStore.insertPlanningRows === "function"
+      && typeof budgetStore.saveBackupArtifact === "function"
+      && typeof budgetStore.readBackupArtifact === "function"
       && typeof getSettingsAsync === "function"
       && typeof recalculateLedgerRunningBalanceAsync === "function"
       && typeof regenerateProjectionsAfterMutationAsync === "function";
@@ -995,13 +1013,9 @@ export function createCashflowBackupService({
 
     const runBackup = async () => {
 
-    const settings = await getSettingsAsync(userId);
-    const dir = backupRootDir(userId, settings);
     const createdAt = now().toISOString();
-    const timestamp = createdAt.replace(/[:.]/g, "-");
     const backupId = generateId("backup");
-    const backupPath = path.join(dir, `backup_${timestamp}_${backupId}.json`);
-    const temporaryPath = `${backupPath}.tmp`;
+    const backupPath = `postgres-backup:${backupId}`;
 
     async function recordMetadata(success, errorMessage = null, sizeBytes = null) {
       await budgetStore.insertPlanningRows(userId, "backup_metadata", [{
@@ -1016,37 +1030,55 @@ export function createCashflowBackupService({
     }
 
     try {
-      fs.mkdirSync(dir, { recursive: true });
-      runBackupHook("before_planning_copy", { userId, backupPath, temporaryPath });
-      const snapshot = await createBudgetStoreSnapshot({
-        budgetIds: [userId],
-        budgetStore,
-        reason: options.reason || "manual"
+      // The snapshot reads each planning/ledger table with its own separate
+      // query, so it only avoids a torn read if every one of those queries
+      // runs inside the same transaction/connection as the lock that blocks
+      // ordinary mutations (see lockBudgetLedger) - and the lock has to stay
+      // held for that whole transaction, not just an instant before it,
+      // since a pg_advisory_xact_lock releases at commit. Taking the lock
+      // and then committing in its own separate transaction (as this used
+      // to) therefore releases the lock before any table is read, giving no
+      // protection at all against a mutation committing partway through.
+      //
+      // Deliberately plain READ COMMITTED, not REPEATABLE READ: this lock is
+      // the same one an in-flight mutation already waits on (see the test
+      // above this comment's sibling in backup-service.test.js), so once our
+      // lockBudgetLedger call below returns, any such mutation has already
+      // committed - REPEATABLE READ would instead freeze our view as of
+      // *before* that wait resolved (Postgres fixes a REPEATABLE READ
+      // snapshot at the transaction's first statement, even one that itself
+      // blocks), making every read below silently stale. READ COMMITTED
+      // lets each read see whatever is truly committed as of right now,
+      // which combined with the lock being held for the whole read is both
+      // necessary and sufficient: nothing using the same lock can commit a
+      // conflicting change until we release it.
+      const snapshot = await budgetStore.transaction(async writer => {
+        await writer.lockBudgetLedger(userId);
+        await runBackupHook("before_planning_copy", { userId, backupPath });
+        return await createBudgetStoreSnapshot({
+          budgetIds: [userId],
+          budgetStore: writer,
+          excludeBackupMetadata: true,
+          reason: options.reason || "manual"
+        });
       });
       const serialized = JSON.stringify(snapshot);
 
-      runBackupHook("before_backup_validation", { userId, backupPath, temporaryPath });
+      await runBackupHook("before_backup_validation", { userId, backupPath });
       normalizeBudgetStoreSnapshot(snapshot);
 
-      fs.writeFileSync(temporaryPath, serialized, "utf8");
-      fs.renameSync(temporaryPath, backupPath);
-      runBackupHook("before_success_metadata", { userId, backupPath });
-      await recordMetadata(true, null, Buffer.byteLength(serialized, "utf8"));
+      await runBackupHook("before_success_metadata", { userId, backupPath });
+      await budgetStore.saveBackupArtifact(userId, {
+        id: backupId,
+        backup_timestamp: createdAt,
+        backup_path: backupPath,
+        size_bytes: Buffer.byteLength(serialized, "utf8"),
+        success: true,
+        error_message: null,
+        created_at: new Date().toISOString()
+      }, serialized);
       return backupPath;
     } catch (error) {
-      for (const partialPath of [temporaryPath, backupPath]) {
-        try {
-          fs.rmSync(partialPath, { force: true });
-        } catch (cleanupError) {
-          logError("cashflow_backup_partial_cleanup_failed", {
-            userId,
-            backupPath,
-            partialPath,
-            error: cleanupError.message
-          });
-        }
-      }
-
       try {
         await recordMetadata(false, error.message, null);
       } catch (metadataError) {
@@ -1066,6 +1098,11 @@ export function createCashflowBackupService({
     }
     };
 
+    // Restore already holds this exact lock while creating its safety backup.
+    // Public/manual backup calls still acquire it here as before.
+    if (options.dataPortabilityLockHeld) {
+      return await runBackup();
+    }
     if (lockService && typeof lockService.withLock === "function") {
       const lockResult = await lockService.withLock(
         budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability),
@@ -1073,7 +1110,7 @@ export function createCashflowBackupService({
         { ttlMs: 300000 }
       );
       if (!lockResult?.acquired) {
-        throw new Error("An import or restore is already running for this budget (locked)");
+        throw dataPortabilityLockConflict(userId);
       }
       return lockResult.result;
     }
@@ -1306,7 +1343,20 @@ export function createCashflowBackupService({
   }
 
   async function restoreBackupFromPathAsync(userId, backupPath) {
-    const raw = fs.readFileSync(backupPath, "utf8");
+    let raw;
+    if (usesPostgresBudgetStoreForBackup() && String(backupPath).startsWith("postgres-backup:")) {
+      const artifactId = String(backupPath).slice("postgres-backup:".length);
+      raw = await budgetStore.readBackupArtifact(userId, artifactId);
+      if (raw === null || raw === undefined) {
+        throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
+      }
+    } else {
+      // Compatibility for metadata created by the earlier file-backed Postgres implementation.
+      if (!fs.existsSync(backupPath)) {
+        throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
+      }
+      raw = fs.readFileSync(backupPath, "utf8");
+    }
     const snapshot = normalizeBudgetStoreSnapshot(JSON.parse(raw));
 
     await restoreBudgetStoreSnapshot({
@@ -1315,6 +1365,14 @@ export function createCashflowBackupService({
       // present now but absent from the backup need to be cleared too, not
       // just left alone.
       includeExistingLedgerYears: true,
+      // The snapshot being restored never contains backup_metadata rows
+      // (createBackupAsync excludes them so a backup doesn't recursively
+      // embed its own history) - without this flag, replacing planning
+      // tables to match the snapshot still wipes the existing
+      // backup_metadata table since it isn't in the payload to restore,
+      // destroying all backup history (including the safety backup this
+      // same restore call may be about to create) on every restore.
+      preserveBackupMetadata: true,
       snapshot
     });
 
@@ -1341,13 +1399,23 @@ export function createCashflowBackupService({
     }
 
     const backupPath = row.backup_path;
-    if (!fs.existsSync(backupPath)) {
-      throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
-    }
-
     try {
-      normalizeBudgetStoreSnapshot(JSON.parse(fs.readFileSync(backupPath, "utf8")));
+      let raw;
+      if (String(backupPath).startsWith("postgres-backup:")) {
+        raw = await budgetStore.readBackupArtifact(userId, backupId);
+        if (raw === null || raw === undefined) {
+          throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
+        }
+      } else {
+        // Compatibility for metadata created by the earlier file-backed Postgres implementation.
+        if (!fs.existsSync(backupPath)) {
+          throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
+        }
+        raw = fs.readFileSync(backupPath, "utf8");
+      }
+      normalizeBudgetStoreSnapshot(JSON.parse(raw));
     } catch (error) {
+      if (error?.status === 404) throw error;
       throw badRequest("Backup is invalid and cannot be restored", {
         phase: "backup_validation_failed",
         backupPath,
@@ -1355,10 +1423,13 @@ export function createCashflowBackupService({
       });
     }
 
-    const safetyBackup = await createBackupAsync(userId, { deferCleanup: true });
+    const safetyBackup = await createBackupAsync(userId, {
+      deferCleanup: true,
+      dataPortabilityLockHeld: true
+    });
 
     try {
-      runBackupHook("before_restore_apply", { userId, backupPath, safetyBackup });
+      await runBackupHook("before_restore_apply", { userId, backupPath, safetyBackup });
       const projection = await restoreBackupFromPathAsync(userId, backupPath);
 
       return {
@@ -1376,7 +1447,7 @@ export function createCashflowBackupService({
         error: error.message
       });
       try {
-        runBackupHook("before_restore_rollback", { userId, backupPath, safetyBackup, error });
+        await runBackupHook("before_restore_rollback", { userId, backupPath, safetyBackup, error });
         await restoreBackupFromPathAsync(userId, safetyBackup);
         logServerEvent("cashflow_restore_rolled_back", {
           userId,
@@ -1418,7 +1489,7 @@ export function createCashflowBackupService({
         { ttlMs: 300000 }
       );
       if (!lockResult?.acquired) {
-        throw new Error("An import or restore is already running for this budget (locked)");
+        throw dataPortabilityLockConflict(userId);
       }
       return lockResult.result;
     }

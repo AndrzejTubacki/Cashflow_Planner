@@ -2,7 +2,6 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
 
@@ -13,8 +12,21 @@ import { createPostgresGlobalSchemaSql } from "../src/server/cashflow-postgres-g
 function usage() {
   return `Usage: npm run db:postgres:schema -- [--section all|global|budget] [--output PATH]
 
-Prints the draft Postgres DDL used for external database migration planning.
-This does not connect to a database or enable Postgres runtime mode.`;
+Prints the Postgres DDL used to initialize a fresh Cashflow database.
+This does not connect to a database, apply the DDL, or enable Postgres runtime mode.`;
+}
+
+// Keep npm's `--` forwarding compatible with direct `node` invocation while
+// rejecting section names that would otherwise produce an empty SQL file.
+function parseArgs(argv = process.argv.slice(2)) {
+  const options = parseCliArgs(argv, {
+    defaults: { section: "all", output: "" },
+    string: ["--section", "--output"]
+  });
+  if (!options.help && !["all", "global", "budget"].includes(options.section)) {
+    throw new Error("--section must be one of: all, global, budget");
+  }
+  return options;
 }
 
 export function postgresSchemaSql({ section = "all" } = {}) {

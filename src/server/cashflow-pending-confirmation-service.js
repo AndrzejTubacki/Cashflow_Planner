@@ -295,11 +295,26 @@ export function createCashflowPendingConfirmationService({
       throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
     }
 
-    return runRecoverableUserMutation(userId, "confirm_pending_transaction", async () => {
+    const confirmationResult = await runRecoverableUserMutation(userId, "confirm_pending_transaction", async () => {
       const year = Number(confirmedDate.slice(0, 4));
       const result = await budgetStore.transaction(async writer => {
         if (typeof writer.lockBudgetLedger === "function") {
           await writer.lockBudgetLedger(userId);
+        }
+
+        // The pre-lock check above only rules out a balance that was already
+        // negative before this call started; it cannot see a sibling
+        // confirmation racing against this one. Re-run it now that the lock
+        // guarantees any such sibling has already committed (or never will),
+        // so the combined effect of both writes is what gets checked, not
+        // each one in isolation. A losing candidate returns null here,
+        // before any write, so runRecoverableUserMutation sees a normal
+        // success and never restores the winner's just-committed snapshot.
+        const stillNegative = typeof wouldLedgerGoNegativeAfterInsertAsync === "function"
+          ? await wouldLedgerGoNegativeAfterInsertAsync(userId, candidate, { ledgerCurrency, settings })
+          : wouldLedgerGoNegativeAfterInsert(userId, candidate);
+        if (!isLedgerConversion && stillNegative) {
+          return null;
         }
 
         await writer.insertConfirmedTransactions(userId, [{
@@ -341,8 +356,13 @@ export function createCashflowPendingConfirmationService({
         return rowById(await writer.listConfirmedTransactions(userId, { ledgerYear: year }), id);
       });
 
-      return withProjectionStatus(userId, result);
+      return result === null ? null : withProjectionStatus(userId, result);
     });
+
+    if (confirmationResult === null) {
+      throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
+    }
+    return confirmationResult;
   }
 
   return {

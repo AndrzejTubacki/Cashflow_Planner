@@ -17,11 +17,21 @@ import {
   OPERATIONAL_SETTINGS_COLUMNS,
   validateAndNormalizeSettings
 } from "./cashflow-settings-validation.js";
-import { badRequest } from "./cashflow-user-utils.js";
+import { badRequest, conflict } from "./cashflow-user-utils.js";
 import { BUDGET_RUNTIME_LOCK_JOBS, budgetRuntimeLockName } from "./cashflow-runtime-locks.js";
 
 const EXPORT_FORMAT = "cashflow-full-export";
 const EXPORT_VERSION = 1;
+
+// Full/sample imports own the shared cross-operation lock. Keep contention
+// as a typed HTTP conflict now that the redundant route lock is gone.
+function dataPortabilityLockConflict(userId) {
+  return conflict("An import or restore is already running for this budget", [{
+    field: "operation",
+    reason: "locked",
+    lock: budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability)
+  }]);
+}
 
 const PLANNING_EXPORT_TABLES = [
   "settings",
@@ -1543,7 +1553,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
         { ttlMs: 300000 }
       );
       if (!lockResult?.acquired) {
-        throw new Error("An import or restore is already running for this budget (locked)");
+        throw dataPortabilityLockConflict(userId);
       }
       return lockResult.result;
     }

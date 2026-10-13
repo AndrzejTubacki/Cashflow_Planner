@@ -103,6 +103,66 @@ test("confirmed ledger balance helper detects negative and latest balances", () 
   }]), 77.78);
 });
 
+test("a resolved historical dip does not block confirming a later, unrelated transaction", () => {
+  // Real cash flow: rent lands a few days before the paycheck that covers
+  // it, so the ledger is briefly negative on 01-02 and recovers on 01-05.
+  // A brand new income confirmed much later must not be blocked by that
+  // long-resolved dip — only the resulting final balance matters.
+  const historicalDipThenRecovery = [
+    {
+      id: "rent",
+      amount: 120,
+      buffered_fx_rate: 1,
+      created_at: "2026-01-02T09:00:00.000Z",
+      date: "2026-01-02",
+      type: "expense"
+    },
+    {
+      id: "paycheck",
+      amount: 200,
+      buffered_fx_rate: 1,
+      created_at: "2026-01-05T09:00:00.000Z",
+      date: "2026-01-05",
+      type: "income"
+    }
+  ];
+
+  // Confirmed here: the past dip is real (balance goes negative on 01-02).
+  assert.equal(
+    confirmedRowsWithRunningBalances(historicalDipThenRecovery)[0].running_balance_pln,
+    -120
+  );
+
+  const newIncomeMonthsLater = {
+    id: "salary-march",
+    amount: 50,
+    buffered_fx_rate: 1,
+    created_at: "2026-03-01T09:00:00.000Z",
+    date: "2026-03-01",
+    type: "income"
+  };
+
+  assert.equal(
+    wouldConfirmedRowsGoNegative([...historicalDipThenRecovery, newIncomeMonthsLater]),
+    false
+  );
+
+  // A candidate that genuinely leaves the final balance negative is still caught.
+  const newExpenseThatOverdraws = {
+    id: "big-expense",
+    amount: 1000,
+    buffered_fx_rate: 1,
+    created_at: "2026-03-01T09:00:00.000Z",
+    date: "2026-03-01",
+    type: "expense"
+  };
+
+  assert.equal(
+    wouldConfirmedRowsGoNegative([...historicalDipThenRecovery, newExpenseThatOverdraws]),
+    true
+  );
+});
+
 test("ledger running balance plan reads through a budget store without mutating storage", async () => {
   const calls = [];
   const budgetStore = {

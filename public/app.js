@@ -258,7 +258,7 @@ async function loadBudgets(messageKey = "") {
   render();
 }
 
-async function loadBudgetManagerData({ preserveInvitation = false } = {}) {
+async function loadBudgetManagerData({ preserveInvitation = false, expectedCashflowSeq = null } = {}) {
   if (!state.cashflow?.session?.accountId) return;
 
   const budgetId = selectedUserId();
@@ -289,7 +289,10 @@ async function loadBudgetManagerData({ preserveInvitation = false } = {}) {
     manager.invitations = Array.isArray(invitationsResult.invitations) ? invitationsResult.invitations : [];
   }
 
+  // A budget switch can complete while these secondary requests are in flight.
+  if (expectedCashflowSeq !== null && expectedCashflowSeq !== cashflowLoadSeq) return false;
   state.budgetManager = manager;
+  return true;
 }
 
 let cashflowLoadSeq = 0;
@@ -311,7 +314,12 @@ async function loadCashflow(messageKey = "") {
     state.selectedAccountId = state.cashflow.session?.accountId || state.selectedAccountId;
     if (state.selectedAccountId) localStorage.setItem("cashflow_account_id", state.selectedAccountId);
     refreshUiPreferences({ useDefaultTab: true });
-    await loadBudgetManagerData({ preserveInvitation: true });
+    if (seq !== cashflowLoadSeq) return;
+    const managerLoaded = await loadBudgetManagerData({
+      preserveInvitation: true,
+      expectedCashflowSeq: seq
+    });
+    if (seq !== cashflowLoadSeq || !managerLoaded) return;
     state.message = messageKey ? t(locale, messageKey) : "";
     void checkLatestVersion();
   } catch (error) {

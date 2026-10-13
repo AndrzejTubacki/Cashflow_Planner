@@ -14,11 +14,16 @@ import dns from "node:dns";
 import { promisify } from "node:util";
 const lookupAsync = promisify(dns.lookup);
 
-function isPrivateIp(ip) {
+export function isPrivateIp(ip) {
   // block 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1, fc00::/7, fe80::/10
   if (!ip) return false;
-  if (ip === "::1" || ip.toLowerCase().startsWith("fc") || ip.toLowerCase().startsWith("fd") || ip.toLowerCase().startsWith("fe8")) return true;
-  const parts = ip.split(".");
+  const normalizedIp = String(ip).trim().replace(/^\[|\]$/g, "").toLowerCase();
+  if (normalizedIp === "::1" || normalizedIp.startsWith("fc") || normalizedIp.startsWith("fd")) return true;
+  const firstIpv6Hextet = normalizedIp.includes(":")
+    ? Number.parseInt(normalizedIp.split(":", 1)[0], 16)
+    : Number.NaN;
+  if (firstIpv6Hextet >= 0xfe80 && firstIpv6Hextet <= 0xfebf) return true;
+  const parts = normalizedIp.split(".");
   if (parts.length !== 4) return false;
   const p0 = parseInt(parts[0], 10);
   const p1 = parseInt(parts[1], 10);
@@ -27,7 +32,7 @@ function isPrivateIp(ip) {
   return false;
 }
 
-async function assertUrlIsExternalAsync(url, field) {
+export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAsync) {
   if (!url) return;
   let parsed;
   try {
@@ -35,17 +40,21 @@ async function assertUrlIsExternalAsync(url, field) {
   } catch {
     return;
   }
-  const host = parsed.hostname;
-  if (host === "localhost" || isPrivateIp(host)) {
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (host.toLowerCase() === "localhost" || isPrivateIp(host)) {
     throw badRequest(`${field} must point to a public external service`);
   }
+  let addresses;
   try {
-    const { address } = await lookupAsync(host);
-    if (isPrivateIp(address)) {
-      throw badRequest(`${field} resolves to a private IP address and is not allowed`);
-    }
-  } catch (error) {
+    addresses = await lookupHost(host, { all: true });
+  } catch {
     throw badRequest(`${field} hostname could not be resolved`);
+  }
+  if (!Array.isArray(addresses) || addresses.length === 0) {
+    throw badRequest(`${field} hostname could not be resolved`);
+  }
+  if (addresses.some(result => isPrivateIp(result?.address))) {
+    throw badRequest(`${field} resolves to a private IP address and is not allowed`);
   }
 }
 
@@ -71,11 +80,25 @@ export function createCashflowSettingsService({
   getCachedFxRateAsync = null,
   latestConfirmedBalance = null,
   latestConfirmedBalanceAsync = null,
+  lookupHost = lookupAsync,
   normalizeLocale = value => String(value || "en"),
   openPlanningDb,
   recalculatePlanningRunningBalances = null,
   recalculatePlanningRunningBalancesAsync = null
 }) {
+  async function assertExternalNotificationUrls(safeUpdates) {
+    // This save-time DNS check blocks current private targets. DNS rebinding remains a
+    // residual TOCTOU risk because delivery happens later and may resolve the host again.
+    await Promise.all([
+      Object.prototype.hasOwnProperty.call(safeUpdates, "ntfy_url")
+        ? assertUrlIsExternalAsync(safeUpdates.ntfy_url, "ntfy_url", lookupHost)
+        : null,
+      Object.prototype.hasOwnProperty.call(safeUpdates, "discord_webhook_url")
+        ? assertUrlIsExternalAsync(safeUpdates.discord_webhook_url, "discord_webhook_url", lookupHost)
+        : null
+    ]);
+  }
+
   function getSettings(userId) {
     const db = openPlanningDb(userId);
     try {
@@ -109,6 +132,7 @@ export function createCashflowSettingsService({
         currentSettings,
         normalizeLocale
       });
+      await assertExternalNotificationUrls(safeUpdates);
 
       if (safeUpdates.budget_period_income_id) {
         const income = db.prepare(`
@@ -445,6 +469,7 @@ export function createCashflowSettingsService({
       currentSettings,
       normalizeLocale
     });
+    await assertExternalNotificationUrls(safeUpdates);
     const ledgerSwitch = await buildLedgerSwitch(userId, currentSettings, safeUpdates);
 
     const result = await budgetStore.transaction(async writer => {

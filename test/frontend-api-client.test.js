@@ -110,3 +110,33 @@ test("frontend modules do not use the legacy global API client or browser alerts
     assert.doesNotMatch(source, /\balert\s*\(/);
   }
 });
+
+test("beta budget export delegates to parent-owned busy and error state", () => {
+  const repoRoot = path.resolve(import.meta.dirname, "..");
+  const budgetView = fs.readFileSync(path.join(repoRoot, "frontend-beta/src/BudgetView.jsx"), "utf8");
+  const budgetRow = budgetView.slice(
+    budgetView.indexOf("function BudgetRow"),
+    budgetView.indexOf("function MembersPanel")
+  );
+  assert.match(budgetRow, /onExport/);
+  assert.match(budgetRow, /onClick=\{\(\) => onExport\(budget\.id\)\}/);
+  assert.doesNotMatch(budgetRow, /\bsetBusy\b|\bsetError\b|\bdownloadFile\b/);
+  assert.match(budgetView, /async function handleExport\(budgetId\)/);
+  assert.match(budgetView, /onExport=\{handleExport\}/);
+});
+
+test("beta app only installs the CSRF token from its current load", () => {
+  const repoRoot = path.resolve(import.meta.dirname, "..");
+  const app = fs.readFileSync(path.join(repoRoot, "frontend-beta/src/App.jsx"), "utf8");
+  assert.match(
+    app,
+    /if \(currentRequestId === loadCounter\.current && sessionResult\?\.csrfToken\) \{\s*setCsrfToken/
+  );
+});
+
+test("legacy cashflow load guards budget-manager assignment against stale requests", () => {
+  const repoRoot = path.resolve(import.meta.dirname, "..");
+  const legacyApp = fs.readFileSync(path.join(repoRoot, "public/app.js"), "utf8");
+  assert.match(legacyApp, /expectedCashflowSeq !== cashflowLoadSeq\) return false;\s*state\.budgetManager = manager;/);
+  assert.match(legacyApp, /expectedCashflowSeq: seq[\s\S]*seq !== cashflowLoadSeq \|\| !managerLoaded/);
+});

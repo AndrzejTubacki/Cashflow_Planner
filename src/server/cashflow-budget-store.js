@@ -43,6 +43,35 @@ function assertIdPlanningTable(tableName, { allowSettings = true } = {}) {
   return safeTable;
 }
 
+// Every id-based planning table uses a TEXT id except settings, whose
+// singleton row uses INTEGER id CHECK (id = 1). A bulk UPDATE/DELETE built
+// from a VALUES() list or an ANY() array needs an explicit cast matching the
+// real column type, or Postgres raises "operator does not exist: integer =
+// text" the moment settings is the target.
+function idColumnSqlType(safeTable) {
+  return safeTable === "settings" ? "integer" : "text";
+}
+
+// Column types vary per table (boolean, jsonb, numeric, double precision,
+// timestamptz, text, ...). The same VALUES()-table UPDATE pattern above
+// needs every value column cast to its real type too, not just id/budget_id
+// - Postgres otherwise infers an uncast placeholder as text, which fails the
+// moment the target column isn't (e.g. settings.auto_backup_enabled boolean,
+// settings.fx_used_currencies jsonb). Cached per table name for the life of
+// the process since table structure doesn't change at runtime.
+const columnPgTypeCache = new Map();
+async function columnPgTypes(client, safeTable) {
+  if (columnPgTypeCache.has(safeTable)) return columnPgTypeCache.get(safeTable);
+  const result = await client.query(
+    "SELECT column_name, udt_name FROM information_schema.columns WHERE table_name = $1",
+    [safeTable]
+  );
+  const types = {};
+  for (const row of result.rows) types[row.column_name] = row.udt_name;
+  columnPgTypeCache.set(safeTable, types);
+  return types;
+}
+
 function countFromResult(result) {
   return Number(result?.rows?.[0]?.count || 0);
 }
@@ -1542,6 +1571,7 @@ export async function createPostgresBudgetStore(options = {}) {
       const { safeTable, updates: normalized } = normalizePlanningRowUpdates(budgetId, tableName, updates);
       let updated = 0;
       if (normalized.length > 0) {
+        const columnTypes = await columnPgTypes(client, safeTable);
         const colSetMap = new Map();
         for (const update of normalized) {
            const cols = Object.keys(update.values).sort();
@@ -1559,8 +1589,8 @@ export async function createPostgresBudgetStore(options = {}) {
                  const update = chunk[j];
                  const offset = j * (cols.length + 2);
                  values.push(budgetId, update.id, ...cols.map(c => update.values[c]));
-                 const rowCols = cols.map((_, idx) => `$${offset + 3 + idx}`).join(', ');
-                 placeholders.push(`($${offset + 1}::text, $${offset + 2}::text, ${rowCols})`);
+                 const rowCols = cols.map((c, idx) => `$${offset + 3 + idx}::${columnTypes[c] || "text"}`).join(', ');
+                 placeholders.push(`($${offset + 1}::text, $${offset + 2}::${idColumnSqlType(safeTable)}, ${rowCols})`);
               }
               const result = await client.query(
                 `
@@ -1587,7 +1617,7 @@ export async function createPostgresBudgetStore(options = {}) {
           `
             DELETE FROM ${quoteIdentifier(safeTable)}
             WHERE budget_id = $1
-              AND id = ANY($2::text[])
+              AND id = ANY($2::${idColumnSqlType(safeTable)}[])
           `,
           [budgetId, normalized]
         );
@@ -1791,6 +1821,8 @@ export async function createPostgresBudgetStore(options = {}) {
       let updated = 0;
       if (normalized.length > 0) {
 
+        const columnTypes = await columnPgTypes(client, "confirmed_transactions");
+
         const colSetMap = new Map();
 
         for (const update of normalized) {
@@ -1825,7 +1857,7 @@ export async function createPostgresBudgetStore(options = {}) {
 
                  values.push(budgetId, targetYear, update.id, ...cols.map(c => update.values[c]));
 
-                 const rowCols = cols.map((_, idx) => `$${offset + 4 + idx}`).join(', ');
+                 const rowCols = cols.map((c, idx) => `$${offset + 4 + idx}::${columnTypes[c] || "text"}`).join(', ');
 
                  placeholders.push(`($${offset + 1}::text, $${offset + 2}::numeric, $${offset + 3}::text, ${rowCols})`);
 
@@ -1968,25 +2000,7 @@ export async function createPostgresBudgetStore(options = {}) {
       return (result?.rows || []).map(row => Number(row.ledger_year));
     }
 
-  
-  async function saveBackupArtifact(budgetId, metadata, payloadText) {
-    return await service.withClient(async client => {
-      await client.query("BEGIN");
-      try {
-        await repositoryForClient(client).saveBackupArtifact(budgetId, metadata, payloadText);
-        await client.query("COMMIT");
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      }
-    });
-  }
-
-  async function readBackupArtifact(budgetId, artifactId) {
-    return await service.withClient(client => repositoryForClient(client).readBackupArtifact(budgetId, artifactId));
-  }
-
-  async function updateConfirmedLedgerBalances(budgetId, updates = []) {
+    async function updateConfirmedLedgerBalances(budgetId, updates = []) {
       const normalized = normalizeBalanceUpdates(updates);
       let updated = 0;
       if (normalized.length > 0) {
@@ -2103,12 +2117,13 @@ export async function createPostgresBudgetStore(options = {}) {
       listConfirmedTransactions,
       listLedgerYears,
       listPlanningRows,
-    pendingTransactionExistsByOccurrenceKey,
       lockBudgetLedger,
       markNotificationsSent,
       pendingTransactionExistsByOccurrenceKey,
+      readBackupArtifact,
       replaceConfirmedTransactionsForYear,
       replacePlanningRows,
+      saveBackupArtifact,
       sumFutureLedgerAmountBySource,
       updateConfirmedTransactionsById,
       updatePlanningRowsById,
@@ -2480,6 +2495,8 @@ export async function createPostgresBudgetStore(options = {}) {
         let updated = 0;
         if (normalized.length > 0) {
 
+          const columnTypes = await columnPgTypes(client, safeTable);
+
           const colSetMap = new Map();
 
           for (const update of normalized) {
@@ -2514,9 +2531,9 @@ export async function createPostgresBudgetStore(options = {}) {
 
                    values.push(budgetId, update.id, ...cols.map(c => update.values[c]));
 
-                   const rowCols = cols.map((_, idx) => `$${offset + 3 + idx}`).join(', ');
+                   const rowCols = cols.map((c, idx) => `$${offset + 3 + idx}::${columnTypes[c] || "text"}`).join(', ');
 
-                   placeholders.push(`($${offset + 1}::text, $${offset + 2}::text, ${rowCols})`);
+                   placeholders.push(`($${offset + 1}::text, $${offset + 2}::${idColumnSqlType(safeTable)}, ${rowCols})`);
 
                 }
 
@@ -2568,7 +2585,7 @@ export async function createPostgresBudgetStore(options = {}) {
             `
               DELETE FROM ${quoteIdentifier(safeTable)}
               WHERE budget_id = $1
-                AND id = ANY($2::text[])
+                AND id = ANY($2::${idColumnSqlType(safeTable)}[])
             `,
             [budgetId, normalized]
           );
@@ -2728,6 +2745,8 @@ export async function createPostgresBudgetStore(options = {}) {
         let updated = 0;
         if (normalized.length > 0) {
 
+          const columnTypes = await columnPgTypes(client, "confirmed_transactions");
+
           const colSetMap = new Map();
 
           for (const update of normalized) {
@@ -2762,7 +2781,7 @@ export async function createPostgresBudgetStore(options = {}) {
 
                    values.push(budgetId, targetYear, update.id, ...cols.map(c => update.values[c]));
 
-                   const rowCols = cols.map((_, idx) => `$${offset + 4 + idx}`).join(', ');
+                   const rowCols = cols.map((c, idx) => `$${offset + 4 + idx}::${columnTypes[c] || "text"}`).join(', ');
 
                    placeholders.push(`($${offset + 1}::text, $${offset + 2}::numeric, $${offset + 3}::text, ${rowCols})`);
 
@@ -2933,7 +2952,7 @@ export async function createPostgresBudgetStore(options = {}) {
   }
 
   async function checkReadiness(budgetId = null) {
-    const ready = await service.checkReadiness();
+    const ready = await service.checkReadiness(budgetId);
     return {
       ...ready,
       budgetId

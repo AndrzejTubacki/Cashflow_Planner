@@ -20,3 +20,12 @@ data:
   CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET: "0"
   CASHFLOW_DELETED_BUDGET_RECOVERY_RETENTION_COUNT: "5"
   CASHFLOW_GLOBAL_MIGRATION_RECOVERY_RETENTION_COUNT: "2"
+  # Trust a reverse proxy's X-Forwarded-For header for req.ip (and anything
+  # keyed on it, like login rate limiting). Unset by default: no proxy is
+  # trusted and req.ip is the direct socket peer, which is the only safe
+  # default - never set this to "true". Set it to the exact form Express's
+  # own "trust proxy" setting expects for this deployment's real ingress
+  # path: a hop count, a comma-separated list of the proxy's own IPs/CIDRs,
+  # or a named range like loopback. An invalid value is rejected and logged;
+  # trust stays off.
+  # CASHFLOW_TRUST_PROXY: "1"
