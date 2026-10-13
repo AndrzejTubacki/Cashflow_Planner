@@ -44,7 +44,8 @@ test("account self-service edits profile and password on Postgres with lockout a
         displayName: "Self",
         email: "",
         hasPasswordCredential: false,
-        authMode: "none"
+        authMode: "none",
+        identities: []
       });
 
       await assert.rejects(service.changeOwnPassword("pg_self", "keep", { newPassword: "correct horse battery staple" }),
@@ -109,13 +110,91 @@ test("account self-service edits profile and password on Postgres with lockout a
       assert.equal(otherCredential.rows[0].failed_attempts, 1);
       assert.equal((await service.authenticateInternalLogin({ email: "taken@example.com", password: otherPassword })).accountId, "pg_other");
 
+      await globalStore.transaction(async repo => {
+        await repo.accounts.insert({ id: "pg_nopass", displayName: "No password", email: "nopass@example.com" });
+        await repo.identities.upsert({ accountId: "pg_nopass", providerId: "github", subject: "777", email: "nopass@example.com", emailVerified: true });
+        await repo.identities.upsert({ accountId: "pg_nopass", providerId: "external_abc", subject: "proxy-user" });
+        await repo.identities.upsert({ accountId: "pg_self", providerId: "facebook", subject: "fb-9", email: "self@example.com", emailVerified: false });
+      });
+      const noPass = await service.getOwnAccount("pg_nopass");
+      assert.deepEqual(noPass.identities.map(identity => [identity.providerId, identity.emailVerified]), [["github", true]],
+        "proxy identities are hidden and Postgres booleans map to emailVerified");
+      await assert.rejects(service.unlinkOwnIdentity("pg_nopass", noPass.identities[0].id),
+        error => error.status === 409 && /only way to sign in/.test(error.message));
+      await assert.rejects(service.unlinkOwnIdentity("pg_self", noPass.identities[0].id), error => error.status === 404,
+        "another account's identity can't be unlinked");
+      const selfView = await service.getOwnAccount("pg_self");
+      assert.equal(selfView.identities[0].emailVerified, false);
+      const afterUnlink = await service.unlinkOwnIdentity("pg_self", selfView.identities[0].id);
+      assert.deepEqual(afterUnlink.identities, []);
+
       const audit = await pool.query("SELECT action FROM security_audit_log WHERE target_id = 'pg_self' ORDER BY created_at, id");
       const actions = audit.rows.map(row => row.action);
-      for (const action of ["account_self_update", "account_password_set", "account_password_change", "account_current_password_check"]) {
+      for (const action of ["account_self_update", "account_password_set", "account_password_change", "account_current_password_check", "account_identity_unlink"]) {
         assert.ok(actions.includes(action), action);
       }
     } finally {
       await globalStore.close();
+    }
+  });
+});
+
+test("GitHub provider linking and sign-in run end to end on Postgres", gated, async () => {
+  const previousSecret = process.env.CASHFLOW_TEST_PG_GITHUB_SECRET;
+  process.env.CASHFLOW_TEST_PG_GITHUB_SECRET = "pg-github-secret";
+  await withDisposablePostgresDb(async ({ databaseUrl, pool }) => {
+    const globalStore = await createPostgresGlobalStore({ databaseUrl });
+    try {
+      await globalStore.initialize();
+      await globalStore.transaction(async repo => {
+        await repo.accounts.insert({ id: "pg_linker", displayName: "Linker", email: "linker@example.com" });
+      });
+      const service = createCashflowGlobalService({
+        globalStore,
+        openGlobalDb: () => { throw new Error("unexpected SQLite access"); },
+        fetchImpl: async url => {
+          assert.equal(String(url), "https://api.github.com/user/emails");
+          return new Response(JSON.stringify([{ email: "linker@example.com", primary: true, verified: true }]), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          });
+        },
+        authProviderHook: async ({ action, state }) => {
+          if (action === "authorization_url") return { authorizationUrl: `https://github.example.test/authorize?state=${state}` };
+          if (action === "callback") return { profile: { id: 9001, login: "linker", name: "Linker" }, accessToken: "pg-token" };
+          return null;
+        }
+      });
+      await service.upsertAdminAuthProviderAsync("pg_linker", "github", {
+        kind: "github",
+        displayName: "GitHub",
+        enabled: true,
+        clientId: "github-client",
+        secretEnv: "CASHFLOW_TEST_PG_GITHUB_SECRET",
+        redirectUri: "https://cashflow.example.test/api/auth/providers/github/callback"
+      });
+      await pool.query("UPDATE auth_config SET active_mode = 'internal' WHERE id = 1");
+
+      const callbackFor = authorizationUrl => {
+        const state = new URL(authorizationUrl).searchParams.get("state");
+        return `https://cashflow.example.test/api/auth/providers/github/callback?code=pg-code&state=${encodeURIComponent(state)}`;
+      };
+      const link = await service.startAuthProviderLink("pg_linker", "github");
+      assert.deepEqual(await service.completeAuthProviderCallback("github", callbackFor(link.authorizationUrl)),
+        { accountId: "pg_linker", linked: true });
+      const identity = (await pool.query("SELECT subject, email, email_verified, last_used_at FROM auth_identities WHERE account_id = 'pg_linker'")).rows[0];
+      assert.equal(identity.subject, "9001");
+      assert.equal(identity.email, "linker@example.com");
+      assert.equal(identity.email_verified, true);
+      assert.ok(identity.last_used_at);
+
+      const login = await service.startAuthProviderLogin("github");
+      assert.deepEqual(await service.completeAuthProviderCallback("github", callbackFor(login.authorizationUrl)),
+        { accountId: "pg_linker", linked: false });
+    } finally {
+      await globalStore.close();
+      if (previousSecret === undefined) delete process.env.CASHFLOW_TEST_PG_GITHUB_SECRET;
+      else process.env.CASHFLOW_TEST_PG_GITHUB_SECRET = previousSecret;
     }
   });
 });

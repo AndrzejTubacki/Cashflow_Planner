@@ -440,6 +440,10 @@ export function createSqliteGlobalRepository(db, {
       deleteForAccount(accountId) {
         db.prepare("DELETE FROM auth_identities WHERE account_id = ?").run(normalizeUserId(accountId));
       },
+      deleteForAccountById(accountId, identityId) {
+        return db.prepare("DELETE FROM auth_identities WHERE account_id = ? AND id = ?")
+          .run(normalizeUserId(accountId), String(identityId || "")).changes;
+      },
       listForAccount(accountId) {
         return db.prepare(`
           SELECT id, provider_id, subject, email, email_verified, created_at,

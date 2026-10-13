@@ -104,21 +104,21 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
           </form>
         ) : (
           <div className="beta-modal-form">
-            <label className="beta-field">
-              <span>Password token</span>
+            <div className="beta-field">
+              <label htmlFor="beta-token-value">Password token</label>
               <div className="beta-token-row">
                 <input
+                  id="beta-token-value"
                   ref={tokenRef}
                   readOnly
                   value={result.token || ""}
                   onFocus={e => e.target.select()}
-                  aria-label="Password token"
                 />
                 <button type="button" className="beta-btn-primary" onClick={handleCopy}>
                   {copyStatus === "copied" ? "Copied" : "Copy"}
                 </button>
               </div>
-            </label>
+            </div>
             {copyStatus === "copied" ? <p className="beta-success" role="status">Copied to clipboard.</p> : null}
             {copyStatus === "failed" ? (
               <p className="beta-error" role="status">Copy failed. Select the token and copy it manually.</p>

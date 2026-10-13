@@ -62,7 +62,7 @@ const PROVIDER_PRESETS = {
     authorizationEndpoint: "https://www.facebook.com/v20.0/dialog/oauth",
     displayName: "Facebook",
     emailField: "email",
-    emailVerifiedField: "",
+    emailVerifiedField: "email_verified",
     issuer: "https://www.facebook.com",
     scope: "email public_profile",
     subjectField: "id",
@@ -73,7 +73,7 @@ const PROVIDER_PRESETS = {
     authorizationEndpoint: "https://github.com/login/oauth/authorize",
     displayName: "GitHub",
     emailField: "email",
-    emailVerifiedField: "",
+    emailVerifiedField: "email_verified",
     issuer: "https://github.com",
     scope: "read:user user:email",
     subjectField: "id",
@@ -498,6 +498,7 @@ export function createCashflowGlobalService({
   createGlobalRepository = createSqliteGlobalRepository,
   dataDir,
   deleteCashflowUserStorage = null,
+  fetchImpl = globalThis.fetch,
   globalStore = null,
   listCashflowUserIds,
   logError = () => {},
@@ -1001,13 +1002,26 @@ export function createCashflowGlobalService({
     }, () => updateAdminAccount(actorAccountId, normalizedId, input));
   }
 
-  function ownAccountView(account, credential, authMode) {
+  // Proxy (external_*) identities are admin-managed, so self-service only sees sign-in provider links.
+  function isSelfManagedIdentity(identity) {
+    return !String(identity?.provider_id || "").startsWith("external_");
+  }
+
+  function ownAccountView(account, credential, authMode, identities = []) {
     return {
       id: account.id,
       displayName: account.display_name || account.id,
       email: account.email || "",
       hasPasswordCredential: Boolean(credential),
-      authMode
+      authMode,
+      identities: identities.filter(isSelfManagedIdentity).map(identity => ({
+        id: identity.id,
+        providerId: identity.provider_id,
+        email: identity.email || "",
+        emailVerified: Number(identity.email_verified || 0) === 1 || identity.email_verified === true,
+        linkedAt: identity.created_at || null,
+        lastUsedAt: identity.last_used_at || null
+      }))
     };
   }
 
@@ -1017,13 +1031,48 @@ export function createCashflowGlobalService({
       if (account.status !== "active") throw forbidden("This account is not active");
       const credential = await repo.passwordCredentials.getForAccount(accountId);
       const modeRow = await repo.authConfig.getActiveMode();
-      return { account, credential, authMode: String(modeRow?.active_mode || "none") };
+      const identities = await repo.identities.listForAccount(accountId);
+      return { account, credential, authMode: String(modeRow?.active_mode || "none"), identities };
     });
   }
 
   async function getOwnAccount(accountId) {
-    const { account, credential, authMode } = await readOwnAccountState(normalizeUserId(accountId));
-    return ownAccountView(account, credential, authMode);
+    const { account, credential, authMode, identities } = await readOwnAccountState(normalizeUserId(accountId));
+    return ownAccountView(account, credential, authMode, identities);
+  }
+
+  async function unlinkOwnIdentity(accountId, identityId) {
+    const normalizedId = normalizeUserId(accountId);
+    const { credential, authMode, identities } = await readOwnAccountState(normalizedId);
+    const target = identities.find(identity => identity.id === String(identityId || "") && isSelfManagedIdentity(identity));
+    if (!target) throw notFound("Linked sign-in not found");
+    const remaining = identities.filter(identity => identity.id !== target.id && isSelfManagedIdentity(identity));
+    if (authMode === "internal" && !credential && !remaining.length) {
+      throw conflict("This is your only way to sign in. Set a password in Account settings before unlinking it.");
+    }
+
+    const audit = {
+      action: "account_identity_unlink",
+      actorAccountId: normalizedId,
+      details: { providerId: target.provider_id },
+      targetId: normalizedId,
+      targetType: "account"
+    };
+    await withExternalGlobalTransaction(async repo => {
+      await repo.identities.deleteForAccountById(normalizedId, target.id);
+      await repo.audit.insertSecurityEvent(audit);
+    }, () => {
+      const db = openGlobalDb();
+      try {
+        db.transaction(() => {
+          globalRepository(db).identities.deleteForAccountById(normalizedId, target.id);
+          auditGlobalSecurity(db, audit);
+        })();
+      } finally {
+        db.close();
+      }
+    });
+    return await getOwnAccount(normalizedId);
   }
 
   // Shares the login lockout counters, so this check can't be used to guess around them.
@@ -2376,6 +2425,62 @@ export function createCashflowGlobalService({
     }, () => deleteAdminAuthProvider(actorAccountId, id));
   }
 
+  // openid-client's fetchUserInfo requires an OIDC "sub" claim; GitHub and Facebook return "id" instead.
+  async function fetchOAuthProfile(provider, accessToken) {
+    const response = await fetchImpl(provider.config.userInfoEndpoint, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+        "User-Agent": "Cashflow"
+      }
+    });
+    if (!response.ok) {
+      logError("cashflow_provider_profile_failed", { providerId: provider.id, status: response.status });
+      throw unauthorized("Authentication provider did not return an identity");
+    }
+    const profile = await response.json().catch(() => null);
+    if (!profile || typeof profile !== "object") throw unauthorized("Authentication provider did not return an identity");
+    return profile;
+  }
+
+  // GitHub's /user has no verification flag and omits private emails; /user/emails
+  // (covered by the preset's user:email scope) lists each address with primary/verified.
+  async function enrichOAuthProfile(provider, profile, accessToken) {
+    if (provider.kind !== "github" || !accessToken) return profile;
+    const userInfoEndpoint = provider.config.userInfoEndpoint || PROVIDER_PRESETS.github.userInfoEndpoint;
+    const emailsUrl = `${String(userInfoEndpoint).replace(/\/+$/, "")}/emails`;
+    try {
+      const response = await fetchImpl(emailsUrl, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${accessToken}`,
+          "User-Agent": "Cashflow",
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      });
+      if (!response.ok) throw new Error(`GitHub email lookup returned ${response.status}`);
+      const emails = await response.json();
+      const primary = Array.isArray(emails) ? emails.find(entry => entry?.primary && entry?.verified && entry?.email) : null;
+      return primary
+        ? { ...profile, email: primary.email, email_verified: true }
+        : { ...profile, email_verified: false };
+    } catch (error) {
+      logError("cashflow_provider_email_lookup_failed", { providerId: provider.id, message: error?.message || String(error) });
+      return { ...profile, email_verified: false };
+    }
+  }
+
+  // Facebook doesn't document whether the email it returns is verified, so its identities are
+  // stored as unverified and only need an email. Identity emails are never used to match accounts.
+  function assertLinkableProviderEmail(provider, email, emailVerified) {
+    if (!email) {
+      throw forbidden("The provider didn't share an email address, so this sign-in can't be linked");
+    }
+    if (!emailVerified && provider.kind !== "facebook") {
+      throw forbidden("A verified provider email is required before linking an identity");
+    }
+  }
+
   function providerSubjectFromProfile(provider, profile = {}) {
     const field = provider.config.subjectField || "sub";
     return normalizeExternalSubject(profile[field], "subject");
@@ -2420,15 +2525,18 @@ export function createCashflowGlobalService({
     const metadata = providerClientMetadata(provider, secret);
     if (provider.kind === "oidc" || provider.kind === "google") {
       return oidcClient.discovery(new URL(provider.issuer), provider.clientId, metadata, undefined, {
-        timeout: 10
+        timeout: 10,
+        [oidcClient.customFetch]: fetchImpl
       });
     }
-    return new oidcClient.Configuration({
+    const config = new oidcClient.Configuration({
       authorization_endpoint: provider.config.authorizationEndpoint,
       issuer: provider.issuer || provider.id,
       token_endpoint: provider.config.tokenEndpoint,
       userinfo_endpoint: provider.config.userInfoEndpoint
     }, provider.clientId, metadata);
+    config[oidcClient.customFetch] = fetchImpl;
+    return config;
   }
 
   async function authorizationUrlForProvider(provider, { nonce, state, codeVerifier, secret = null }) {
@@ -2465,14 +2573,17 @@ export function createCashflowGlobalService({
         provider,
         state: stateRow
       });
-      if (hooked?.profile) return hooked.profile;
+      if (hooked?.profile) {
+        return hooked.accessToken ? await enrichOAuthProfile(provider, hooked.profile, hooked.accessToken) : hooked.profile;
+      }
     }
     const config = await oidcConfigurationForProvider(provider, secret);
     const tokens = await oidcClient.authorizationCodeGrant(
       config,
       new URL(callbackUrl),
       {
-        expectedNonce: stateRow.nonce,
+        // A nonce makes openid-client demand an ID token, which plain OAuth2 providers (GitHub, Facebook) never send.
+        expectedNonce: provider.kind === "oidc" || provider.kind === "google" ? stateRow.nonce : undefined,
         expectedState: String(new URL(callbackUrl).searchParams.get("state") || ""),
         pkceCodeVerifier: stateRow.code_verifier
       }
@@ -2480,6 +2591,9 @@ export function createCashflowGlobalService({
     const claims = typeof tokens.claims === "function" ? tokens.claims() || {} : {};
     if (claims.sub) return claims;
     if (tokens.access_token) {
+      if (provider.kind === "github" || provider.kind === "facebook") {
+        return await enrichOAuthProfile(provider, await fetchOAuthProfile(provider, tokens.access_token), tokens.access_token);
+      }
       const info = await oidcClient.fetchUserInfo(config, tokens.access_token, oidcClient.skipSubjectCheck);
       return info || {};
     }
@@ -2748,9 +2862,7 @@ export function createCashflowGlobalService({
 
         if (freshState.purpose === "link") {
           if (!freshState.account_id) throw unauthorized("Authentication state is invalid or expired");
-          if (!email || !emailVerified) {
-            throw forbidden("A verified provider email is required before linking an identity");
-          }
+          assertLinkableProviderEmail(provider, email, emailVerified);
           if (existing && existing.account_id !== freshState.account_id) {
             throw conflict("Provider identity is already linked to another account", [{
               field: "subject",
@@ -2874,9 +2986,7 @@ export function createCashflowGlobalService({
       let result;
       if (freshState.purpose === "link") {
         if (!freshState.account_id) throw unauthorized("Authentication state is invalid or expired");
-        if (!email || !emailVerified) {
-          throw forbidden("A verified provider email is required before linking an identity");
-        }
+        assertLinkableProviderEmail(prepared.provider, email, emailVerified);
         if (existing && existing.account_id !== freshState.account_id) {
           throw conflict("Provider identity is already linked to another account", [{
             field: "subject",
@@ -4389,6 +4499,7 @@ export function createCashflowGlobalService({
     getOwnAccount,
     updateOwnAccount,
     changeOwnPassword,
+    unlinkOwnIdentity,
     userExists,
     updateGlobalOptions,
     updateGlobalOptionsAsync

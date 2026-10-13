@@ -169,6 +169,7 @@ export function registerCashflowRoutes(app, {
   getOwnAccount = null,
   updateOwnAccount = null,
   changeOwnPassword = null,
+  unlinkOwnIdentity = null,
   updateAdminAuthDraft = null,
   updateAdminAuthDraftAsync = null,
   upsertAdminAuthProvider = null,
@@ -588,11 +589,19 @@ export function registerCashflowRoutes(app, {
         if (typeof completeAuthProviderCallback !== "function") throw new Error("Authentication provider service is unavailable");
         if (typeof createInternalAccountSession !== "function") throw new Error("Session service is unavailable");
         const completed = await completeAuthProviderCallback(req.params.providerId, absoluteRequestUrl(req));
+        if (completed.linked) {
+          // Linking happens inside an existing session, which keeps its selected budget.
+          res.redirect("/?cashflow_auth=linked#account");
+          return;
+        }
         const issued = await createInternalAccountSession(completed.accountId);
         setSessionCookie(req, res, issued.token);
         res.redirect("/?cashflow_auth=provider");
       } catch (error) {
-        await fail(req, res, error, "Failed to complete provider login", "cashflow_provider_callback_failed");
+        // The browser arrives here from the provider, so send it back to the app with a readable reason, not JSON.
+        logError("cashflow_provider_callback_failed", error);
+        const message = error?.status && error.status < 500 ? error.message : "Provider sign-in failed. Try again or ask your administrator.";
+        res.redirect(`/?cashflow_auth_error=${encodeURIComponent(message || "Provider sign-in failed.")}#account`);
       }
     });
 
@@ -705,6 +714,16 @@ export function registerCashflowRoutes(app, {
         res.json({ account: await changeOwnPassword(actor.account.id, actor.authSession.id, req.body || {}) });
       } catch (error) {
         await fail(req, res, error, "Failed to change password", "cashflow_account_password_failed");
+      }
+    });
+
+    app.delete("/api/account/identities/:identityId", async (req, res) => {
+      try {
+        const actor = await requireActor(req);
+        if (typeof unlinkOwnIdentity !== "function") throw new Error("Account service is unavailable");
+        res.json({ account: await unlinkOwnIdentity(actor.account.id, req.params.identityId) });
+      } catch (error) {
+        await fail(req, res, error, "Failed to unlink sign-in", "cashflow_account_identity_unlink_failed");
       }
     });
 

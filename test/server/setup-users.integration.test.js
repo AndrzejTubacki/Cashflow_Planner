@@ -2432,7 +2432,8 @@ test("account settings let the signed-in account bootstrap its own password and 
       displayName: "Self Admin",
       email: "",
       hasPasswordCredential: false,
-      authMode: "none"
+      authMode: "none",
+      identities: []
     });
 
     const passwordWithoutEmail = await harness.request("/api/account/password", {
@@ -2582,6 +2583,268 @@ test("wrong current passwords on account settings count toward the login lockout
     });
     assert.equal(locked.response.status, 429);
   } finally {
+    await harness.cleanup();
+  }
+});
+
+test("GitHub links use the verified primary email, Facebook links store the email unverified, and accounts can unlink", async () => {
+  const oldGithub = process.env.CASHFLOW_TEST_GITHUB_SECRET;
+  const oldFacebook = process.env.CASHFLOW_TEST_FACEBOOK_SECRET;
+  process.env.CASHFLOW_TEST_GITHUB_SECRET = "github-test-secret";
+  process.env.CASHFLOW_TEST_FACEBOOK_SECRET = "facebook-test-secret";
+
+  // The hook stands in for the provider's token and /user responses; the GitHub
+  // /user/emails lookup still goes through the injected fetch, as in production.
+  const callbacks = new Map([
+    ["gh-good", { profile: { id: 4242, login: "octo", name: "Octo", email: null }, accessToken: "token-good" }],
+    ["gh-unverified", { profile: { id: 4243, login: "nov", name: "Nov", email: "nov@example.com" }, accessToken: "token-unverified" }],
+    ["gh-member", { profile: { id: 5555, login: "member", name: "Member", email: null }, accessToken: "token-member" }],
+    ["fb-good", { profile: { id: "fb-1", name: "Fay", email: "Fay@Example.com" } }],
+    ["fb-noemail", { profile: { id: "fb-2", name: "No Mail" } }]
+  ]);
+  const githubEmails = {
+    "token-good": [
+      { email: "secondary@example.com", primary: false, verified: true },
+      { email: "octo@example.com", primary: true, verified: true }
+    ],
+    "token-unverified": [{ email: "nov@example.com", primary: true, verified: false }],
+    "token-member": [{ email: "member@example.com", primary: true, verified: true }]
+  };
+  const emailLookups = [];
+
+  const harness = await createCashflowTestHarness({
+    initializeUser: false,
+    fetchImpl: async (url, init = {}) => {
+      if (String(url) === "https://api.github.com/user/emails") {
+        const token = String(init.headers?.Authorization || "").replace(/^Bearer /, "");
+        emailLookups.push(token);
+        return new Response(JSON.stringify(githubEmails[token] || []), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        });
+      }
+      return fetch(url, init);
+    },
+    authProviderHook: async ({ action, callbackUrl, provider, state }) => {
+      if (action === "authorization_url") {
+        const url = new URL("https://provider.example.test/authorize");
+        url.searchParams.set("provider", provider.id);
+        url.searchParams.set("state", state);
+        return { authorizationUrl: url.href };
+      }
+      if (action === "callback") return callbacks.get(new URL(callbackUrl).searchParams.get("code")) || null;
+      return null;
+    }
+  });
+
+  async function runProvider(path, providerId, code) {
+    const started = await harness.request(`/api/auth/providers/${providerId}/${path}/start`, {
+      method: "POST",
+      useSession: path === "link",
+      skipUserHeader: true,
+      body: {}
+    });
+    assert.equal(started.response.status, 200, `${providerId} ${path} start: ${JSON.stringify(started.body)}`);
+    const state = new URL(started.body.authorizationUrl).searchParams.get("state");
+    const callback = await harness.request(`/api/auth/providers/${providerId}/callback?code=${code}&state=${encodeURIComponent(state)}`, {
+      skipUserHeader: true,
+      redirect: "manual"
+    });
+    assert.equal(callback.response.status, 302);
+    // Like the app reloading after the redirect: a new session cookie needs its CSRF token fetched.
+    if (callback.response.headers.get("set-cookie")) await harness.request("/api/session", { useSession: true });
+    return decodeURIComponent(callback.response.headers.get("location") || "");
+  }
+
+  try {
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "link_admin", displayName: "Link Admin", email: "admin@example.com" }
+    });
+    await harness.api("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: "link admin correct horse" }
+    });
+    for (const [kind, secretEnv] of [["github", "CASHFLOW_TEST_GITHUB_SECRET"], ["facebook", "CASHFLOW_TEST_FACEBOOK_SECRET"]]) {
+      await harness.api(`/api/admin/auth/providers/${kind}`, {
+        method: "PUT",
+        useSession: true,
+        body: {
+          kind,
+          displayName: kind,
+          enabled: true,
+          clientId: `${kind}-client`,
+          secretEnv,
+          redirectUri: `${harness.baseUrl()}/api/auth/providers/${kind}/callback`
+        }
+      });
+    }
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "link_member", displayName: "Link Member", email: "member@example.com" }
+    });
+    await harness.api("/api/session/select-account", {
+      method: "POST",
+      skipUserHeader: true,
+      body: { accountId: "link_admin" }
+    });
+    await harness.api("/api/admin/accounts/link_member/provider-identities/github", {
+      method: "PUT",
+      useSession: true,
+      body: { subject: "5555", email: "member@example.com", emailVerified: true }
+    });
+    await harness.api("/api/admin/accounts/link_member/external-identity", {
+      method: "PUT",
+      useSession: true,
+      body: { subject: "proxy-member" }
+    });
+    await harness.api("/api/admin/auth/draft", { method: "PUT", useSession: true, body: { draftMode: "internal" } });
+    await harness.api("/api/admin/auth/activate", { method: "POST", useSession: true, body: {} });
+    await harness.api("/api/auth/internal/login", {
+      method: "POST",
+      skipUserHeader: true,
+      body: { email: "admin@example.com", password: "link admin correct horse" }
+    });
+
+    assert.equal(await runProvider("link", "github", "gh-good"), "/?cashflow_auth=linked#account");
+    assert.match(await runProvider("link", "github", "gh-unverified"), /cashflow_auth_error=A verified provider email is required/);
+    assert.equal(await runProvider("link", "facebook", "fb-good"), "/?cashflow_auth=linked#account");
+    assert.match(await runProvider("link", "facebook", "fb-noemail"), /cashflow_auth_error=The provider didn't share an email address/);
+    assert.deepEqual(emailLookups, ["token-good", "token-unverified"]);
+
+    const admin = await harness.api("/api/account", { useSession: true });
+    const linked = Object.fromEntries(admin.account.identities.map(identity => [identity.providerId, identity]));
+    assert.deepEqual(Object.keys(linked).sort(), ["facebook", "github"]);
+    assert.equal(linked.github.email, "octo@example.com", "the verified primary address, not the public profile email");
+    assert.equal(linked.github.emailVerified, true);
+    assert.equal(linked.facebook.email, "fay@example.com");
+    assert.equal(linked.facebook.emailVerified, false);
+
+    const unlinked = await harness.api(`/api/account/identities/${encodeURIComponent(linked.facebook.id)}`, {
+      method: "DELETE",
+      useSession: true
+    });
+    assert.deepEqual(unlinked.account.identities.map(identity => identity.providerId), ["github"]);
+    const foreign = await harness.request("/api/account/identities/not-mine", { method: "DELETE", useSession: true });
+    assert.equal(foreign.response.status, 404);
+
+    assert.equal(await runProvider("login", "github", "gh-member"), "/?cashflow_auth=provider");
+    const member = await harness.api("/api/account", { useSession: true });
+    assert.equal(member.account.id, "link_member");
+    assert.deepEqual(member.account.identities.map(identity => identity.providerId), ["github"], "proxy identities stay admin-managed");
+    const onlySignIn = await harness.request(`/api/account/identities/${encodeURIComponent(member.account.identities[0].id)}`, {
+      method: "DELETE",
+      useSession: true
+    });
+    assert.equal(onlySignIn.response.status, 409);
+    assert.match(onlySignIn.body.error, /only way to sign in/);
+
+    await harness.api("/api/account/password", {
+      method: "POST",
+      useSession: true,
+      body: { newPassword: "member now has a password" }
+    });
+    const memberUnlinked = await harness.api(`/api/account/identities/${encodeURIComponent(member.account.identities[0].id)}`, {
+      method: "DELETE",
+      useSession: true
+    });
+    assert.deepEqual(memberUnlinked.account.identities, []);
+  } finally {
+    for (const [name, value] of [["CASHFLOW_TEST_GITHUB_SECRET", oldGithub], ["CASHFLOW_TEST_FACEBOOK_SECRET", oldFacebook]]) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await harness.cleanup();
+  }
+});
+
+test("GitHub linking and sign-in work through the real OAuth exchange, without an ID token or OIDC sub claim", async () => {
+  const previous = process.env.CASHFLOW_TEST_REAL_GITHUB_SECRET;
+  process.env.CASHFLOW_TEST_REAL_GITHUB_SECRET = "real-github-secret";
+  const calls = [];
+  const fakeGithub = "https://github.example.test";
+  // No authProviderHook: openid-client builds the authorization URL and exchanges the code itself.
+  const harness = await createCashflowTestHarness({
+    initializeUser: false,
+    fetchImpl: async (url, init = {}) => {
+      const target = new URL(String(url));
+      if (target.origin !== fakeGithub) return fetch(url, init);
+      const headers = new Headers(init.headers || {});
+      calls.push(`${init.method || "GET"} ${target.pathname}`);
+      const json = body => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      if (target.pathname === "/login/oauth/access_token") {
+        const form = new URLSearchParams(String(init.body || ""));
+        assert.equal(form.get("code"), "real-code");
+        assert.ok(form.get("code_verifier"), "PKCE verifier is sent");
+        return json({ access_token: "real-access-token", token_type: "bearer", scope: "read:user,user:email" });
+      }
+      assert.equal(headers.get("authorization"), "Bearer real-access-token");
+      if (target.pathname === "/user") return json({ id: 2024, login: "realcat", name: "Real Cat", email: null });
+      if (target.pathname === "/user/emails") return json([{ email: "realcat@example.com", primary: true, verified: true }]);
+      return new Response("{}", { status: 404 });
+    }
+  });
+
+  async function callbackLocation(startPath, useSession) {
+    const started = await harness.request(startPath, { method: "POST", useSession, skipUserHeader: true, body: {} });
+    assert.equal(started.response.status, 200, JSON.stringify(started.body));
+    const authorizationUrl = new URL(started.body.authorizationUrl);
+    assert.equal(authorizationUrl.origin + authorizationUrl.pathname, `${fakeGithub}/login/oauth/authorize`);
+    const state = authorizationUrl.searchParams.get("state");
+    const callback = await harness.request(`/api/auth/providers/github/callback?code=real-code&state=${encodeURIComponent(state)}`, {
+      skipUserHeader: true,
+      redirect: "manual"
+    });
+    assert.equal(callback.response.status, 302);
+    if (useSession) assert.equal(callback.response.headers.get("set-cookie"), null, "linking keeps the existing session");
+    return decodeURIComponent(callback.response.headers.get("location") || "");
+  }
+
+  try {
+    await harness.api("/api/accounts", {
+      method: "POST",
+      body: { userId: "real_owner", displayName: "Real Owner", email: "owner@example.com" }
+    });
+    await harness.api("/api/account/password", { method: "POST", useSession: true, body: { newPassword: "real owner correct horse" } });
+    await harness.api("/api/admin/auth/providers/github", {
+      method: "PUT",
+      useSession: true,
+      body: {
+        kind: "github",
+        displayName: "GitHub",
+        enabled: true,
+        clientId: "real-github-client",
+        secretEnv: "CASHFLOW_TEST_REAL_GITHUB_SECRET",
+        redirectUri: `${harness.baseUrl()}/api/auth/providers/github/callback`,
+        authorizationEndpoint: `${fakeGithub}/login/oauth/authorize`,
+        tokenEndpoint: `${fakeGithub}/login/oauth/access_token`,
+        userInfoEndpoint: `${fakeGithub}/user`
+      }
+    });
+    await harness.api("/api/admin/auth/draft", { method: "PUT", useSession: true, body: { draftMode: "internal" } });
+    await harness.api("/api/admin/auth/activate", { method: "POST", useSession: true, body: {} });
+    await harness.api("/api/auth/internal/login", {
+      method: "POST",
+      skipUserHeader: true,
+      body: { email: "owner@example.com", password: "real owner correct horse" }
+    });
+
+    assert.equal(await callbackLocation("/api/auth/providers/github/link/start", true), "/?cashflow_auth=linked#account");
+    const account = await harness.api("/api/account", { useSession: true });
+    assert.deepEqual(account.account.identities.map(identity => [identity.providerId, identity.email, identity.emailVerified]),
+      [["github", "realcat@example.com", true]]);
+
+    assert.equal(await callbackLocation("/api/auth/providers/github/login/start", false), "/?cashflow_auth=provider");
+    const session = await harness.api("/api/session", { useSession: true });
+    assert.equal(session.session.accountId, "real_owner");
+    assert.deepEqual(calls, [
+      "POST /login/oauth/access_token", "GET /user", "GET /user/emails",
+      "POST /login/oauth/access_token", "GET /user", "GET /user/emails"
+    ]);
+  } finally {
+    if (previous === undefined) delete process.env.CASHFLOW_TEST_REAL_GITHUB_SECRET;
+    else process.env.CASHFLOW_TEST_REAL_GITHUB_SECRET = previous;
     await harness.cleanup();
   }
 });
@@ -2901,6 +3164,7 @@ test("internal authentication supports configured provider login, explicit linki
       redirect: "manual"
     });
     assert.equal(adminCallback.response.status, 302);
+    assert.equal(adminCallback.response.headers.get("location"), "/?cashflow_auth=provider");
     assert.ok(harness.session().cookie);
 
     const adminSession = await harness.request("/api/session", {
@@ -2914,7 +3178,10 @@ test("internal authentication supports configured provider login, explicit linki
       skipUserHeader: true,
       redirect: "manual"
     });
-    assert.equal(replay.response.status, 401);
+    // Callback failures redirect back to the app with the reason and never issue a session.
+    assert.equal(replay.response.status, 302);
+    assert.equal(replay.response.headers.get("set-cookie"), null);
+    assert.match(decodeURIComponent(replay.response.headers.get("location")), /cashflow_auth_error=Authentication state is invalid or expired#account$/);
 
     const unknownStart = await harness.request("/api/auth/providers/google/login/start", {
       method: "POST",
@@ -2926,7 +3193,9 @@ test("internal authentication supports configured provider login, explicit linki
       skipUserHeader: true,
       redirect: "manual"
     });
-    assert.equal(unknownCallback.response.status, 401);
+    assert.equal(unknownCallback.response.status, 302);
+    assert.equal(unknownCallback.response.headers.get("set-cookie"), null);
+    assert.match(decodeURIComponent(unknownCallback.response.headers.get("location")), /cashflow_auth_error=Provider login is not linked to an active account/);
 
     const memberLogin = await harness.request("/api/auth/internal/login", {
       method: "POST",
@@ -2949,6 +3218,7 @@ test("internal authentication supports configured provider login, explicit linki
       redirect: "manual"
     });
     assert.equal(memberCallback.response.status, 302);
+    assert.equal(memberCallback.response.headers.get("location"), "/?cashflow_auth=linked#account");
 
     const memberProviderLoginStart = await harness.request("/api/auth/providers/google/login/start", {
       method: "POST",
@@ -3008,7 +3278,9 @@ test("internal authentication supports configured provider login, explicit linki
       skipUserHeader: true,
       redirect: "manual"
     });
-    assert.equal(disabledLogin.response.status, 401);
+    assert.equal(disabledLogin.response.status, 302);
+    assert.equal(disabledLogin.response.headers.get("set-cookie"), null);
+    assert.match(decodeURIComponent(disabledLogin.response.headers.get("location")), /cashflow_auth_error=Provider login is not linked to an active account/);
 
     const disabledProvider = await harness.api("/api/admin/auth/providers/google", {
       method: "PUT",

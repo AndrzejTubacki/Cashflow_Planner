@@ -533,6 +533,10 @@ export function createPostgresGlobalRepository(client, {
       async deleteForAccount(accountId) {
         await run("DELETE FROM auth_identities WHERE account_id = $1", [normalizeUserId(accountId)]);
       },
+      async deleteForAccountById(accountId, identityId) {
+        const result = await run("DELETE FROM auth_identities WHERE account_id = $1 AND id = $2", [normalizeUserId(accountId), String(identityId || "")]);
+        return result.rowCount;
+      },
       async listForAccount(accountId) {
         return await all(`
           SELECT id, provider_id, subject, email, email_verified, created_at,
@@ -602,17 +606,17 @@ export function createPostgresGlobalRepository(client, {
             id, account_id, provider_id, subject, email, email_verified,
             profile_json, created_at, updated_at, last_used_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, CASE WHEN $9 THEN $8 ELSE NULL END)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $8::timestamptz, CASE WHEN $9::boolean THEN $8::timestamptz ELSE NULL END)
           ON CONFLICT (provider_id, subject) DO UPDATE SET
             account_id = EXCLUDED.account_id,
             email = EXCLUDED.email,
             email_verified = EXCLUDED.email_verified,
             profile_json = EXCLUDED.profile_json,
             last_used_at = CASE
-              WHEN $9 THEN $8
+              WHEN $9::boolean THEN $8::timestamptz
               ELSE auth_identities.last_used_at
             END,
-            updated_at = $8
+            updated_at = $8::timestamptz
         `, [
           id,
           normalizeUserId(accountId),

@@ -827,6 +827,7 @@ body {
 .beta-form-actions-start {
   justify-content: flex-start;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
 .beta-fx-currency-picker {
@@ -1137,6 +1138,121 @@ body {
 
 .beta-entry-foot a {
   color: var(--muted);
+}
+
+/* ---- SSO and sign-in provider setup ---- */
+.beta-setup-step {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.beta-setup-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.beta-entry-choice.is-selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.beta-setup-guide {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.beta-setup-guide h4 {
+  margin: 0;
+  font-size: 13.5px;
+}
+
+.beta-setup-guide ol {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.beta-setup-links {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 13px;
+}
+
+.beta-setup-links a,
+.beta-provider-form .beta-hint a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.beta-setup-links a::after {
+  content: " \2197";
+  font-weight: 400;
+}
+
+.beta-provider-form code,
+.beta-setup-guide code,
+.beta-panel .beta-hint code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.beta-radio-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
+.beta-check-list {
+  margin: 6px 0 0;
+  padding-left: 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.beta-form-grid-wide {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.beta-fieldset-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.beta-fieldset-stack .beta-hint,
+.beta-fieldset-stack p {
+  margin: 0;
+}
+
+.beta-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.beta-notice .beta-modal-close {
+  color: inherit;
+  font-size: 18px;
+  padding: 0 2px;
 }
 
 /* ---- password token popup ---- */

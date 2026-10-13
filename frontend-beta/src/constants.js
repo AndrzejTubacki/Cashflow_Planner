@@ -52,8 +52,6 @@ export const AUTH_PROVISIONING_OPTIONS = [
   { value: "allow_any", label: "Allow any authenticated identity" }
 ];
 
-export const AUTH_PROVIDER_KINDS = ["oidc", "google", "github", "facebook"];
-
 export const NOTIFICATION_TYPES = [
   { key: "goal_impossible", label: "Goal impossible" },
   { key: "necessary_underfunded", label: "Necessary transaction underfunded" },

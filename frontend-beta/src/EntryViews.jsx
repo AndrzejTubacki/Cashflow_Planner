@@ -387,7 +387,7 @@ export function SignInView({ auth, notice, onSignedIn }) {
   );
 }
 
-export function BudgetPickerView({ session, onSelected, onSignOut }) {
+export function BudgetPickerView({ session, authError = "", onSelected, onSignOut }) {
   const [budgets, setBudgets] = useState(null);
   const [newName, setNewName] = useState("");
   const [inviteToken, setInviteToken] = useState("");
@@ -436,6 +436,7 @@ export function BudgetPickerView({ session, onSelected, onSignOut }) {
 
   return (
     <EntryFrame title="Choose a budget" subtitle={name ? `Signed in as ${name}.` : null} onSignOut={onSignOut}>
+      {authError ? <div className="beta-error beta-entry-narrow">{authError}</div> : null}
       <div className="beta-entry-grid">
         <div className="beta-panel">
           <h3>Your budgets</h3>

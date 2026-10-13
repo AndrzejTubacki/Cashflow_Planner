@@ -30,6 +30,21 @@ function useHashSection() {
   return [section, select];
 }
 
+// Provider sign-in comes back as /beta/?cashflow_auth=linked or ?cashflow_auth_error=<reason>.
+function takeAuthReturnNotice() {
+  const params = new URLSearchParams(window.location.search);
+  const error = params.get("cashflow_auth_error");
+  const result = params.get("cashflow_auth");
+  if (!error && !result) return null;
+  params.delete("cashflow_auth_error");
+  params.delete("cashflow_auth");
+  const query = params.toString();
+  window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  if (error) return { kind: "error", message: error };
+  if (result === "linked") return { kind: "success", message: "Sign-in linked. You can use it on the sign-in page from now on." };
+  return null;
+}
+
 function clearStoredSelection() {
   localStorage.removeItem("cashflow_budget_id");
   localStorage.removeItem("cashflow_user_id");
@@ -44,6 +59,7 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [signInNotice, setSignInNotice] = useState("");
   const [pickingBudget, setPickingBudget] = useState(false);
+  const [authNotice, setAuthNotice] = useState(() => takeAuthReturnNotice());
   const [section, selectSection] = useHashSection();
 
   useEffect(() => {
@@ -168,11 +184,24 @@ export default function App() {
   }
 
   if (status === "signin") {
-    return <SignInView auth={auth} notice={signInNotice} onSignedIn={load} />;
+    return (
+      <SignInView
+        auth={auth}
+        notice={authNotice?.kind === "error" ? authNotice.message : signInNotice}
+        onSignedIn={async () => { setAuthNotice(null); await load(); }}
+      />
+    );
   }
 
   if (status === "budgets" || pickingBudget) {
-    return <BudgetPickerView session={session} onSelected={afterBudgetSelected} onSignOut={signOut} />;
+    return (
+      <BudgetPickerView
+        session={session}
+        authError={authNotice?.kind === "error" ? authNotice.message : ""}
+        onSelected={async () => { setAuthNotice(null); await afterBudgetSelected(); }}
+        onSignOut={signOut}
+      />
+    );
   }
 
   const settings = snapshot?.settings || {};
@@ -238,7 +267,7 @@ export default function App() {
       ) : section === "targets" ? (
         <TargetsView snapshot={snapshot} onRefresh={load} />
       ) : section === "account" ? (
-        <AccountView onRefresh={load} />
+        <AccountView onRefresh={load} notice={authNotice} onDismissNotice={() => setAuthNotice(null)} />
       ) : section === "settings" ? (
         <SettingsView snapshot={snapshot} onRefresh={load} />
       ) : (

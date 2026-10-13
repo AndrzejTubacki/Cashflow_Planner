@@ -201,7 +201,105 @@ function PasswordPanel({ account, onSaved }) {
   );
 }
 
-export default function AccountView({ onRefresh }) {
+function formatWhen(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString(undefined, { dateStyle: "medium" });
+}
+
+function LinkedSignInsPanel({ account, onSaved }) {
+  const [providers, setProviders] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    apiFetch("/api/auth/config", { cache: "no-store", scoped: false })
+      .then(result => setProviders(Array.isArray(result?.auth?.internal?.providers) ? result.auth.internal.providers : []))
+      .catch(() => setProviders([]));
+  }, []);
+
+  const identities = account.identities || [];
+  const nameFor = id => providers?.find(provider => provider.id === id)?.displayName || id;
+  const internalActive = account.authMode === "internal";
+
+  if (account.authMode === "external") return null;
+  if (providers && !providers.length && !identities.length) return null;
+
+  async function link(providerId) {
+    setBusy(providerId);
+    setError("");
+    try {
+      const result = await apiFetch(`/api/auth/providers/${encodeURIComponent(providerId)}/link/start`, {
+        method: "POST",
+        body: {},
+        scoped: false
+      });
+      if (!result?.authorizationUrl) throw new Error("The provider didn't return a sign-in address.");
+      window.location.assign(result.authorizationUrl);
+    } catch (err) {
+      setError(err.message || "Couldn't start linking");
+      setBusy("");
+    }
+  }
+
+  async function unlink(identity) {
+    if (!window.confirm(`Unlink ${nameFor(identity.providerId)}${identity.email ? ` (${identity.email})` : ""}? You won't be able to sign in with it any more.`)) return;
+    setBusy(identity.id);
+    setError("");
+    try {
+      const result = await apiFetch(`/api/account/identities/${encodeURIComponent(identity.id)}`, { method: "DELETE", scoped: false });
+      await onSaved(result.account);
+    } catch (err) {
+      setError(err.message || "Couldn't unlink");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="beta-panel beta-settings-section">
+      <h3>Linked sign-ins</h3>
+      <p className="beta-hint">
+        {internalActive
+          ? "Link a provider to sign in with it instead of your password. You'll be sent to the provider and brought back here."
+          : "Linking becomes available once internal login is the active sign-in mode."}
+      </p>
+      {error ? <div className="beta-error">{error}</div> : null}
+      {identities.length ? (
+        <div className="beta-budget-list">
+          {identities.map(identity => (
+            <div className="beta-budget-row" key={identity.id}>
+              <div className="beta-budget-row-main">
+                <strong>{nameFor(identity.providerId)}</strong>
+                <span className="beta-budget-meta">
+                  {identity.email || "No email shared"}
+                  {identity.email && !identity.emailVerified ? " (not verified by the provider)" : ""}
+                  {identity.linkedAt ? ` · linked ${formatWhen(identity.linkedAt)}` : ""}
+                  {identity.lastUsedAt ? ` · last used ${formatWhen(identity.lastUsedAt)}` : ""}
+                </span>
+              </div>
+              <div className="beta-budget-row-actions">
+                <button type="button" className="beta-btn-small beta-btn-danger" disabled={Boolean(busy)} onClick={() => unlink(identity)}>
+                  {busy === identity.id ? "Unlinking..." : "Unlink"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : <p className="beta-empty">No sign-ins linked yet.</p>}
+      {internalActive && providers?.length ? (
+        <div className="beta-form-actions beta-form-actions-start">
+          {providers.map(provider => (
+            <button key={provider.id} type="button" className="beta-btn-small" disabled={Boolean(busy)} onClick={() => link(provider.id)}>
+              {busy === provider.id ? "Opening..." : `Link ${provider.displayName || provider.id}`}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export default function AccountView({ onRefresh, notice = null, onDismissNotice = () => {} }) {
   const [account, setAccount] = useState(null);
   const [error, setError] = useState("");
 
@@ -230,11 +328,18 @@ export default function AccountView({ onRefresh }) {
         <h1>Account settings</h1>
         <p>Your own profile and sign-in details. Settings for the current budget are under Budget settings in the account menu.</p>
       </div>
+      {notice ? (
+        <div className={notice.kind === "error" ? "beta-error beta-notice" : "beta-success beta-notice"} role="status">
+          <span>{notice.message}</span>
+          <button type="button" className="beta-modal-close" aria-label="Dismiss" onClick={onDismissNotice}>&times;</button>
+        </div>
+      ) : null}
       {error ? <div className="beta-error">{error}</div> : null}
       {account ? (
         <>
           <ProfilePanel account={account} onSaved={handleSaved} />
           <PasswordPanel account={account} onSaved={handleSaved} />
+          <LinkedSignInsPanel account={account} onSaved={handleSaved} />
         </>
       ) : !error ? <p className="beta-empty">Loading your account...</p> : null}
     </section>

@@ -424,10 +424,12 @@ async function createCashflowModule({
     getOwnAccount,
     updateOwnAccount,
     changeOwnPassword,
+    unlinkOwnIdentity,
     updateGlobalOptions,
     updateGlobalOptionsAsync
   } = createCashflowGlobalService({
     authProviderHook,
+    fetchImpl,
     beforeGlobalMigrationStep: globalMigrationHook || (() => {}),
     budgetStore,
     cashflowUserStorageExists,
@@ -958,6 +960,7 @@ async function createCashflowModule({
       getOwnAccount,
       updateOwnAccount,
       changeOwnPassword,
+      unlinkOwnIdentity,
       updateAdminAuthDraft,
       updateAdminAuthDraftAsync,
       updateSettings,

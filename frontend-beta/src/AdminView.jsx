@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { apiFetch } from "./api.js";
 import PasswordTokenModal from "./PasswordTokenModal.jsx";
+import { IdentityProvidersPanel, ProxyGuide, PROXY_GUIDES, detectProxyPreset } from "./AuthSetup.jsx";
 import {
   AUTH_MODE_OPTIONS,
-  AUTH_PROVIDER_KINDS,
   AUTH_PROVISIONING_OPTIONS,
   FX_PROVIDER_OPTIONS,
   HOLIDAY_COUNTRIES,
@@ -301,9 +301,22 @@ function AdminAuthPanel({ authConfig, onChanged }) {
   const [allowedDomains, setAllowedDomains] = useState((external.allowedDomains || []).join(", "));
   const [adminGroups, setAdminGroups] = useState((external.adminGroups || []).join(", "));
   const [allowPasswordLogin, setAllowPasswordLogin] = useState(internal.allowPasswordLogin !== false);
+  const [proxyPreset, setProxyPreset] = useState(() => (String(config.draftMode || "none") === "external" ? detectProxyPreset(external) : ""));
+  const [testResult, setTestResult] = useState(null);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  function choosePreset(id) {
+    setProxyPreset(id);
+    setTestResult(null);
+    const headers = PROXY_GUIDES[id]?.headers;
+    if (!headers) return;
+    setSubjectHeader(headers.subjectHeader);
+    setEmailHeader(headers.emailHeader);
+    setDisplayNameHeader(headers.displayNameHeader);
+    setGroupsHeader(headers.groupsHeader);
+  }
 
   function buildPayload() {
     return {
@@ -334,6 +347,7 @@ function AdminAuthPanel({ authConfig, onChanged }) {
     setError("");
     try {
       await apiFetch("/api/admin/auth/draft", { method: "PUT", body: buildPayload() });
+      setTestResult(null);
       await onChanged();
     } catch (err) {
       setError(err.message || "Failed to save auth draft");
@@ -346,7 +360,7 @@ function AdminAuthPanel({ authConfig, onChanged }) {
     setBusy(true);
     setError("");
     try {
-      await apiFetch("/api/admin/auth/test", { method: "POST" });
+      setTestResult(await apiFetch("/api/admin/auth/test", { method: "POST" }));
     } catch (err) {
       setError(err.message || "Auth draft test failed");
     } finally {
@@ -382,7 +396,7 @@ function AdminAuthPanel({ authConfig, onChanged }) {
         <div className="beta-form-grid">
           <label className="beta-field">
             <span>Draft authentication mode</span>
-            <select value={draftMode} onChange={e => setDraftMode(e.target.value)}>
+            <select value={draftMode} onChange={e => { setDraftMode(e.target.value); setTestResult(null); }}>
               {AUTH_MODE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </label>
@@ -396,224 +410,127 @@ function AdminAuthPanel({ authConfig, onChanged }) {
           </label>
         </div>
 
-        <fieldset className="beta-admin-fieldset">
-          <legend>External SSO draft</legend>
-          <div className="beta-form-grid">
-            <label className="beta-field">
-              <span>Subject header</span>
-              <input value={subjectHeader} onChange={e => setSubjectHeader(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Assertion secret header</span>
-              <input value={assertionSecretHeader} onChange={e => setAssertionSecretHeader(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Assertion secret environment variable</span>
-              <input value={assertionSecretEnv} onChange={e => setAssertionSecretEnv(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Email header</span>
-              <input value={emailHeader} onChange={e => setEmailHeader(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Display name header</span>
-              <input value={displayNameHeader} onChange={e => setDisplayNameHeader(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Groups header</span>
-              <input value={groupsHeader} onChange={e => setGroupsHeader(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Trusted issuer</span>
-              <input value={trustedIssuer} onChange={e => setTrustedIssuer(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Provisioning mode</span>
-              <select value={provisioningMode} onChange={e => setProvisioningMode(e.target.value)}>
-                {AUTH_PROVISIONING_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </label>
-            <label className="beta-field">
-              <span>Allowed domains</span>
-              <input value={allowedDomains} onChange={e => setAllowedDomains(e.target.value)} placeholder="example.com, example.org" />
-            </label>
-            <label className="beta-field">
-              <span>Admin groups</span>
-              <input value={adminGroups} onChange={e => setAdminGroups(e.target.value)} placeholder="admins, ops" />
-            </label>
-          </div>
-        </fieldset>
+        {draftMode === "none" ? (
+          <p className="beta-hint">
+            No sign-in: anyone who can reach Cashflow can pick any account. Only use this behind a VPN or a reverse
+            proxy that already restricts access.
+          </p>
+        ) : null}
 
-        <fieldset className="beta-admin-fieldset">
-          <legend>Internal login draft</legend>
-          <label className="beta-field beta-field-checkbox">
-            <input type="checkbox" checked={allowPasswordLogin} onChange={e => setAllowPasswordLogin(e.target.checked)} />
-            <span>Password login</span>
-          </label>
-        </fieldset>
+        {draftMode === "external" ? (
+          <fieldset className="beta-admin-fieldset beta-fieldset-stack">
+            <legend>External SSO (sign-in handled by a reverse proxy)</legend>
+            <div className="beta-settings-section">
+              <span className="beta-setup-step">Which proxy signs people in?</span>
+              <div className="beta-setup-choices" role="radiogroup" aria-label="Sign-in proxy">
+                {Object.entries(PROXY_GUIDES).map(([id, guide]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    role="radio"
+                    aria-checked={proxyPreset === id}
+                    className={`beta-entry-choice${proxyPreset === id ? " is-selected" : ""}`}
+                    onClick={() => choosePreset(id)}
+                  >
+                    <strong>{guide.label}</strong>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {proxyPreset ? (
+              <>
+                <ProxyGuide presetId={proxyPreset} secretHeader={assertionSecretHeader} secretEnv={assertionSecretEnv} />
+                <div className="beta-form-grid beta-form-grid-wide">
+                  <label className="beta-field">
+                    <span>User ID header</span>
+                    <input value={subjectHeader} required onChange={e => setSubjectHeader(e.target.value)} />
+                    <small className="beta-hint">A stable ID the proxy sends for the signed-in person.</small>
+                  </label>
+                  <label className="beta-field">
+                    <span>Email header</span>
+                    <input value={emailHeader} onChange={e => setEmailHeader(e.target.value)} />
+                  </label>
+                  <label className="beta-field">
+                    <span>Display name header</span>
+                    <input value={displayNameHeader} onChange={e => setDisplayNameHeader(e.target.value)} />
+                  </label>
+                  <label className="beta-field">
+                    <span>Groups header</span>
+                    <input value={groupsHeader} onChange={e => setGroupsHeader(e.target.value)} />
+                    <small className="beta-hint">Comma- or semicolon-separated group names.</small>
+                  </label>
+                  <label className="beta-field">
+                    <span>Assertion secret header</span>
+                    <input value={assertionSecretHeader} required onChange={e => setAssertionSecretHeader(e.target.value)} />
+                  </label>
+                  <label className="beta-field">
+                    <span>Assertion secret environment variable</span>
+                    <input value={assertionSecretEnv} required onChange={e => setAssertionSecretEnv(e.target.value)} />
+                    <small className="beta-hint">The name of the variable on the Cashflow server, not the secret.</small>
+                  </label>
+                  <label className="beta-field">
+                    <span>Unknown people</span>
+                    <select value={provisioningMode} onChange={e => setProvisioningMode(e.target.value)}>
+                      {AUTH_PROVISIONING_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <small className="beta-hint">Keep &ldquo;Deny unknown identities&rdquo; until linking works for your accounts.</small>
+                  </label>
+                  <label className="beta-field">
+                    <span>Allowed email domains</span>
+                    <input value={allowedDomains} onChange={e => setAllowedDomains(e.target.value)} placeholder="example.com, example.org" />
+                  </label>
+                  <label className="beta-field">
+                    <span>Admin groups</span>
+                    <input value={adminGroups} onChange={e => setAdminGroups(e.target.value)} placeholder="admins, ops" />
+                    <small className="beta-hint">Members of these groups become administrators.</small>
+                  </label>
+                </div>
+                <details className="beta-details">
+                  <summary>Advanced</summary>
+                  <label className="beta-field">
+                    <span>Trusted issuer label</span>
+                    <input value={trustedIssuer} onChange={e => setTrustedIssuer(e.target.value)} placeholder="external" />
+                    <small className="beta-hint">Groups the linked identities under one name. Changing it later unlinks everyone.</small>
+                  </label>
+                </details>
+              </>
+            ) : null}
+          </fieldset>
+        ) : null}
+
+        {draftMode === "internal" ? (
+          <fieldset className="beta-admin-fieldset beta-fieldset-stack">
+            <legend>Internal login</legend>
+            <label className="beta-field beta-field-checkbox">
+              <input type="checkbox" checked={allowPasswordLogin} onChange={e => setAllowPasswordLogin(e.target.checked)} />
+              <span>Allow email and password sign-in</span>
+            </label>
+            <p className="beta-hint">
+              &ldquo;Continue with &hellip;&rdquo; buttons for Google, GitHub and others are set up under Sign-in providers below.
+              Before activating, set your own email and password under Account settings in the account menu.
+            </p>
+          </fieldset>
+        ) : null}
+
+        {testResult ? (
+          <div className={testResult.ok ? "beta-success" : "beta-error"} role="status">
+            <strong>{testResult.ok ? "This draft can be activated." : "This draft can't be activated yet:"}</strong>
+            <ul className="beta-check-list">
+              {(testResult.checks || []).map(check => (
+                <li key={check.code}>{check.ok ? "✓" : "✗"} {check.message}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         <div className="beta-form-actions beta-form-actions-start">
           <button type="submit" className="beta-btn-primary" disabled={busy}>Save auth draft</button>
           <button type="button" className="beta-btn-small" disabled={busy} onClick={handleTest}>Test auth draft</button>
           <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={handleActivate}>Activate auth draft</button>
         </div>
-        <small className="beta-hint">
-          Internal activation requires a system administrator with an email/password credential or
-          linked enabled provider. Set your own email and password under Account settings in the
-          account menu. External activation requires an assertion secret and linked administrator
-          identity.
-        </small>
+        <small className="beta-hint">Save the draft, test it, then activate. Activating a different mode signs everyone out.</small>
       </form>
-    </div>
-  );
-}
-
-function AuthProviderForm({ provider, onSaved, onDeleted }) {
-  const isExisting = Boolean(provider?.id);
-  const config = provider?.config || {};
-  const [providerId, setProviderId] = useState(provider?.id || "");
-  const [kind, setKind] = useState(provider?.kind || "oidc");
-  const [displayName, setDisplayName] = useState(provider?.displayName || "");
-  const [enabled, setEnabled] = useState(Boolean(provider?.enabled));
-  const [issuer, setIssuer] = useState(provider?.issuer || "");
-  const [clientId, setClientId] = useState(provider?.clientId || "");
-  const [secretEnv, setSecretEnv] = useState("");
-  const [redirectUri, setRedirectUri] = useState(config.redirectUri || "");
-  const [scope, setScope] = useState(config.scope || "openid email profile");
-  const [authorizationEndpoint, setAuthorizationEndpoint] = useState(config.authorizationEndpoint || "");
-  const [tokenEndpoint, setTokenEndpoint] = useState(config.tokenEndpoint || "");
-  const [userInfoEndpoint, setUserInfoEndpoint] = useState(config.userInfoEndpoint || "");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  async function handleSubmit(event) {
-    event.preventDefault();
-    if (!providerId.trim() || !displayName.trim()) return;
-    setBusy(true);
-    setError("");
-    try {
-      await apiFetch(`/api/admin/auth/providers/${encodeURIComponent(providerId)}`, {
-        method: "PUT",
-        body: {
-          kind, displayName, enabled: enabled ? 1 : 0, issuer, clientId,
-          secretEnv: secretEnv || undefined,
-          redirectUri, scope, authorizationEndpoint, tokenEndpoint, userInfoEndpoint
-        }
-      });
-      await onSaved();
-    } catch (err) {
-      setError(err.message || "Failed to save provider");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleDelete() {
-    if (!window.confirm("Delete this identity provider?")) return;
-    setBusy(true);
-    setError("");
-    try {
-      await apiFetch(`/api/admin/auth/providers/${encodeURIComponent(providerId)}`, { method: "DELETE" });
-      await onDeleted();
-    } catch (err) {
-      setError(err.message || "Failed to delete provider");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form className="beta-admin-fieldset beta-settings-section" onSubmit={handleSubmit}>
-      <fieldset>
-        <legend>{provider?.displayName || "New provider"}</legend>
-        {error ? <div className="beta-error">{error}</div> : null}
-        <div className="beta-form-grid">
-          <label className="beta-field">
-            <span>Provider ID</span>
-            <input value={providerId} readOnly={isExisting} required maxLength={80} onChange={e => setProviderId(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Provider type</span>
-            <select value={kind} onChange={e => setKind(e.target.value)}>
-              {AUTH_PROVIDER_KINDS.map(k => <option key={k} value={k}>{k}</option>)}
-            </select>
-          </label>
-          <label className="beta-field">
-            <span>Display name</span>
-            <input value={displayName} required maxLength={120} onChange={e => setDisplayName(e.target.value)} />
-          </label>
-          <label className="beta-field beta-field-checkbox">
-            <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
-            <span>Enabled</span>
-          </label>
-          <label className="beta-field">
-            <span>Issuer</span>
-            <input value={issuer} onChange={e => setIssuer(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Client ID</span>
-            <input value={clientId} onChange={e => setClientId(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Client secret env</span>
-            <input
-              value={secretEnv}
-              onChange={e => setSecretEnv(e.target.value)}
-              placeholder={provider?.secretConfigured ? "Configured" : "CASHFLOW_OIDC_CLIENT_SECRET"}
-            />
-          </label>
-          <label className="beta-field">
-            <span>Redirect URI</span>
-            <input value={redirectUri} onChange={e => setRedirectUri(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Scope</span>
-            <input value={scope} onChange={e => setScope(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Authorization endpoint</span>
-            <input value={authorizationEndpoint} onChange={e => setAuthorizationEndpoint(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Token endpoint</span>
-            <input value={tokenEndpoint} onChange={e => setTokenEndpoint(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>Userinfo endpoint</span>
-            <input value={userInfoEndpoint} onChange={e => setUserInfoEndpoint(e.target.value)} />
-          </label>
-        </div>
-        <div className="beta-form-actions beta-form-actions-start">
-          <button type="submit" className="beta-btn-primary" disabled={busy}>Save provider</button>
-          {isExisting ? (
-            <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={handleDelete}>
-              Delete provider
-            </button>
-          ) : null}
-        </div>
-      </fieldset>
-    </form>
-  );
-}
-
-function AdminProvidersPanel({ providers, onChanged }) {
-  return (
-    <div className="beta-panel">
-      <h3>Identity providers</h3>
-      {providers.length ? providers.map(provider => (
-        <div key={provider.id} className="beta-admin-provider-block">
-          <div className="beta-budget-row">
-            <div className="beta-budget-row-main">
-              <strong>{provider.displayName || provider.id}</strong>
-              <span className="beta-budget-meta">
-                {provider.id} &middot; {provider.kind} &middot; {provider.enabled ? "Enabled" : "Disabled"} &middot; {provider.secretConfigured ? "Secret configured" : "Secret missing"}
-              </span>
-            </div>
-          </div>
-          <AuthProviderForm provider={provider} onSaved={onChanged} onDeleted={onChanged} />
-        </div>
-      )) : <p className="beta-empty">No identity providers configured.</p>}
-      <AuthProviderForm provider={null} onSaved={onChanged} onDeleted={onChanged} />
     </div>
   );
 }
@@ -720,7 +637,11 @@ export default function AdminView({ snapshot, onRefresh }) {
         currentAccountId={snapshot?.session?.accountId || ""}
       />
       <AdminAuthPanel authConfig={admin.authConfig} onChanged={onRefresh} />
-      <AdminProvidersPanel providers={providers} onChanged={onRefresh} />
+      <IdentityProvidersPanel
+        providers={providers}
+        onChanged={onRefresh}
+        internalLoginActive={String(admin.authConfig?.activeMode || "none") === "internal"}
+      />
       <AdminOptionsPanel options={options} onChanged={onRefresh} />
     </section>
   );

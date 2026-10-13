@@ -17,7 +17,8 @@
     }
     var override = new URLSearchParams(window.location.search).get("ui");
     if (override === "legacy" || (override !== "beta" && preferred === "legacy")) return;
-    window.location.replace("/beta/");
+    // Keep the query and hash: provider sign-in returns with ?cashflow_auth=…#account.
+    window.location.replace("/beta/" + window.location.search + window.location.hash);
   })();
 </script>
 <link rel="icon" type="image/png" href="/favicon.png">
