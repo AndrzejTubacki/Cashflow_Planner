@@ -128,6 +128,29 @@ test("account self-service edits profile and password on Postgres with lockout a
       const afterUnlink = await service.unlinkOwnIdentity("pg_self", selfView.identities[0].id);
       assert.deepEqual(afterUnlink.identities, []);
 
+      // A setup token typed as the password opens setup instead of failing (internal mode is active here).
+      const setup = await service.createAdminPasswordResetToken("pg_self", "pg_nopass", { purpose: "password_setup" });
+      assert.deepEqual(await service.authenticateInternalLogin({ email: "nopass@example.com", password: setup.token }),
+        { passwordSetupRequired: true, purpose: "password_setup" });
+      await assert.rejects(service.authenticateInternalLogin({ email: "taken@example.com", password: setup.token }),
+        error => error.status === 401);
+
+      // pg_other has a password but no linked provider, so it can't turn the password off.
+      await assert.rejects(service.removeOwnPassword("pg_other", { currentPassword: otherPassword }), error => error.status === 409);
+      await globalStore.transaction(async repo => {
+        await repo.identities.upsert({ accountId: "pg_other", providerId: "google", subject: "g-other", email: "taken@example.com", emailVerified: true });
+      });
+      const passwordOff = await service.removeOwnPassword("pg_other", { currentPassword: otherPassword });
+      assert.equal(passwordOff.hasPasswordCredential, false);
+      assert.equal((await pool.query("SELECT 1 FROM password_credentials WHERE account_id = 'pg_other'")).rowCount, 0);
+
+      await service.recordAdminSecurityEvent("pg_self", "admin_auth_secret_store", {
+        details: { name: "CASHFLOW_X_CLIENT_SECRET", target: "dotenv" },
+        targetId: "CASHFLOW_X_CLIENT_SECRET",
+        targetType: "auth_secret"
+      });
+      assert.equal((await pool.query("SELECT 1 FROM security_audit_log WHERE action = 'admin_auth_secret_store' AND target_id = 'CASHFLOW_X_CLIENT_SECRET'")).rowCount, 1);
+
       const audit = await pool.query("SELECT action FROM security_audit_log WHERE target_id = 'pg_self' ORDER BY created_at, id");
       const actions = audit.rows.map(row => row.action);
       for (const action of ["account_self_update", "account_password_set", "account_password_change", "account_current_password_check", "account_identity_unlink"]) {

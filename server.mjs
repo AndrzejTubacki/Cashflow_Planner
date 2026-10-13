@@ -197,6 +197,7 @@ try {
   cashflow = await createCashflowModule({
     appVersion,
     dataDir,
+    envFilePath: path.join(__dirname, ".env"),
     databaseConfig,
     localeDir,
     getCurrentFxSnapshot: () => null,

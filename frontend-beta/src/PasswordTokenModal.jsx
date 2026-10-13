@@ -128,11 +128,10 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
 
             {!internalLoginActive ? (
               <div className="beta-error">
-                Internal login is not the active sign-in mode, so the sign-in page does not show the
-                Set password form yet.{" "}
+                Cashflow sign-in isn&rsquo;t the active sign-in mode yet, so the token can&rsquo;t be used on the sign-in page.{" "}
                 {isSelf
                   ? "To set your own password now, use Account settings in the account menu instead."
-                  : "Activate internal login under Authentication before sending this token."}
+                  : "Activate Cashflow sign-in under Authentication before sending this token."}
               </div>
             ) : null}
 
@@ -140,9 +139,8 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
               <h3>How to use it</h3>
               <ol>
                 <li>Send the token to {label} privately. Anyone who has it can set this account&rsquo;s password.</li>
-                <li>They open Cashflow and find the Set password form on the sign-in page.</li>
-                <li>They paste the token, choose a password of at least 12 characters, and select Set password.</li>
-                <li>They then sign in with {email || "their email"} and the new password.</li>
+                <li>They open Cashflow, enter {email || "their email"} on the sign-in page, paste the token into the password field and select Sign in.</li>
+                <li>Cashflow asks them to choose a password of at least 12 characters, then signs them in.</li>
               </ol>
               {(result.purpose || purpose) === "password_reset" ? (
                 <p className="beta-hint">Setting the new password signs this account out of every existing session.</p>

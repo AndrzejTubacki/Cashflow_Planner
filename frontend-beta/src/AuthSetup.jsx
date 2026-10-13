@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { apiFetch } from "./api.js";
 
 const PROVIDER_ID_PATTERN = "[a-z0-9][a-z0-9_\\-]{0,79}";
@@ -145,7 +145,75 @@ function CallbackField({ id, value, onChange, guideLabel }) {
   );
 }
 
-function ProviderForm({ kind, provider, onSaved, onCancel }) {
+function describeStorage(targets) {
+  const kubernetes = targets?.find(target => target.kind === "kubernetes");
+  if (kubernetes) return `Cashflow will try to save it in Kubernetes Secret ${kubernetes.secretName} (namespace ${kubernetes.namespace}).`;
+  const dotenv = targets?.find(target => target.kind === "dotenv");
+  if (dotenv?.writable) return `Cashflow will save it in ${dotenv.path}.`;
+  if (dotenv?.present) return `Cashflow can't write to ${dotenv.path}, so you'll get steps to add it yourself.`;
+  return "Cashflow has nowhere to save it automatically here, so you'll get steps to add it yourself.";
+}
+
+function CopyBlock({ label, text }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="beta-copy-block">
+      <div className="beta-copy-block-head">
+        <span>{label}</span>
+        <button type="button" className="beta-btn-small" onClick={async () => setCopied(await copyToClipboard(text))}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>{text}</pre>
+    </div>
+  );
+}
+
+function SecretStoreResult({ result }) {
+  if (!result) return null;
+  if (result.stored) {
+    const where = result.target === "kubernetes" ? "the Kubernetes Secret" : "Cashflow's .env file";
+    return (
+      <div className="beta-success" role="status">
+        Secret saved in {where}. It works now on this server; other Cashflow replicas pick it up after a restart.
+      </div>
+    );
+  }
+  const manual = result.manual || {};
+  const forbidden = (result.attempts || []).some(attempt => attempt.reason === "forbidden");
+  return (
+    <div className="beta-secret-manual" role="status">
+      <div className="beta-error">
+        <strong>Automatic saving didn&rsquo;t work.</strong>
+        <ul className="beta-check-list">
+          {(result.attempts || []).map(attempt => <li key={attempt.target}>{attempt.message}</li>)}
+        </ul>
+      </div>
+      <p className="beta-hint">Add it yourself instead:</p>
+      {manual.kind === "kubernetes" ? (
+        <>
+          <CopyBlock label="Run, replacing the placeholder with the secret" text={manual.command} />
+          <p className="beta-hint">{manual.restart}</p>
+          <details className="beta-details">
+            <summary>{forbidden ? "Let Cashflow save secrets automatically next time" : "Permissions for automatic saving"}</summary>
+            <p className="beta-hint">
+              Apply this Role and RoleBinding. It lets Cashflow&rsquo;s service account ({manual.serviceAccount}) update only
+              the {manual.secretName} Secret.
+            </p>
+            <CopyBlock label="RBAC" text={manual.rbac} />
+          </details>
+        </>
+      ) : (
+        <>
+          <CopyBlock label={manual.envFile ? `Add to ${manual.envFile} or the container's environment` : "Add to Cashflow's environment"} text={manual.line} />
+          <p className="beta-hint">{manual.restart}</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ProviderForm({ kind, provider, storageTargets, onSaved, onCancel }) {
   const guide = IDENTITY_PROVIDER_GUIDES[kind] || IDENTITY_PROVIDER_GUIDES.oidc;
   const isExisting = Boolean(provider?.id);
   const config = provider?.config || {};
@@ -155,24 +223,29 @@ function ProviderForm({ kind, provider, onSaved, onCancel }) {
   const [issuer, setIssuer] = useState(provider?.issuer || "");
   const [redirectUri, setRedirectUri] = useState(config.redirectUri || "");
   const [redirectTouched, setRedirectTouched] = useState(Boolean(config.redirectUri));
-  const [secretSource, setSecretSource] = useState("env");
-  const [secretValue, setSecretValue] = useState("");
+  const [secretSource, setSecretSource] = useState(provider?.secretSource || "env");
+  const [secretValue, setSecretValue] = useState(provider?.secretLocation || "");
+  const [secretTouched, setSecretTouched] = useState(Boolean(provider?.secretLocation));
   const [scope, setScope] = useState(config.scope || guide.defaultScope);
   const [enabled, setEnabled] = useState(isExisting ? Boolean(provider.enabled) : true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [secretToStore, setSecretToStore] = useState("");
+  const [storeResult, setStoreResult] = useState(null);
 
   const effectiveRedirect = redirectTouched ? redirectUri : callbackUrlFor(providerId);
-  const secretPlaceholder = secretSource === "env"
+  const secretDefault = secretSource === "env"
     ? `CASHFLOW_${(providerId || kind).toUpperCase().replace(/[^A-Z0-9]/g, "_")}_CLIENT_SECRET`
-    : "/run/secrets/cashflow-oidc-client-secret";
+    : `/run/secrets/cashflow-${(providerId || kind).toLowerCase()}-client-secret`;
+  const effectiveSecret = secretTouched ? secretValue : secretDefault;
 
   async function handleSubmit(event) {
     event.preventDefault();
     setBusy(true);
     setError("");
     setSaved(false);
+    setStoreResult(null);
     try {
       const body = {
         kind,
@@ -183,13 +256,24 @@ function ProviderForm({ kind, provider, onSaved, onCancel }) {
         scope: scope.trim()
       };
       if (guide.needsIssuer) body.issuer = issuer.trim();
-      if (secretValue.trim()) {
-        if (secretSource === "env") body.secretEnv = secretValue.trim();
-        else body.secretFile = secretValue.trim();
+      if (effectiveSecret.trim()) {
+        if (secretSource === "env") body.secretEnv = effectiveSecret.trim();
+        else body.secretFile = effectiveSecret.trim();
+      }
+      // Save the secret before the provider so an enabled provider never points at a missing value.
+      let stored = null;
+      if (secretSource === "env" && secretToStore) {
+        stored = await apiFetch("/api/admin/auth/secrets", {
+          method: "POST",
+          body: { name: effectiveSecret.trim(), value: secretToStore }
+        });
+        setStoreResult(stored);
+        setSecretToStore("");
       }
       await apiFetch(`/api/admin/auth/providers/${encodeURIComponent(providerId.trim().toLowerCase())}`, { method: "PUT", body });
       setSaved(true);
-      setSecretValue("");
+      // Keep a new provider's form open while it shows manual steps; "Done" closes it.
+      if (!isExisting && stored && !stored.stored) return;
       await onSaved();
     } catch (err) {
       setError(err.message || "Failed to save provider");
@@ -248,28 +332,48 @@ function ProviderForm({ kind, provider, onSaved, onCancel }) {
       <fieldset className="beta-admin-fieldset beta-fieldset-stack">
         <legend>{guide.secretLabel}</legend>
         <p className="beta-hint">
-          Cashflow never stores the secret itself. Put it on the server and tell Cashflow where to find it.
-          {isExisting ? (provider.secretConfigured ? " A secret is configured now; leave this empty to keep it." : " No secret is readable right now.") : ""}
+          The secret lives on the server, outside Cashflow&rsquo;s database. Tell Cashflow where to read it, and optionally let
+          Cashflow put it there for you.
+          {isExisting ? (provider.secretConfigured ? " Cashflow can read the secret right now." : " Cashflow can't read a secret from this location yet.") : ""}
         </p>
         <div className="beta-radio-row" role="radiogroup" aria-label={`${guide.secretLabel} source`}>
           <label className="beta-field beta-field-checkbox">
-            <input type="radio" name={`secret-source-${providerId || kind}`} checked={secretSource === "env"} onChange={() => setSecretSource("env")} />
+            <input type="radio" name={`secret-source-${providerId || kind}`} checked={secretSource === "env"} onChange={() => { setSecretSource("env"); setSecretTouched(false); }} />
             <span>Environment variable</span>
           </label>
           <label className="beta-field beta-field-checkbox">
-            <input type="radio" name={`secret-source-${providerId || kind}`} checked={secretSource === "file"} onChange={() => setSecretSource("file")} />
+            <input type="radio" name={`secret-source-${providerId || kind}`} checked={secretSource === "file"} onChange={() => { setSecretSource("file"); setSecretTouched(false); }} />
             <span>File on the server</span>
           </label>
         </div>
         <label className="beta-field">
           <span>{secretSource === "env" ? "Variable name" : "Absolute file path"}</span>
-          <input value={secretValue} placeholder={secretPlaceholder} autoComplete="off" required={!isExisting && enabled} onChange={e => setSecretValue(e.target.value)} />
+          <input
+            value={effectiveSecret}
+            autoComplete="off"
+            required={enabled}
+            onChange={e => { setSecretTouched(true); setSecretValue(e.target.value); }}
+          />
           <small className="beta-hint">
             {secretSource === "env"
-              ? "Set this variable in Cashflow's environment (for example .env or the container settings) and restart Cashflow so it's picked up."
-              : "For example a mounted Docker or Kubernetes secret. The file is read on each sign-in, so no restart is needed."}
+              ? "The environment variable Cashflow reads the secret from."
+              : "For example a mounted Docker or Kubernetes secret. The file is read on each sign-in, so no restart is needed. Cashflow can't write it for you."}
           </small>
         </label>
+        {secretSource === "env" ? (
+          <label className="beta-field">
+            <span>{guide.secretLabel} value (optional)</span>
+            <input
+              type="password"
+              value={secretToStore}
+              autoComplete="new-password"
+              placeholder={isExisting && provider.secretConfigured ? "Leave empty to keep the current secret" : "Paste the secret to have Cashflow save it"}
+              onChange={e => setSecretToStore(e.target.value)}
+            />
+            <small className="beta-hint">{describeStorage(storageTargets)} It is never shown again.</small>
+          </label>
+        ) : null}
+        <SecretStoreResult result={storeResult} />
       </fieldset>
 
       <details className="beta-details">
@@ -287,14 +391,20 @@ function ProviderForm({ kind, provider, onSaved, onCancel }) {
       </label>
 
       <div className="beta-form-actions beta-form-actions-start">
-        <button type="submit" className="beta-btn-primary" disabled={busy}>{busy ? "Saving..." : isExisting ? "Save provider" : "Add provider"}</button>
-        {onCancel ? <button type="button" className="beta-btn-small" disabled={busy} onClick={onCancel}>Cancel</button> : null}
+        {!isExisting && saved && storeResult && !storeResult.stored ? (
+          <button type="button" className="beta-btn-primary" onClick={() => onSaved()}>Done</button>
+        ) : (
+          <>
+            <button type="submit" className="beta-btn-primary" disabled={busy}>{busy ? "Saving..." : isExisting ? "Save provider" : "Add provider"}</button>
+            {onCancel ? <button type="button" className="beta-btn-small" disabled={busy} onClick={onCancel}>Cancel</button> : null}
+          </>
+        )}
       </div>
     </form>
   );
 }
 
-function ExistingProvider({ provider, onChanged }) {
+function ExistingProvider({ provider, storageTargets, onChanged }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState("");
   const guide = IDENTITY_PROVIDER_GUIDES[provider.kind] || IDENTITY_PROVIDER_GUIDES.oidc;
@@ -326,7 +436,7 @@ function ExistingProvider({ provider, onChanged }) {
       {open ? (
         <div className="beta-admin-account-body">
           {error ? <div className="beta-error">{error}</div> : null}
-          <ProviderForm kind={provider.kind} provider={provider} onSaved={onChanged} />
+          <ProviderForm kind={provider.kind} provider={provider} storageTargets={storageTargets} onSaved={onChanged} />
           <details className="beta-details">
             <summary>Setup guide for {guide.label}</summary>
             <Guide guide={guide} />
@@ -342,6 +452,13 @@ function ExistingProvider({ provider, onChanged }) {
 
 export function IdentityProvidersPanel({ providers, onChanged, internalLoginActive }) {
   const [step, setStep] = useState("idle");
+  const [storageTargets, setStorageTargets] = useState(null);
+
+  useEffect(() => {
+    apiFetch("/api/admin/auth/secret-storage", { cache: "no-store", scoped: false })
+      .then(result => setStorageTargets(Array.isArray(result?.targets) ? result.targets : []))
+      .catch(() => setStorageTargets([]));
+  }, []);
   const [kind, setKind] = useState("");
 
   function start() {
@@ -362,14 +479,14 @@ export function IdentityProvidersPanel({ providers, onChanged, internalLoginActi
         {step === "idle" ? <button type="button" className="beta-btn-small" onClick={start}>Add sign-in provider</button> : null}
       </div>
       <p className="beta-hint">
-        Adds &ldquo;Continue with &hellip;&rdquo; buttons to the sign-in page. They appear only while internal login is the
+        Adds &ldquo;Continue with &hellip;&rdquo; buttons to the sign-in page. They appear only while Cashflow sign-in is the
         active sign-in mode{internalLoginActive ? "" : " (it isn't yet)"}, and each person links the provider to their own
         account under Account settings &gt; Linked sign-ins before it can sign them in.
       </p>
 
       {providers.length ? (
         <div className="beta-admin-account-list">
-          {providers.map(provider => <ExistingProvider key={provider.id} provider={provider} onChanged={onChanged} />)}
+          {providers.map(provider => <ExistingProvider key={provider.id} provider={provider} storageTargets={storageTargets} onChanged={onChanged} />)}
         </div>
       ) : step === "idle" ? <p className="beta-empty">No sign-in providers yet.</p> : null}
 
@@ -399,7 +516,7 @@ export function IdentityProvidersPanel({ providers, onChanged, internalLoginActi
             <h4 className="beta-setup-step">Add {IDENTITY_PROVIDER_GUIDES[kind].label}</h4>
             <button type="button" className="beta-btn-small" onClick={() => setStep("pick")}>Choose a different provider</button>
           </div>
-          <ProviderForm key={kind} kind={kind} provider={null} onSaved={handleAdded} onCancel={() => setStep("idle")} />
+          <ProviderForm key={kind} kind={kind} provider={null} storageTargets={storageTargets} onSaved={handleAdded} onCancel={() => setStep("idle")} />
         </div>
       ) : null}
     </div>

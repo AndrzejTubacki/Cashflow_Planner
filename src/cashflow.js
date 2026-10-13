@@ -8,6 +8,7 @@ import {
 import { normalizeCurrency } from "./server/cashflow-money-utils.js";
 import { createCashflowStoragePaths } from "./server/cashflow-storage-utils.js";
 import { registerCashflowRoutes } from "./server/cashflow-routes.js";
+import { createSecretStore } from "./server/cashflow-secret-store.js";
 import { createCashflowBackupService } from "./server/cashflow-backup-service.js";
 import { createCashflowBudgetService } from "./server/cashflow-budget-service.js";
 import { createCashflowDataPortabilityService } from "./server/cashflow-data-portability-service.js";
@@ -101,6 +102,8 @@ async function createCashflowModule({
   dataDir,
   databaseConfig = resolveCashflowDbConfig(),
   env = process.env,
+  envFilePath = null,
+  secretStore = null,
   globalMigrationHook = null,
   localeDir,
   lockService = null,
@@ -425,6 +428,8 @@ async function createCashflowModule({
     updateOwnAccount,
     changeOwnPassword,
     unlinkOwnIdentity,
+    removeOwnPassword,
+    recordAdminSecurityEvent,
     updateGlobalOptions,
     updateGlobalOptionsAsync
   } = createCashflowGlobalService({
@@ -805,6 +810,8 @@ async function createCashflowModule({
     openLedgerDb
   });
 
+  const authSecretStore = secretStore || createSecretStore({ env, envFilePath });
+
   function registerRoutes(app) {
     // Bind all HTTP routes to the functions assembled above.
     registerCashflowRoutes(app, {
@@ -961,6 +968,9 @@ async function createCashflowModule({
       updateOwnAccount,
       changeOwnPassword,
       unlinkOwnIdentity,
+      removeOwnPassword,
+      recordAdminSecurityEvent,
+      secretStore: authSecretStore,
       updateAdminAuthDraft,
       updateAdminAuthDraftAsync,
       updateSettings,

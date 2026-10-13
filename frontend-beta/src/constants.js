@@ -41,9 +41,9 @@ export const PREDICTION_SUBSTITUTE_OPTIONS = [
 export const NOTIFICATION_PRIORITY_OPTIONS = ["min", "low", "default", "high", "urgent"];
 
 export const AUTH_MODE_OPTIONS = [
-  { value: "none", label: "None" },
-  { value: "external", label: "External SSO" },
-  { value: "internal", label: "Internal login" }
+  { value: "none", label: "No sign-in" },
+  { value: "internal", label: "Cashflow sign-in (password and/or providers)" },
+  { value: "external", label: "Reverse-proxy SSO" }
 ];
 
 export const AUTH_PROVISIONING_OPTIONS = [

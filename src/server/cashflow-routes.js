@@ -170,6 +170,9 @@ export function registerCashflowRoutes(app, {
   updateOwnAccount = null,
   changeOwnPassword = null,
   unlinkOwnIdentity = null,
+  removeOwnPassword = null,
+  recordAdminSecurityEvent = null,
+  secretStore = null,
   updateAdminAuthDraft = null,
   updateAdminAuthDraftAsync = null,
   upsertAdminAuthProvider = null,
@@ -641,6 +644,10 @@ export function registerCashflowRoutes(app, {
         if (typeof authenticateInternalLogin !== "function") throw new Error("Internal authentication service is unavailable");
         if (typeof createInternalAccountSession !== "function") throw new Error("Session service is unavailable");
         const authenticated = await authenticateInternalLogin(req.body || {});
+        if (authenticated.passwordSetupRequired) {
+          res.json({ passwordSetupRequired: true, purpose: authenticated.purpose });
+          return;
+        }
         const issued = await createInternalAccountSession(authenticated.accountId);
         setSessionCookie(req, res, issued.token);
         res.json({
@@ -714,6 +721,16 @@ export function registerCashflowRoutes(app, {
         res.json({ account: await changeOwnPassword(actor.account.id, actor.authSession.id, req.body || {}) });
       } catch (error) {
         await fail(req, res, error, "Failed to change password", "cashflow_account_password_failed");
+      }
+    });
+
+    app.delete("/api/account/password", async (req, res) => {
+      try {
+        const actor = await requireActor(req);
+        if (typeof removeOwnPassword !== "function") throw new Error("Account service is unavailable");
+        res.json({ account: await removeOwnPassword(actor.account.id, req.body || {}) });
+      } catch (error) {
+        await fail(req, res, error, "Failed to turn off password sign-in", "cashflow_account_password_remove_failed");
       }
     });
 
@@ -1277,6 +1294,34 @@ export function registerCashflowRoutes(app, {
         res.json({ providers: await authProviders() });
       } catch (error) {
         await fail(req, res, error, "Failed to load authentication providers", "cashflow_admin_auth_providers_failed");
+      }
+    });
+
+    app.get("/api/admin/auth/secret-storage", async (req, res) => {
+      try {
+        await requireAdmin(req);
+        res.json({ targets: secretStore ? secretStore.describe() : [] });
+      } catch (error) {
+        await fail(req, res, error, "Failed to check secret storage", "cashflow_admin_secret_storage_failed");
+      }
+    });
+
+    app.post("/api/admin/auth/secrets", async (req, res) => {
+      try {
+        const session = await requireAdmin(req);
+        if (!secretStore) throw new Error("Secret storage is unavailable");
+        const result = await secretStore.store(req.body?.name, req.body?.value);
+        if (typeof recordAdminSecurityEvent === "function") {
+          await recordAdminSecurityEvent(adminActorId(session), "admin_auth_secret_store", {
+            details: { name: result.name, target: result.target || null, attempts: result.attempts.map(a => ({ target: a.target, reason: a.reason || null })) },
+            outcome: result.stored ? "success" : "failure",
+            targetId: result.name,
+            targetType: "auth_secret"
+          });
+        }
+        res.json(result);
+      } catch (error) {
+        await fail(req, res, error, "Failed to store the secret", "cashflow_admin_secret_store_failed");
       }
     });
 

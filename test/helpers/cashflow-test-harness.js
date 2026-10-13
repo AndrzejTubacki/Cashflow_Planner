@@ -58,6 +58,7 @@ async function createCashflowTestHarness(options = {}) {
     authProviderHook: options.authProviderHook || null,
     backupServiceHook: options.backupServiceHook || null,
     dataDir,
+    envFilePath: options.envFilePath || null,
     localeDir,
     getCurrentFxSnapshot: () => fxSnapshot,
     // Allow deterministic confirmation barriers while retaining real storage/recovery.

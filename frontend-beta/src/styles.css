@@ -32,7 +32,7 @@ body {
 }
 
 .beta-error-card {
-  max-width: 420px;
+  max-width: 460px;
   padding: 24px;
   border: 1px solid var(--line);
   border-radius: var(--radius-m, 10px);
@@ -976,6 +976,8 @@ body {
   border-radius: 8px;
   padding: 12px 14px;
   margin: 0;
+  /* Fieldsets default to min-width: min-content, so wide code blocks would stretch the page. */
+  min-width: 0;
 }
 
 .beta-admin-fieldset legend {
@@ -1253,6 +1255,185 @@ body {
   color: inherit;
   font-size: 18px;
   padding: 0 2px;
+}
+
+/* ---- internal sign-in card ---- */
+.beta-signin-card {
+  width: 100%;
+  max-width: 460px;
+}
+
+.beta-signin-form {
+  padding: 0;
+}
+
+.beta-signin-submit {
+  width: 100%;
+  padding: 10px 18px;
+  font-size: 14px;
+}
+
+.beta-signin-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.beta-signin-divider::before,
+.beta-signin-divider::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--line);
+}
+
+.beta-signin-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.beta-signin-foot {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.beta-link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ---- provider buttons (each provider's own branding) ---- */
+.beta-provider-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.beta-provider-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.beta-provider-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.beta-provider-btn-mark {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+
+/* Google's guidelines: dark fill #131314, outline #8E918F, text #E3E3E3; light fill #FFF, outline #747775, text #1F1F1F. */
+.beta-provider-btn--google {
+  background: #131314;
+  border-color: #8e918f;
+  color: #e3e3e3;
+  font-family: "Roboto", var(--font-body);
+  font-weight: 500;
+}
+
+.beta-provider-btn--facebook {
+  background: #1877f2;
+  color: #ffffff;
+  font-family: Helvetica, Arial, var(--font-body);
+  font-weight: 700;
+}
+
+.beta-provider-btn--github {
+  background: #24292f;
+  border-color: #24292f;
+  color: #ffffff;
+}
+
+.beta-provider-btn--generic {
+  background: var(--panel-strong);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.beta-provider-btn--github {
+  border-color: #6e7681;
+}
+
+:root[data-cashflow-theme="light"] .beta-provider-btn--google {
+  background: #ffffff;
+  border-color: #747775;
+  color: #1f1f1f;
+}
+
+:root[data-cashflow-theme="light"] .beta-provider-btn--github {
+  border-color: #24292f;
+}
+
+@media (prefers-color-scheme: light) {
+  :root[data-cashflow-theme="system"] .beta-provider-btn--google {
+    background: #ffffff;
+    border-color: #747775;
+    color: #1f1f1f;
+  }
+
+  :root[data-cashflow-theme="system"] .beta-provider-btn--github {
+    border-color: #24292f;
+  }
+}
+
+.beta-secret-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.beta-copy-block {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.beta-copy-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.beta-copy-block pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
 }
 
 /* ---- password token popup ---- */

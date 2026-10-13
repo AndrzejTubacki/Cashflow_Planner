@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, setCsrfToken } from "./api.js";
+import ProviderButton from "./ProviderButton.jsx";
 import { DEFAULT_TIMEZONE, HOLIDAY_COUNTRIES, SUPPORTED_FX_CURRENCIES, TIMEZONE_OPTIONS } from "./constants.js";
 
 const ACCOUNT_ID_PATTERN = "[A-Za-z0-9_\\-]{1,64}";
@@ -179,23 +180,21 @@ function AccountPicker({ onSignedIn }) {
   );
 }
 
-function InternalLogin({ auth, onSignedIn }) {
+function InternalLogin({ auth, onSignedIn, onRegister, onPasswordSetup }) {
   const providers = Array.isArray(auth?.internal?.providers) ? auth.internal.providers : [];
   const passwordLogin = auth?.internal?.allowPasswordLogin !== false;
   const login = useSubmit();
-  const token = useSubmit();
-  const register = useSubmit();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [setupToken, setSetupToken] = useState("");
-  const [setupPassword, setSetupPassword] = useState("");
-  const [tokenDone, setTokenDone] = useState(false);
-  const [invitation, setInvitation] = useState({ invitationToken: "", email: "", displayName: "", password: "" });
 
   function handleLogin(event) {
     event.preventDefault();
     login.run(async () => {
       const result = await apiFetch("/api/auth/internal/login", { method: "POST", body: { email, password }, scoped: false });
+      if (result?.passwordSetupRequired) {
+        onPasswordSetup({ email: email.trim(), token: password, purpose: result.purpose });
+        return;
+      }
       rememberSession(result);
       await onSignedIn();
     });
@@ -213,139 +212,158 @@ function InternalLogin({ auth, onSignedIn }) {
     });
   }
 
-  function handleSetPassword(event) {
-    event.preventDefault();
-    setTokenDone(false);
-    token.run(async () => {
-      await apiFetch("/api/auth/internal/password", {
-        method: "POST",
-        body: { token: setupToken.trim(), password: setupPassword },
-        scoped: false
-      });
-      setSetupToken("");
-      setSetupPassword("");
-      setTokenDone(true);
-    });
-  }
+  return (
+    <div className="beta-panel beta-settings-section beta-signin-card">
+      {login.error ? <div className="beta-error">{login.error}</div> : null}
+      {passwordLogin ? (
+        <form className="beta-settings-section beta-signin-form" onSubmit={handleLogin}>
+          <label className="beta-field">
+            <span>Email</span>
+            <input id="beta-login-email" type="email" value={email} required autoComplete="username" onChange={e => setEmail(e.target.value)} />
+          </label>
+          <label className="beta-field">
+            <span>Password</span>
+            <input
+              id="beta-login-password"
+              type="password"
+              value={password}
+              required
+              minLength={12}
+              maxLength={1024}
+              autoComplete="current-password"
+              onChange={e => setPassword(e.target.value)}
+            />
+            <small className="beta-hint">Got a password token from an administrator? Paste it here to choose your password.</small>
+          </label>
+          <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={login.busy}>
+            {login.busy ? "Signing in..." : "Sign in"}
+          </button>
+        </form>
+      ) : null}
 
-  function handleRegister(event) {
+      {passwordLogin && providers.length ? <div className="beta-signin-divider" role="separator"><span>or</span></div> : null}
+
+      {providers.length ? (
+        <div className="beta-signin-providers">
+          {providers.map(provider => (
+            <ProviderButton key={provider.id} provider={provider} disabled={login.busy} onClick={() => startProvider(provider.id)} />
+          ))}
+        </div>
+      ) : null}
+
+      <p className="beta-signin-foot">
+        Have an invitation?{" "}
+        <button type="button" className="beta-link-btn" onClick={onRegister}>Create your account</button>
+      </p>
+    </div>
+  );
+}
+
+function RegisterView({ onSignedIn, onBack }) {
+  const register = useSubmit();
+  const [form, setForm] = useState({ invitationToken: "", email: "", displayName: "", password: "", confirm: "" });
+  const set = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
+
+  function handleSubmit(event) {
     event.preventDefault();
+    if (form.password !== form.confirm) {
+      register.setError("The passwords don't match.");
+      return;
+    }
     register.run(async () => {
-      const result = await apiFetch("/api/auth/internal/register", { method: "POST", body: invitation, scoped: false });
+      const { confirm: _confirm, ...body } = form;
+      const result = await apiFetch("/api/auth/internal/register", { method: "POST", body, scoped: false });
       rememberSession(result);
       await onSignedIn();
     });
   }
 
   return (
-    <div className="beta-entry-grid">
-      <div className="beta-entry-stack">
-        {passwordLogin ? (
-          <form className="beta-panel beta-settings-section" onSubmit={handleLogin}>
-            <h3>Email and password</h3>
-            {login.error ? <div className="beta-error">{login.error}</div> : null}
-            <label className="beta-field">
-              <span>Email</span>
-              <input id="beta-login-email" type="email" value={email} required autoComplete="username" onChange={e => setEmail(e.target.value)} />
-            </label>
-            <label className="beta-field">
-              <span>Password</span>
-              <input
-                id="beta-login-password"
-                type="password"
-                value={password}
-                required
-                minLength={12}
-                maxLength={1024}
-                autoComplete="current-password"
-                onChange={e => setPassword(e.target.value)}
-              />
-            </label>
-            <div className="beta-form-actions beta-form-actions-start">
-              <button type="submit" className="beta-btn-primary" disabled={login.busy}>Sign in</button>
-            </div>
-          </form>
-        ) : null}
+    <form className="beta-panel beta-settings-section beta-signin-card" onSubmit={handleSubmit}>
+      {register.error ? <div className="beta-error">{register.error}</div> : null}
+      <label className="beta-field">
+        <span>Invitation token</span>
+        <input id="beta-invite-token" value={form.invitationToken} required autoComplete="off" onChange={e => set("invitationToken", e.target.value)} />
+        <small className="beta-hint">From the invitation someone sent you.</small>
+      </label>
+      <label className="beta-field">
+        <span>Email</span>
+        <input id="beta-invite-email" type="email" value={form.email} required autoComplete="username" onChange={e => set("email", e.target.value)} />
+      </label>
+      <label className="beta-field">
+        <span>Display name</span>
+        <input id="beta-invite-name" value={form.displayName} required maxLength={120} autoComplete="name" onChange={e => set("displayName", e.target.value)} />
+      </label>
+      <label className="beta-field">
+        <span>Password</span>
+        <input id="beta-invite-password" type="password" value={form.password} required minLength={12} maxLength={1024}
+          autoComplete="new-password" onChange={e => set("password", e.target.value)} />
+        <small className="beta-hint">At least 12 characters.</small>
+      </label>
+      <label className="beta-field">
+        <span>Confirm password</span>
+        <input id="beta-invite-confirm" type="password" value={form.confirm} required minLength={12} maxLength={1024}
+          autoComplete="new-password" onChange={e => set("confirm", e.target.value)} />
+      </label>
+      <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={register.busy}>
+        {register.busy ? "Creating..." : "Create account"}
+      </button>
+      <p className="beta-signin-foot">
+        Already have an account? <button type="button" className="beta-link-btn" onClick={onBack}>Sign in</button>
+      </p>
+    </form>
+  );
+}
 
-        {providers.length ? (
-          <div className="beta-panel beta-settings-section">
-            <h3>Sign in with a provider</h3>
-            {!passwordLogin && login.error ? <div className="beta-error">{login.error}</div> : null}
-            {providers.map(provider => (
-              <button
-                key={provider.id}
-                type="button"
-                className="beta-btn-small beta-entry-provider"
-                disabled={login.busy}
-                onClick={() => startProvider(provider.id)}
-              >
-                Continue with {provider.displayName || provider.id}
-              </button>
-            ))}
-          </div>
-        ) : null}
+function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
+  const setup = useSubmit();
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    if (password !== confirm) {
+      setup.setError("The passwords don't match.");
+      return;
+    }
+    setup.run(async () => {
+      await apiFetch("/api/auth/internal/password", { method: "POST", body: { token, password }, scoped: false });
+      const result = await apiFetch("/api/auth/internal/login", { method: "POST", body: { email, password }, scoped: false });
+      rememberSession(result);
+      await onSignedIn();
+    });
+  }
+
+  return (
+    <form className="beta-panel beta-settings-section beta-signin-card" onSubmit={handleSubmit}>
+      <p className="beta-hint">
+        {purpose === "password_reset"
+          ? "Your administrator reset your password. Choose a new one; this signs you out everywhere else."
+          : "Choose the password you'll sign in with."}
+      </p>
+      {setup.error ? <div className="beta-error">{setup.error}</div> : null}
+      <div className="beta-field">
+        <span>Email</span>
+        <strong>{email}</strong>
       </div>
-
-      <div className="beta-entry-stack">
-        <form className="beta-panel beta-settings-section" onSubmit={handleSetPassword}>
-          <h3>Set password</h3>
-          <p className="beta-hint">Got a password token from your administrator? Use it here, then sign in.</p>
-          {token.error ? <div className="beta-error">{token.error}</div> : null}
-          {tokenDone ? <div className="beta-success" role="status">Password set. You can sign in now.</div> : null}
-          <label className="beta-field">
-            <span>Password token</span>
-            <input id="beta-token-input" value={setupToken} required autoComplete="off" onChange={e => setSetupToken(e.target.value)} />
-          </label>
-          <label className="beta-field">
-            <span>New password</span>
-            <input
-              id="beta-token-new-password"
-              type="password"
-              value={setupPassword}
-              required
-              minLength={12}
-              maxLength={1024}
-              autoComplete="new-password"
-              onChange={e => setSetupPassword(e.target.value)}
-            />
-            <small className="beta-hint">At least 12 characters.</small>
-          </label>
-          <div className="beta-form-actions beta-form-actions-start">
-            <button type="submit" className="beta-btn-small" disabled={token.busy}>Set password</button>
-          </div>
-        </form>
-
-        <details className="beta-panel beta-entry-details">
-          <summary>Register with an invitation</summary>
-          <form className="beta-settings-section" onSubmit={handleRegister}>
-            {register.error ? <div className="beta-error">{register.error}</div> : null}
-            <label className="beta-field">
-              <span>Invitation token</span>
-              <input id="beta-invite-token" value={invitation.invitationToken} required autoComplete="off"
-                onChange={e => setInvitation(v => ({ ...v, invitationToken: e.target.value }))} />
-            </label>
-            <label className="beta-field">
-              <span>Email</span>
-              <input id="beta-invite-email" type="email" value={invitation.email} required autoComplete="username"
-                onChange={e => setInvitation(v => ({ ...v, email: e.target.value }))} />
-            </label>
-            <label className="beta-field">
-              <span>Display name</span>
-              <input id="beta-invite-name" value={invitation.displayName} required maxLength={120} autoComplete="name"
-                onChange={e => setInvitation(v => ({ ...v, displayName: e.target.value }))} />
-            </label>
-            <label className="beta-field">
-              <span>Password</span>
-              <input id="beta-invite-password" type="password" value={invitation.password} required minLength={12} maxLength={1024}
-                autoComplete="new-password" onChange={e => setInvitation(v => ({ ...v, password: e.target.value }))} />
-            </label>
-            <div className="beta-form-actions beta-form-actions-start">
-              <button type="submit" className="beta-btn-small" disabled={register.busy}>Register</button>
-            </div>
-          </form>
-        </details>
-      </div>
-    </div>
+      <label className="beta-field">
+        <span>New password</span>
+        <input id="beta-setup-new-password" type="password" value={password} required minLength={12} maxLength={1024}
+          autoComplete="new-password" autoFocus onChange={e => setPassword(e.target.value)} />
+        <small className="beta-hint">At least 12 characters.</small>
+      </label>
+      <label className="beta-field">
+        <span>Confirm new password</span>
+        <input id="beta-setup-confirm-password" type="password" value={confirm} required minLength={12} maxLength={1024}
+          autoComplete="new-password" onChange={e => setConfirm(e.target.value)} />
+      </label>
+      <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={setup.busy}>
+        {setup.busy ? "Saving..." : "Save password and sign in"}
+      </button>
+      <p className="beta-signin-foot">
+        <button type="button" className="beta-link-btn" onClick={onBack}>Back to sign in</button>
+      </p>
+    </form>
   );
 }
 
@@ -372,17 +390,44 @@ function ExternalLogin({ onSignedIn }) {
 
 export function SignInView({ auth, notice, onSignedIn }) {
   const mode = String(auth?.activeMode || "none");
+  const [screen, setScreen] = useState({ name: "login" });
+
+  if (mode === "internal" && screen.name === "register") {
+    return (
+      <EntryFrame title="Create your account" subtitle="Use the invitation you were sent.">
+        <RegisterView onSignedIn={onSignedIn} onBack={() => setScreen({ name: "login" })} />
+      </EntryFrame>
+    );
+  }
+  if (mode === "internal" && screen.name === "set-password") {
+    return (
+      <EntryFrame title={screen.purpose === "password_reset" ? "Reset your password" : "Create your password"}>
+        <PasswordSetupView
+          email={screen.email}
+          token={screen.token}
+          purpose={screen.purpose}
+          onSignedIn={onSignedIn}
+          onBack={() => setScreen({ name: "login" })}
+        />
+      </EntryFrame>
+    );
+  }
+
   return (
     <EntryFrame
       title={mode === "none" ? "Choose an account" : "Sign in"}
-      subtitle={mode === "none"
-        ? "This instance runs without sign-in, so pick an account or create one."
-        : mode === "external" ? null : "Sign in with your email and password."}
+      subtitle={mode === "none" ? "This instance runs without sign-in, so pick an account or create one." : null}
     >
       {notice ? <div className="beta-error beta-entry-narrow">{notice}</div> : null}
-      {mode === "internal" ? <InternalLogin auth={auth} onSignedIn={onSignedIn} />
-        : mode === "external" ? <ExternalLogin onSignedIn={onSignedIn} />
-          : <AccountPicker onSignedIn={onSignedIn} />}
+      {mode === "internal" ? (
+        <InternalLogin
+          auth={auth}
+          onSignedIn={onSignedIn}
+          onRegister={() => setScreen({ name: "register" })}
+          onPasswordSetup={details => setScreen({ name: "set-password", ...details })}
+        />
+      ) : mode === "external" ? <ExternalLogin onSignedIn={onSignedIn} />
+        : <AccountPicker onSignedIn={onSignedIn} />}
     </EntryFrame>
   );
 }

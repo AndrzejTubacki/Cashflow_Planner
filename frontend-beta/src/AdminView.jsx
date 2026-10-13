@@ -419,7 +419,7 @@ function AdminAuthPanel({ authConfig, onChanged }) {
 
         {draftMode === "external" ? (
           <fieldset className="beta-admin-fieldset beta-fieldset-stack">
-            <legend>External SSO (sign-in handled by a reverse proxy)</legend>
+            <legend>Reverse-proxy SSO (the proxy signs people in before they reach Cashflow)</legend>
             <div className="beta-settings-section">
               <span className="beta-setup-step">Which proxy signs people in?</span>
               <div className="beta-setup-choices" role="radiogroup" aria-label="Sign-in proxy">
@@ -501,15 +501,17 @@ function AdminAuthPanel({ authConfig, onChanged }) {
 
         {draftMode === "internal" ? (
           <fieldset className="beta-admin-fieldset beta-fieldset-stack">
-            <legend>Internal login</legend>
+            <legend>Cashflow sign-in</legend>
+            <p className="beta-hint">
+              The sign-in page offers email and password plus a button for each enabled sign-in provider (set up under
+              Sign-in providers below). Each person uses whichever they prefer: they can link providers and turn their own
+              password off under Account settings.
+            </p>
             <label className="beta-field beta-field-checkbox">
               <input type="checkbox" checked={allowPasswordLogin} onChange={e => setAllowPasswordLogin(e.target.checked)} />
               <span>Allow email and password sign-in</span>
             </label>
-            <p className="beta-hint">
-              &ldquo;Continue with &hellip;&rdquo; buttons for Google, GitHub and others are set up under Sign-in providers below.
-              Before activating, set your own email and password under Account settings in the account menu.
-            </p>
+            <p className="beta-hint">Before activating, set your own email and password under Account settings in the account menu.</p>
           </fieldset>
         ) : null}
 

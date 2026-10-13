@@ -1041,6 +1041,59 @@ export function createCashflowGlobalService({
     return ownAccountView(account, credential, authMode, identities);
   }
 
+  async function recordAdminSecurityEvent(actorAccountId, action, { details = {}, outcome = "success", targetId = null, targetType = null } = {}) {
+    const event = { action, actorAccountId, details, outcome, targetId, targetType };
+    await withExternalGlobalTransaction(async repo => {
+      await repo.audit.insertSecurityEvent(event);
+    }, () => {
+      const db = openGlobalDb();
+      try {
+        auditGlobalSecurity(db, event);
+      } finally {
+        db.close();
+      }
+    });
+  }
+
+  // Lets someone with a linked provider sign in with that provider only.
+  async function removeOwnPassword(accountId, input = {}) {
+    const normalizedId = normalizeUserId(accountId);
+    const { credential, authMode, identities } = await readOwnAccountState(normalizedId);
+    if (authMode === "external") {
+      throw forbidden("Your password is managed by your sign-in provider");
+    }
+    if (!credential) throw conflict("This account has no password to turn off");
+    if (!identities.some(isSelfManagedIdentity)) {
+      throw conflict("Link a sign-in provider before turning off password sign-in, or you won't be able to sign in.");
+    }
+    await verifyOwnCurrentPassword(normalizedId, credential, input.currentPassword);
+
+    const audit = {
+      action: "account_password_remove",
+      actorAccountId: normalizedId,
+      targetId: normalizedId,
+      targetType: "account"
+    };
+    await withExternalGlobalTransaction(async repo => {
+      assertCredentialUnchanged(credential, await repo.passwordCredentials.getForAccount(normalizedId));
+      await repo.passwordCredentials.deleteForAccount(normalizedId);
+      await repo.audit.insertSecurityEvent(audit);
+    }, () => {
+      const db = openGlobalDb();
+      try {
+        db.transaction(() => {
+          const repo = globalRepository(db);
+          assertCredentialUnchanged(credential, repo.passwordCredentials.getForAccount(normalizedId));
+          repo.passwordCredentials.deleteForAccount(normalizedId);
+          auditGlobalSecurity(db, audit);
+        })();
+      } finally {
+        db.close();
+      }
+    });
+    return await getOwnAccount(normalizedId);
+  }
+
   async function unlinkOwnIdentity(accountId, identityId) {
     const normalizedId = normalizeUserId(accountId);
     const { credential, authMode, identities } = await readOwnAccountState(normalizedId);
@@ -2143,6 +2196,22 @@ export function createCashflowGlobalService({
     return globalRepository(db).accounts.countActiveExternalSystemAdmins(providerId);
   }
 
+  // A setup/reset token pasted into the password field means "let me choose a password":
+  // report that (without a session) so the app can open the create-password page.
+  async function passwordTokenLogin(password, email, getPendingByHash) {
+    if (!/^[A-Za-z0-9_-]{32,}$/.test(String(password || ""))) return null;
+    const tokenRow = await getPendingByHash(authTokenHash(password));
+    if (
+      !tokenRow
+      || Date.parse(tokenRow.expires_at) <= Date.now()
+      || tokenRow.account_status !== "active"
+      || String(tokenRow.email || "").toLowerCase() !== email
+    ) {
+      return null;
+    }
+    return { passwordSetupRequired: true, purpose: tokenRow.purpose };
+  }
+
   function genericLoginError() {
     return unauthorized("Invalid email or password");
   }
@@ -2171,6 +2240,18 @@ export function createCashflowGlobalService({
       .split(/[,\n;]/)
       .map(item => item.trim())
       .filter(Boolean);
+  }
+
+  // Admins see where the secret is read from (a variable name or file path, never the value);
+  // the public sign-in config must not reveal it.
+  function withSecretLocation(provider, row, include) {
+    if (!provider || !include) return provider;
+    const ref = String(row?.secret_ref || "");
+    return {
+      ...provider,
+      secretSource: ref.startsWith("file:") ? "file" : ref.startsWith("env:") ? "env" : "",
+      secretLocation: ref.startsWith("file:") ? ref.slice(5) : ref.startsWith("env:") ? ref.slice(4) : ""
+    };
   }
 
   function providerConfigFromRow(row) {
@@ -2289,7 +2370,7 @@ export function createCashflowGlobalService({
     const db = openGlobalDb();
     try {
       const rows = globalRepository(db).authProviders.list({ publicOnly });
-      return rows.map(providerConfigFromRow).filter(Boolean);
+      return rows.map(row => withSecretLocation(providerConfigFromRow(row), row, !publicOnly)).filter(Boolean);
     } finally {
       db.close();
     }
@@ -2297,7 +2378,7 @@ export function createCashflowGlobalService({
 
   async function listAuthProvidersAsync(options = {}) {
     return await withGlobalRepository(async repo =>
-      (await repo.authProviders.list(options)).map(providerConfigFromRow).filter(Boolean)
+      (await repo.authProviders.list(options)).map(row => withSecretLocation(providerConfigFromRow(row), row, !options.publicOnly)).filter(Boolean)
     );
   }
 
@@ -2345,7 +2426,8 @@ export function createCashflowGlobalService({
           targetId: id,
           targetType: "auth_provider"
         });
-        result = providerConfigFromRow(repo.authProviders.get(id));
+        const savedRow = repo.authProviders.get(id);
+        result = withSecretLocation(providerConfigFromRow(savedRow), savedRow, true);
       })();
       return result;
     } finally {
@@ -2382,7 +2464,8 @@ export function createCashflowGlobalService({
         targetId: id,
         targetType: "auth_provider"
       });
-      return providerConfigFromRow(await repo.authProviders.get(id));
+      const savedRow = await repo.authProviders.get(id);
+      return withSecretLocation(providerConfigFromRow(savedRow), savedRow, true);
     }, () => upsertAdminAuthProvider(actorAccountId, id, input));
   }
 
@@ -3541,6 +3624,8 @@ export function createCashflowGlobalService({
       if (draftConfig.internal.allowPasswordLogin === false) {
         throw forbidden("Password login is disabled");
       }
+      const tokenLogin = await passwordTokenLogin(input.password, email, hash => repo.passwordResetTokens.getPendingWithAccountByHash(hash));
+      if (tokenLogin) return tokenLogin;
       row = repo.passwordCredentials.getLoginByEmail(email);
       if (
         !row
@@ -3616,6 +3701,8 @@ export function createCashflowGlobalService({
       if (draftConfig.internal.allowPasswordLogin === false) {
         throw forbidden("Password login is disabled");
       }
+      const tokenLogin = await passwordTokenLogin(input.password, email, hash => repo.passwordResetTokens.getPendingWithAccountByHash(hash));
+      if (tokenLogin) return tokenLogin;
       const loginRow = await repo.passwordCredentials.getLoginByEmail(email);
       if (
         !loginRow
@@ -3626,6 +3713,7 @@ export function createCashflowGlobalService({
       }
       return loginRow;
     });
+    if (row.passwordSetupRequired) return row;
 
     const verified = await argon2.verify(row.password_hash, passwordMaterial(input.password));
     if (!verified) {
@@ -4500,6 +4588,8 @@ export function createCashflowGlobalService({
     updateOwnAccount,
     changeOwnPassword,
     unlinkOwnIdentity,
+    removeOwnPassword,
+    recordAdminSecurityEvent,
     userExists,
     updateGlobalOptions,
     updateGlobalOptionsAsync

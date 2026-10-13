@@ -75,6 +75,7 @@ The settings that matter for most self-hosted installs:
 | `CASHFLOW_MIRROR_LOGS_TO_STDOUT` | `0` | Also mirror log lines to stdout/stderr, useful for container/process-manager log collection |
 | `CASHFLOW_BACKUP_ALLOWED_ROOTS` | unset (`/app/backups` in Compose) | Absolute paths allowed as custom per-budget backup locations |
 | `CASHFLOW_PASSWORD_PEPPER` | unset | Optional secret mixed into internal-login password hashing. Keep it stable and backed up once set, or existing password hashes become unverifiable |
+| `CASHFLOW_K8S_SECRET_NAME` | `cashflow-secrets` | Kubernetes Secret that Admin > Sign-in providers saves client secrets into when Cashflow runs in a cluster and its service account may `get`/`patch` that Secret. Without that permission, the admin page shows the `kubectl` command and the Role to grant instead |
 | `CASHFLOW_EXTERNAL_AUTH_SECRET` | unset | Shared secret your reverse proxy sends when using trusted-header (external SSO) auth mode |
 | `CASHFLOW_TRUST_PROXY` | unset (no proxy trusted) | Opt in to Express's `trust proxy` setting when running behind a reverse proxy, so `req.ip` (and anything keyed on it, like login rate limiting) reflects the real client instead of the proxy. See [Exposing It Safely](#exposing-it-safely) |
 

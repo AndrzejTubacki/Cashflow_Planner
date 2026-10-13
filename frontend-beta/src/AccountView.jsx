@@ -60,7 +60,7 @@ function ProfilePanel({ account, onSaved }) {
           <small className="beta-hint">
             {externalMode
               ? "Your email is managed by your sign-in provider."
-              : "Used to sign in when internal login is active."}
+              : "Used to sign in when Cashflow sign-in is active."}
           </small>
         </label>
         {needsCurrentPassword ? (
@@ -140,10 +140,12 @@ function PasswordPanel({ account, onSaved }) {
     <form className="beta-panel beta-settings-section" onSubmit={handleSubmit}>
       <h3>Password</h3>
       <p className="beta-hint">
-        {hasPassword
+        {!hasPassword && (account.identities || []).length
+          ? "Password sign-in is off; you sign in with your linked provider. Set a password to turn it back on."
+          : hasPassword
           ? "Changing your password signs you out everywhere except this browser."
           : account.email
-            ? "You don't have a password yet. Set one to be able to sign in once internal login is active."
+            ? "You don't have a password yet. Set one to be able to sign in once Cashflow sign-in is active."
             : "Add an email in your profile first. You sign in with your email and this password."}
       </p>
       {error ? <div className="beta-error">{error}</div> : null}
@@ -261,7 +263,7 @@ function LinkedSignInsPanel({ account, onSaved }) {
       <p className="beta-hint">
         {internalActive
           ? "Link a provider to sign in with it instead of your password. You'll be sent to the provider and brought back here."
-          : "Linking becomes available once internal login is the active sign-in mode."}
+          : "Linking becomes available once Cashflow sign-in is the active sign-in mode."}
       </p>
       {error ? <div className="beta-error">{error}</div> : null}
       {identities.length ? (
@@ -296,6 +298,55 @@ function LinkedSignInsPanel({ account, onSaved }) {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function PasswordOffPanel({ account, onSaved }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const linked = (account.identities || []).length > 0;
+
+  if (account.authMode === "external" || !account.hasPasswordCredential) return null;
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (!window.confirm("Turn off password sign-in? You'll sign in with your linked provider only. You can set a password again at any time.")) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiFetch("/api/account/password", { method: "DELETE", body: { currentPassword }, scoped: false });
+      setCurrentPassword("");
+      await onSaved(result.account);
+    } catch (err) {
+      setError(err.message || "Couldn't turn off password sign-in");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="beta-panel beta-settings-section" onSubmit={handleSubmit}>
+      <h3>Sign in without a password</h3>
+      <p className="beta-hint">
+        {linked
+          ? "Prefer to sign in only with your linked provider? Turn off your password. Setting a new password turns it back on."
+          : "Link a sign-in provider below first; then you can turn off your password and sign in with the provider only."}
+      </p>
+      {error ? <div className="beta-error">{error}</div> : null}
+      {linked ? (
+        <>
+          <label className="beta-field beta-entry-narrow">
+            <span>Current password</span>
+            <input id="beta-account-off-password" type="password" value={currentPassword} required autoComplete="current-password"
+              onChange={e => setCurrentPassword(e.target.value)} />
+          </label>
+          <div className="beta-form-actions beta-form-actions-start">
+            <button type="submit" className="beta-btn-small beta-btn-danger" disabled={busy}>{busy ? "Turning off..." : "Turn off password sign-in"}</button>
+          </div>
+        </>
+      ) : null}
+    </form>
   );
 }
 
@@ -340,6 +391,7 @@ export default function AccountView({ onRefresh, notice = null, onDismissNotice 
           <ProfilePanel account={account} onSaved={handleSaved} />
           <PasswordPanel account={account} onSaved={handleSaved} />
           <LinkedSignInsPanel account={account} onSaved={handleSaved} />
+          <PasswordOffPanel account={account} onSaved={handleSaved} />
         </>
       ) : !error ? <p className="beta-empty">Loading your account...</p> : null}
     </section>

@@ -2849,6 +2849,67 @@ test("GitHub linking and sign-in work through the real OAuth exchange, without a
   }
 });
 
+test("a password token typed into the password field opens password setup, and a provider-linked account can turn off its password", async () => {
+  const harness = await createCashflowTestHarness({ initializeUser: false });
+  const login = (email, password) => harness.request("/api/auth/internal/login", {
+    method: "POST",
+    skipUserHeader: true,
+    body: { email, password }
+  });
+  try {
+    await harness.api("/api/accounts", { method: "POST", body: { userId: "tok_admin", displayName: "Admin", email: "admin@example.com" } });
+    await harness.api("/api/account/password", { method: "POST", useSession: true, body: { newPassword: "admin correct horse staple" } });
+    await harness.api("/api/accounts", { method: "POST", body: { userId: "tok_user", displayName: "User", email: "user@example.com" } });
+    await harness.api("/api/session/select-account", { method: "POST", skipUserHeader: true, body: { accountId: "tok_admin" } });
+    await harness.api("/api/admin/auth/providers/google", { method: "PUT", useSession: true, body: { kind: "google", displayName: "Google", enabled: false } });
+    await harness.api("/api/admin/accounts/tok_user/provider-identities/google", {
+      method: "PUT",
+      useSession: true,
+      body: { subject: "google-user", email: "user@example.com", emailVerified: true }
+    });
+    const issued = await harness.api("/api/admin/accounts/tok_user/password-reset-token", {
+      method: "POST",
+      useSession: true,
+      body: { purpose: "password_setup" }
+    });
+    await harness.api("/api/admin/auth/draft", { method: "PUT", useSession: true, body: { draftMode: "internal" } });
+    await harness.api("/api/admin/auth/activate", { method: "POST", useSession: true, body: {} });
+
+    const asToken = await login("User@Example.com", issued.token);
+    assert.equal(asToken.response.status, 200);
+    assert.deepEqual(asToken.body, { passwordSetupRequired: true, purpose: "password_setup" });
+    assert.equal(asToken.response.headers.get("set-cookie"), null, "no session until a password is chosen");
+    assert.equal((await login("admin@example.com", issued.token)).response.status, 401, "the token only works with its own account's email");
+
+    const chosen = "user picked this passphrase";
+    assert.equal((await harness.request("/api/auth/internal/password", {
+      method: "POST",
+      skipUserHeader: true,
+      body: { token: issued.token, password: chosen }
+    })).response.status, 200);
+    assert.equal((await login("user@example.com", issued.token)).response.status, 401, "a used token no longer opens setup");
+
+    assert.equal((await login("admin@example.com", "admin correct horse staple")).response.status, 200);
+    const adminOff = await harness.request("/api/account/password", {
+      method: "DELETE",
+      useSession: true,
+      body: { currentPassword: "admin correct horse staple" }
+    });
+    assert.equal(adminOff.response.status, 409, "no linked provider, so the password stays");
+
+    assert.equal((await login("user@example.com", chosen)).response.status, 200);
+    const wrong = await harness.request("/api/account/password", { method: "DELETE", useSession: true, body: { currentPassword: "not it at all" } });
+    assert.equal(wrong.response.status, 400);
+    const off = await harness.request("/api/account/password", { method: "DELETE", useSession: true, body: { currentPassword: chosen } });
+    assert.equal(off.response.status, 200);
+    assert.equal(off.body.account.hasPasswordCredential, false);
+    assert.equal((await harness.request("/api/account", { useSession: true })).response.status, 200, "the current session stays");
+    assert.equal((await login("user@example.com", chosen)).response.status, 401, "password sign-in is off for this account");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("external authentication uses trusted proxy headers and explicit identity links", async () => {
   const oldSecret = process.env.CASHFLOW_TEST_EXTERNAL_SECRET;
   process.env.CASHFLOW_TEST_EXTERNAL_SECRET = "shared-external-secret";
@@ -3109,6 +3170,8 @@ test("internal authentication supports configured provider login, explicit linki
     assert.equal(provider.provider.enabled, true);
     assert.equal(provider.provider.secretConfigured, true);
     assert.equal(Object.hasOwn(provider.provider, "secret_ref"), false);
+    assert.equal(provider.provider.secretSource, "env");
+    assert.equal(provider.provider.secretLocation, "CASHFLOW_TEST_GOOGLE_SECRET");
 
     const linkedAdmin = await harness.api("/api/admin/accounts/provider_admin/provider-identities/google", {
       method: "PUT",
@@ -3146,6 +3209,7 @@ test("internal authentication supports configured provider login, explicit linki
       skipUserHeader: true
     });
     assert.equal(authConfig.response.status, 200);
+    assert.equal(JSON.stringify(authConfig.body).includes("CASHFLOW_TEST_GOOGLE_SECRET"), false, "public config hides where the secret lives");
     assert.ok(authConfig.body.auth.internal.providers.some(item =>
       item.id === "google" && item.displayName === "Google"
     ));
@@ -3711,3 +3775,56 @@ test("confirmed-only users are treated as already set up", async () => withHarne
   assert.equal(snapshot.settings.setup_completed, 1);
   assert.equal(snapshot.confirmedTransactions.length, 1);
 }));
+
+test("admins can store a provider secret from the UI; it lands in .env, works at once, and is never echoed or audited", async () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "cashflow-env-"));
+  const envFilePath = path.join(dir, ".env");
+  fs.writeFileSync(envFilePath, "PORT=3000\n");
+  const name = "CASHFLOW_ROUTE_TEST_CLIENT_SECRET";
+  const previous = process.env[name];
+  delete process.env[name];
+  const harness = await createCashflowTestHarness({ initializeUser: false, envFilePath });
+  try {
+    await harness.api("/api/accounts", { method: "POST", body: { userId: "store_admin", displayName: "Admin", email: "admin@example.com" } });
+    await harness.api("/api/admin/auth/providers/google", {
+      method: "PUT",
+      useSession: true,
+      body: { kind: "google", displayName: "Google", enabled: false, secretEnv: name }
+    });
+    const before = await harness.api("/api/admin/auth/providers", { useSession: true });
+    assert.equal(before.providers.find(provider => provider.id === "google").secretConfigured, false);
+
+    const storage = await harness.api("/api/admin/auth/secret-storage", { useSession: true });
+    assert.deepEqual(storage.targets, [{ kind: "dotenv", path: envFilePath, present: true, writable: true }]);
+
+    const rejected = await harness.request("/api/admin/auth/secrets", { method: "POST", useSession: true, body: { name: "CASHFLOW_DATABASE_URL", value: "postgres://evil" } });
+    assert.equal(rejected.response.status, 400);
+
+    const stored = await harness.api("/api/admin/auth/secrets", { method: "POST", useSession: true, body: { name, value: "route-secret-value" } });
+    assert.equal(stored.stored, true);
+    assert.equal(stored.target, "dotenv");
+    assert.equal(JSON.stringify(stored).includes("route-secret-value"), false, "the response never echoes the secret");
+    assert.match(fs.readFileSync(envFilePath, "utf8"), new RegExp(`^${name}='route-secret-value'$`, "m"));
+    const after = await harness.api("/api/admin/auth/providers", { useSession: true });
+    assert.equal(after.providers.find(provider => provider.id === "google").secretConfigured, true, "usable without a restart");
+
+    const db = new Database(path.join(harness.dataDir, "cashflow-global.sqlite"));
+    try {
+      const rows = db.prepare("SELECT outcome, details_json FROM security_audit_log WHERE action = 'admin_auth_secret_store'").all();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].outcome, "success");
+      assert.equal(rows[0].details_json.includes("route-secret-value"), false);
+    } finally {
+      db.close();
+    }
+
+    await harness.api("/api/accounts", { method: "POST", body: { userId: "store_member", displayName: "Member" } });
+    const member = await harness.request("/api/admin/auth/secrets", { method: "POST", useSession: true, body: { name, value: "x" } });
+    assert.equal(member.response.status, 403);
+  } finally {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+    await harness.cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
