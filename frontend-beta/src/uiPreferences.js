@@ -11,9 +11,20 @@ export const UI_DENSITY_OPTIONS = [
   { id: "compact", label: "Compact density" }
 ];
 
+export const UI_DEFAULT_TAB_OPTIONS = [
+  { id: "ledger", label: "Ledger" },
+  { id: "recurring", label: "Recurring" },
+  { id: "oneoff", label: "One-off" },
+  { id: "priorities", label: "Priorities" },
+  { id: "targets", label: "Targets" },
+  { id: "budget", label: "Budget" },
+  { id: "settings", label: "Settings" }
+];
+
 export const DEFAULT_UI_PREFERENCES = Object.freeze({
   theme: "system",
-  density: "comfortable"
+  density: "comfortable",
+  defaultTab: "ledger"
 });
 
 function preferenceKey(scope = "") {
@@ -41,10 +52,12 @@ export function currentPreferenceScope() {
 export function normalizeUiPreferences(input = {}) {
   const themeIds = optionIds(UI_THEME_OPTIONS);
   const densityIds = optionIds(UI_DENSITY_OPTIONS);
+  const tabIds = optionIds(UI_DEFAULT_TAB_OPTIONS);
 
   return {
     theme: themeIds.has(input.theme) ? input.theme : DEFAULT_UI_PREFERENCES.theme,
-    density: densityIds.has(input.density) ? input.density : DEFAULT_UI_PREFERENCES.density
+    density: densityIds.has(input.density) ? input.density : DEFAULT_UI_PREFERENCES.density,
+    defaultTab: tabIds.has(input.defaultTab) ? input.defaultTab : DEFAULT_UI_PREFERENCES.defaultTab
   };
 }
 

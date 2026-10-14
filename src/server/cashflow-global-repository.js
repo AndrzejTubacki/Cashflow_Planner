@@ -14,7 +14,7 @@ export function createSqliteGlobalRepository(db, {
   function getAccount(accountId) {
     const normalizedId = normalizeUserId(accountId);
     return db.prepare(`
-      SELECT id, email, display_name, status, created_at, updated_at,
+      SELECT id, email, display_name, avatar, status, created_at, updated_at,
         disabled_at, deleted_at
       FROM accounts
       WHERE id = ?
@@ -191,6 +191,14 @@ export function createSqliteGlobalRepository(db, {
               updated_at = datetime('now')
           WHERE id = ?
         `).run(email, normalizeUserId(id));
+      },
+      updateAvatar(id, avatar) {
+        db.prepare(`
+          UPDATE accounts
+          SET avatar = ?,
+              updated_at = datetime('now')
+          WHERE id = ?
+        `).run(avatar, normalizeUserId(id));
       },
       updateStatus(id, status) {
         db.prepare(`

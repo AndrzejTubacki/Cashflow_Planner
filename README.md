@@ -70,6 +70,10 @@ The settings that matter for most self-hosted installs:
 | `DATA_DIR` | `./data` | Where planning/ledger databases live (direct Node installs; Docker Compose uses a named volume instead) |
 | `LOGS_DIR` | `./logs` | Where log files are written |
 | `CASHFLOW_DB_BACKEND` | `sqlite` | `sqlite` (default, no other setup needed) or `postgres` (optional, see [Database Backend](#database-backend) below) |
+| `CASHFLOW_DB_AUTO_MIGRATE` | `true` | With Postgres, apply pending `scripts/migrations/postgres-v*.sql` files at startup. Set to `false` to require `npm run db:migrate` instead |
+| `CASHFLOW_DB_MIGRATION_BACKUP` | `true` | Before applying pending Postgres migrations, copy every Cashflow table into a timestamped schema in the same database. Set to `false` only after making your own backup |
+| `CASHFLOW_DB_MIGRATION_BACKUP_KEEP` | `3` | Number of recorded Postgres pre-migration backup schemas to retain after a successful migration; `0` removes all of them |
+| `CASHFLOW_DB_UPDATE_READINESS` | `ready` | Postgres update-needed mode reports `/readyz` as `ready` so its instructions remain reachable; set to `not_ready` to stop a rolling update at the first incompatible pod |
 | `CASHFLOW_JSON_LIMIT` | `10mb` | Max request body size, mainly for full JSON imports |
 | `CASHFLOW_LOG_TIMEZONE` | `Europe/Warsaw` | Timezone for server log timestamps (the app's own planning timezone is a Settings field, not an env var) |
 | `CASHFLOW_MIRROR_LOGS_TO_STDOUT` | `0` | Also mirror log lines to stdout/stderr, useful for container/process-manager log collection |
@@ -121,8 +125,16 @@ logs `cashflow_postgres_runtime_locks_disabled` to `error.log` when Postgres
 is configured without runtime locks. A single replica can still run in this
 configuration; enable the locks before scaling out.
 
-The v1.0.1 hardening changes require the operator-run additive
-[Postgres migration](scripts/migrations/postgres-v1.0.1.sql) before rollout.
+At startup, Postgres installations take a database advisory lock and apply
+pending migration files in version order. When a migration is pending, the
+default safety step first copies the current Cashflow tables into a timestamped
+`cashflow_premigration_*` schema in the same database. This is useful for a
+table-level rollback, but it is not an off-site or disaster-recovery backup.
+To migrate explicitly, or when
+`CASHFLOW_DB_AUTO_MIGRATE=false`, run `npm run db:migrate` with
+`CASHFLOW_DATABASE_URL` set. If migration fails, Cashflow keeps `/healthz`
+alive and serves an update-needed page plus 503 API responses until an operator
+updates the schema; it detects the fix without a restart.
 New Postgres backups store payloads in the shared database, and internal-login
 throttling is shared across replicas. Normal deployments use at most 20
 connections per replica; a distinct lock database adds 10. See

@@ -1,3 +1,4 @@
+import { formatParts, t } from "./i18n.js";
 export default function PlaceholderView({ label }) {
   return (
     <section className="beta-view">
@@ -5,10 +6,10 @@ export default function PlaceholderView({ label }) {
         <h1>{label}</h1>
       </div>
       <div className="beta-placeholder">
-        <strong>Not built in the beta yet</strong>
-        <p>
-          This section still lives on the legacy app. <a href="/">Switch to legacy</a> to use it.
-        </p>
+        <strong>{t("Not built in the beta yet")}</strong>
+        <p>{formatParts("This section still lives on the legacy app. {link} to use it.", {
+          link: <a href="/">{t("Switch to legacy")}</a>
+        })}</p>
       </div>
     </section>
   );

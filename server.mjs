@@ -14,6 +14,13 @@ import {
   createCashflowRuntimeLockService
 } from "./src/server/cashflow-runtime-lock-service.js";
 import { configureTrustProxy } from "./src/server/cashflow-trust-proxy.js";
+import { runPostgresMigrations } from "./src/server/cashflow-postgres-migrations.js";
+import {
+  createDatabaseUpdateMiddleware,
+  databaseUpdateReadinessResponse,
+  redactDatabaseError,
+  resolveDatabaseUpdateReadiness
+} from "./src/server/cashflow-database-update-mode.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +37,7 @@ const jsonLimit = process.env.CASHFLOW_JSON_LIMIT || "10mb";
 const mirrorLogsToStdout = enabledByEnv(process.env.CASHFLOW_MIRROR_LOGS_TO_STDOUT);
 const readyzCheckDefaultBudget = enabledByEnv(process.env.CASHFLOW_READYZ_CHECK_DEFAULT_BUDGET);
 const databaseConfig = resolveCashflowDbConfig(process.env);
+const databaseAutoMigrate = String(process.env.CASHFLOW_DB_AUTO_MIGRATE || "").trim().toLowerCase() !== "false";
 const publicDir = path.join(__dirname, "public");
 const publicBetaDir = path.join(__dirname, "public-beta");
 const localeDir = path.join(publicDir, "app", "cashflow", "locales");
@@ -193,39 +201,84 @@ try {
 }
 
 let cashflow;
-try {
-  cashflow = await createCashflowModule({
-    appVersion,
-    dataDir,
-    envFilePath: path.join(__dirname, ".env"),
-    databaseConfig,
-    localeDir,
-    getCurrentFxSnapshot: () => null,
-    getFxSnapshotForDate: null,
-    runtimeLockFactory: ({ globalStore }) => createCashflowRuntimeLockService({
-      env: process.env, globalStore, logError, logServerEvent
-    }),
+let backgroundInterval = null;
+let cashflowInitPromise = null;
+const cashflowRouter = express.Router();
+const databaseUpdateState = {
+  error: null,
+  pending: [],
+  required: false
+};
+const databaseUpdateReadiness = resolveDatabaseUpdateReadiness(
+  process.env.CASHFLOW_DB_UPDATE_READINESS,
+  { logError }
+);
+const migrationsDir = path.join(__dirname, "scripts", "migrations");
+
+async function checkPostgresSchema({ autoMigrate = false } = {}) {
+  if (databaseConfig.backend !== "postgres") return { current: true, pending: [] };
+  return await runPostgresMigrations({
+    databaseUrl: String(process.env.CASHFLOW_DATABASE_URL || "").trim(),
+    migrationsDir,
+    autoMigrate,
     logError,
-    logServerEvent,
-    appendApiLogLine
+    logServerEvent
   });
-} catch (error) {
-  logError("cashflow_module_init_failed", {
-    backend: databaseConfig.backend,
-    databaseUrlConfigured: databaseConfig.databaseUrlConfigured,
-    error: error.message
-  });
-  throw error;
 }
 
-// Authentication throttling shares the global pool in Postgres mode and fails
-// closed on storage errors. SQLite retains the single-process memory store.
-app.use("/api/auth/internal", createInternalAuthLimiter({
-  rateLimit, globalStore: cashflow.globalStore, logError
-}));
+async function initializeCashflow() {
+  if (cashflow) return cashflow;
+  if (cashflowInitPromise) return await cashflowInitPromise;
+  cashflowInitPromise = (async () => {
+    const module = await createCashflowModule({
+      appVersion,
+      dataDir,
+      envFilePath: path.join(__dirname, ".env"),
+      databaseConfig,
+      localeDir,
+      getCurrentFxSnapshot: () => null,
+      getFxSnapshotForDate: null,
+      runtimeLockFactory: ({ globalStore }) => createCashflowRuntimeLockService({
+        env: process.env, globalStore, logError, logServerEvent
+      }),
+      logError,
+      logServerEvent,
+      appendApiLogLine
+    });
+    cashflowRouter.use("/api/auth/internal", createInternalAuthLimiter({
+      rateLimit, globalStore: module.globalStore, logError
+    }));
+    module.registerRoutes(cashflowRouter);
+    cashflow = module;
+    backgroundInterval = module.startBackgroundJobs();
+    return module;
+  })();
+  try {
+    return await cashflowInitPromise;
+  } finally {
+    cashflowInitPromise = null;
+  }
+}
 
-// Register every /api route supplied by the domain module.
-cashflow.registerRoutes(app);
+try {
+  const migration = await checkPostgresSchema({ autoMigrate: databaseAutoMigrate });
+  databaseUpdateState.required = !migration.current;
+  databaseUpdateState.pending = migration.pending;
+  if (databaseUpdateState.required) {
+    databaseUpdateState.error = new Error(`Postgres schema is not current (global ${migration.schema?.globalVersion ?? "missing"}, planning ${migration.schema?.planningVersion ?? "missing"}, ledger ${migration.schema?.ledgerVersion ?? "missing"})`);
+  } else {
+    await initializeCashflow();
+  }
+} catch (error) {
+  if (databaseConfig.backend !== "postgres") {
+    logError("cashflow_module_init_failed", { backend: databaseConfig.backend, error: error.message });
+    throw error;
+  }
+  databaseUpdateState.required = true;
+  databaseUpdateState.pending = error.pendingMigrations || [];
+  databaseUpdateState.error = error;
+  logError("cashflow_postgres_migration_failed", { error: redactDatabaseError(error), pending: databaseUpdateState.pending });
+}
 
 app.get("/healthz", (req, res) => {
   // Minimal liveness endpoint for Docker/reverse-proxy health checks.
@@ -243,6 +296,11 @@ function checkDataDirWritable() {
 
 app.get("/readyz", async (req, res) => {
   // Cheap readiness check for any process manager; this is intentionally not a full data integrity scan.
+  if (databaseUpdateState.required) {
+    const readiness = databaseUpdateReadinessResponse(databaseUpdateReadiness, databaseUpdateState.pending);
+    res.status(readiness.status).json(readiness.body);
+    return;
+  }
   const checks = [];
 
   async function runCheck(name, fn) {
@@ -282,6 +340,33 @@ app.get("/readyz", async (req, res) => {
     checks
   });
 });
+
+async function recheckDatabaseUpdate() {
+  if (!databaseUpdateState.required) return true;
+  try {
+    const result = await checkPostgresSchema({ autoMigrate: false });
+    databaseUpdateState.pending = result.pending;
+    if (!result.current) return false;
+    await initializeCashflow();
+    databaseUpdateState.required = false;
+    databaseUpdateState.error = null;
+    logServerEvent("cashflow_postgres_migration_recovered");
+    return true;
+  } catch (error) {
+    databaseUpdateState.error = error;
+    databaseUpdateState.pending = error.pendingMigrations || databaseUpdateState.pending;
+    return false;
+  }
+}
+
+const databaseUpdateRecheckInterval = setInterval(() => {
+  void recheckDatabaseUpdate();
+}, 30_000);
+databaseUpdateRecheckInterval.unref?.();
+
+app.use(createDatabaseUpdateMiddleware({ state: databaseUpdateState, recheck: recheckDatabaseUpdate }));
+
+app.use(cashflowRouter);
 
 app.get("/api/system", (req, res) => {
   // Process diagnostics used by smoke checks, UI status, and local operations.
@@ -327,9 +412,6 @@ app.use((req, res, next) => {
 
   res.sendFile(path.join(publicDir, "index.html"));
 });
-
-// Start scheduled projection, FX, notification, and backup jobs.
-const backgroundInterval = cashflow.startBackgroundJobs();
 
 try {
   // Optional operator-owned routes live in ignored local/dev.mjs and remain outside published APIs.
@@ -378,7 +460,8 @@ async function shutdown(signal) {
   runtime.restartInProgress = true;
 
   logServerEvent("server_shutdown_requested", { signal });
-  clearInterval(backgroundInterval);
+  clearInterval(databaseUpdateRecheckInterval);
+  if (backgroundInterval) clearInterval(backgroundInterval);
 
   const forceExitTimer = setTimeout(() => {
     logError("server_shutdown_timeout", { signal });
@@ -387,8 +470,8 @@ async function shutdown(signal) {
   forceExitTimer.unref?.();
 
   try {
-    await Promise.all([closeServer(), cashflow.stopBackgroundJobs()]);
-    await cashflow.close();
+    await Promise.all([closeServer(), cashflow?.stopBackgroundJobs?.()]);
+    await cashflow?.close?.();
     clearTimeout(forceExitTimer);
     logServerEvent("server_shutdown_complete", { signal });
     process.exit(0);

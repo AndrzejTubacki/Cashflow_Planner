@@ -8,10 +8,13 @@ import {
   SUPPORTED_FX_CURRENCIES,
   TIMEZONE_OPTIONS
 } from "./constants.js";
+import { describeFullImportPreview } from "./importPreview.js";
+import { availableLocales, formatMessage, t } from "./i18n.js";
+import { manualRateForCurrency, observedFxCurrencies, parseProjectionFxRates, selectedManualRates } from "./parity.js";
 
 function ManualFxRates({ currencies, rates, ledgerCurrency, onChange }) {
   if (!currencies.length) {
-    return <p className="beta-hint">Select at least one used currency to enter manual rates.</p>;
+    return <p className="beta-hint">{t("Select at least one used currency to enter manual rates.")}</p>;
   }
   return (
     <div className="beta-form-grid">
@@ -19,11 +22,12 @@ function ManualFxRates({ currencies, rates, ledgerCurrency, onChange }) {
         <label className="beta-field" key={currency}>
           <span>{currency} / {ledgerCurrency}</span>
           <input
-            type="number"
+            type="text"
+            inputMode="decimal"
             min="0.000001"
             step="0.000001"
             placeholder="1.000000"
-            value={rates[currency] ?? ""}
+            value={manualRateForCurrency(rates, currency, ledgerCurrency)}
             onChange={e => onChange(currency, e.target.value)}
           />
         </label>
@@ -47,31 +51,16 @@ function DataPortabilityPanel({ onRefresh }) {
     try {
       await fn();
     } catch (err) {
-      setError(err.message || "Something went wrong");
+      setError(err.message || t("Something went wrong"));
     } finally {
       setBusy("");
     }
   }
 
-  function describePreview(preview) {
-    const lines = [];
-    if (preview?.rowCounts) {
-      lines.push("Rows: " + Object.entries(preview.rowCounts).map(([k, v]) => `${k}=${v}`).join(", "));
-    }
-    if (preview?.settingsChanges?.length) {
-      lines.push(`Settings changes: ${preview.settingsChanges.length}`);
-    }
-    if (preview?.mergeConflicts?.length) {
-      lines.push(`Merge conflicts: ${preview.mergeConflicts.length}`);
-    }
-    lines.push("Proceed with this import?");
-    return lines.join("\n");
-  }
-
   return (
     <div className="beta-panel">
-      <h3>Data portability</h3>
-      {error ? <div className="beta-error">{error}</div> : null}
+      <h3>{t("Data portability")}</h3>
+      {error ? <div className="beta-error beta-dismissible">{error}<button type="button" onClick={() => setError("")} aria-label={t("Dismiss error")}>&times;</button></div> : null}
 
       <div className="beta-form-actions beta-form-actions-start">
         <button
@@ -82,50 +71,44 @@ function DataPortabilityPanel({ onRefresh }) {
             includeOperational ? "/api/export/full?includeOperationalSettings=1" : "/api/export/full",
             "cashflow-full-export.json"
           ))}
-        >
-          Download full export
-        </button>
+        >{t("Download full export")}</button>
         <button
           type="button"
           className="beta-btn-small"
           disabled={busy === "csv"}
           onClick={() => withBusy("csv", () => downloadFile("/api/export/confirmed-ledger.csv", "cashflow-confirmed-ledger.csv"))}
-        >
-          Download confirmed ledger CSV
-        </button>
+        >{t("Download confirmed ledger CSV")}</button>
         <button
           type="button"
           className="beta-btn-small"
           disabled={busy === "sample"}
           onClick={() => withBusy("sample", () => downloadFile("/api/export/sample", "cashflow-sample-dataset.json"))}
-        >
-          Download sample dataset
-        </button>
+        >{t("Download sample dataset")}</button>
       </div>
 
       <label className="beta-field beta-field-checkbox">
         <input type="checkbox" checked={includeOperational} onChange={e => setIncludeOperational(e.target.checked)} />
-        <span>Include operational settings in full export</span>
+        <span>{t("Include operational settings in full export")}</span>
       </label>
 
       <div className="beta-form-grid">
         <label className="beta-field">
-          <span>Full import file</span>
+          <span>{t("Full import file")}</span>
           <input type="file" accept="application/json,.json" ref={fullImportRef} />
         </label>
 
         <label className="beta-field">
-          <span>Full import mode</span>
+          <span>{t("Full import mode")}</span>
           <select value={importMode} onChange={e => setImportMode(e.target.value)}>
-            <option value="replace">Replace after backup</option>
-            <option value="merge">Merge</option>
+            <option value="replace">{t("Replace after backup")}</option>
+            <option value="merge">{t("Merge")}</option>
           </select>
         </label>
       </div>
 
       <label className="beta-field beta-field-checkbox">
         <input type="checkbox" checked={importOperational} onChange={e => setImportOperational(e.target.checked)} />
-        <span>Include operational settings during full import</span>
+        <span>{t("Include operational settings during full import")}</span>
       </label>
 
       <div className="beta-form-actions beta-form-actions-start">
@@ -135,24 +118,24 @@ function DataPortabilityPanel({ onRefresh }) {
           disabled={busy === "import"}
           onClick={() => withBusy("import", async () => {
             const file = fullImportRef.current?.files?.[0];
-            if (!file) throw new Error("Choose a full export file first.");
+            if (!file) throw new Error(t("Choose a full export file first."));
             const text = await file.text();
             const exportData = JSON.parse(text);
             const requestBody = { mode: importMode, export: exportData, includeOperationalSettings: importOperational };
             const preview = await apiFetch("/api/import/full/preview", { method: "POST", body: requestBody });
-            if (!window.confirm(describePreview(preview))) return;
+            if (!window.confirm(describeFullImportPreview(preview))) return;
             await apiFetch("/api/import/full", { method: "POST", body: requestBody });
             await onRefresh();
           })}
         >
-          {busy === "import" ? "Importing..." : "Import full export"}
+          {busy === "import" ? t("Importing...") : t("Import full export")}
         </button>
       </div>
 
       <label className="beta-field">
-        <span>One-off CSV file</span>
+        <span>{t("One-off CSV file")}</span>
         <input type="file" accept="text/csv,.csv" ref={csvImportRef} />
-        <small className="beta-hint">CSV columns: name,type,amount,currency,date</small>
+        <small className="beta-hint">{t("CSV columns: name,type,amount,currency,date")}</small>
       </label>
 
       <div className="beta-form-actions beta-form-actions-start">
@@ -162,42 +145,49 @@ function DataPortabilityPanel({ onRefresh }) {
           disabled={busy === "csv-import"}
           onClick={() => withBusy("csv-import", async () => {
             const file = csvImportRef.current?.files?.[0];
-            if (!file) throw new Error("Choose a one-off CSV file first.");
-            const mode = window.confirm("Replace unconfirmed one-off transactions before importing? Cancel appends instead.")
+            if (!file) throw new Error(t("Choose a one-off CSV file first."));
+            const mode = window.confirm(t("Replace unconfirmed one-off transactions before importing? Cancel appends instead."))
               ? "replace"
               : "append";
             const csv = await file.text();
             await apiFetch("/api/import/one-offs-csv", { method: "POST", body: { mode, csv } });
             await onRefresh();
           })}
-        >
-          Import one-off CSV
-        </button>
+        >{t("Import one-off CSV")}</button>
         <button
           type="button"
           className="beta-btn-small"
           disabled={busy === "load-sample"}
           onClick={() => {
-            if (!window.confirm("Load sample dataset? Current data will be replaced after a safety backup.")) return;
+            if (!window.confirm(t("Load sample dataset? Current data will be replaced after a safety backup."))) return;
             withBusy("load-sample", async () => {
               await apiFetch("/api/import/sample", { method: "POST" });
               await onRefresh();
             });
           }}
-        >
-          Load sample dataset
-        </button>
+        >{t("Load sample dataset")}</button>
       </div>
     </div>
   );
 }
 
-export default function SettingsView({ snapshot, onRefresh }) {
+function describeValidation(result) {
+  const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+  if (!warnings.length) return t("Validation passed. No warnings found.");
+  const lines = [warnings.length === 1 ? t("Validation found 1 warning:") : formatMessage("Validation found {count} warnings:", { count: warnings.length })];
+  warnings.slice(0, 8).forEach(warning => lines.push(`• ${warning?.message || warning?.type || t("Validation warning")}`));
+  if (warnings.length > 8) lines.push(formatMessage("There are {count} additional warnings.", { count: warnings.length - 8 }));
+  return lines.join("\n");
+}
+
+export default function SettingsView({ snapshot, onRefresh, validationResult = null, onValidation = () => {}, onDismissValidation = () => {}, embedded = false }) {
   const settings = snapshot?.settings || {};
   const canMaintain = (snapshot?.session?.capabilities || []).includes("budget:maintain");
+  const canValidate = (snapshot?.session?.capabilities || []).includes("budget:validate");
   const ledgerCurrencyInitial = String(settings.ledger_currency || "PLN").toUpperCase();
 
   const [ledgerCurrency, setLedgerCurrency] = useState(ledgerCurrencyInitial);
+  const [locale, setLocale] = useState(settings.locale || "en");
   const [timezone, setTimezone] = useState(settings.timezone || "Europe/Warsaw");
   const [holidayCountry, setHolidayCountry] = useState(String(settings.holiday_country || "PL").toUpperCase());
   const [fxBufferPercent, setFxBufferPercent] = useState(settings.fx_buffer_percent ?? 0);
@@ -207,7 +197,8 @@ export default function SettingsView({ snapshot, onRefresh }) {
       const parsed = typeof settings.fx_used_currencies === "string"
         ? JSON.parse(settings.fx_used_currencies)
         : settings.fx_used_currencies;
-      return Array.isArray(parsed) ? parsed.filter(c => c !== ledgerCurrencyInitial) : [];
+      const stored = Array.isArray(parsed) ? parsed.filter(c => c !== ledgerCurrencyInitial) : [];
+      return stored.length ? stored : observedFxCurrencies(snapshot, ledgerCurrencyInitial);
     } catch {
       return [];
     }
@@ -248,6 +239,7 @@ export default function SettingsView({ snapshot, onRefresh }) {
   const [error, setError] = useState("");
   const [fxRefreshing, setFxRefreshing] = useState(false);
   const [compacting, setCompacting] = useState(false);
+  const [maintenanceBusy, setMaintenanceBusy] = useState("");
 
   const availableCurrencies = SUPPORTED_FX_CURRENCIES.filter(c => c !== ledgerCurrency && !fxCurrencies.includes(c));
   const fxAvailableRef = useRef(null);
@@ -263,7 +255,12 @@ export default function SettingsView({ snapshot, onRefresh }) {
   }
 
   function setManualRate(currency, value) {
-    setManualRates(prev => ({ ...prev, [currency]: value }));
+    setManualRates(prev => {
+      const next = { ...prev, [currency]: value };
+      delete next[`${currency}/${ledgerCurrency}`];
+      delete next[`${currency.toLowerCase()}/${ledgerCurrency.toLowerCase()}`];
+      return next;
+    });
   }
 
   async function handleSave(event) {
@@ -272,15 +269,12 @@ export default function SettingsView({ snapshot, onRefresh }) {
     setMessage("");
     setError("");
     try {
-      const manualRatesPayload = Object.fromEntries(
-        Object.entries(manualRates)
-          .map(([currency, value]) => [currency, Number(value)])
-          .filter(([, value]) => Number.isFinite(value) && value > 0)
-      );
+      const manualRatesPayload = selectedManualRates(manualRates, fxCurrencies, ledgerCurrency);
 
       await apiFetch("/api/settings", {
         method: "PUT",
         body: {
+          locale,
           ledger_currency: ledgerCurrency,
           timezone,
           holiday_country: holidayCountry,
@@ -303,10 +297,10 @@ export default function SettingsView({ snapshot, onRefresh }) {
           ...Object.fromEntries(NOTIFICATION_TYPES.map(n => [`ntfy_priority_${n.key}`, notifyPriorities[n.key]]))
         }
       });
-      setMessage("Settings saved.");
+      setMessage(t("Settings saved."));
       await onRefresh();
     } catch (err) {
-      setError(err.message || "Failed to save settings");
+      setError(err.message || t("Failed to save settings"));
     } finally {
       setSaving(false);
     }
@@ -319,49 +313,93 @@ export default function SettingsView({ snapshot, onRefresh }) {
       await apiFetch("/api/fx/refresh", { method: "POST" });
       await onRefresh();
     } catch (err) {
-      setError(err.message || "Failed to refresh FX rates");
+      setError(err.message || t("Failed to refresh FX rates"));
     } finally {
       setFxRefreshing(false);
     }
   }
 
   async function handleCompact() {
-    if (!window.confirm("Compact old confirmed ledger rows? A safety backup will be created first.")) return;
+    if (!window.confirm(t("Compact old confirmed ledger rows? A safety backup will be created first."))) return;
     setCompacting(true);
     setError("");
     try {
       await apiFetch("/api/ledger/compact-history", { method: "POST", body: { months: Number(compactionMonths) || 0 } });
       await onRefresh();
     } catch (err) {
-      setError(err.message || "Failed to compact ledger history");
+      setError(err.message || t("Failed to compact ledger history"));
     } finally {
       setCompacting(false);
     }
   }
 
   const fxProviderNote = FX_PROVIDER_OPTIONS.find(p => p.id === fxProvider)?.note || "";
+  const projectionFxRates = parseProjectionFxRates(snapshot, ledgerCurrency);
+  const visibleProjectionFxRates = projectionFxRates.filter(({ pair }) => {
+    const [from, to] = pair.split("/");
+    return from !== to;
+  });
+
+  async function handleValidate() {
+    setMaintenanceBusy("validate");
+    try {
+      onValidation({ kind: "success", message: describeValidation(await apiFetch("/api/validate", { method: "POST" })) });
+    } catch (err) {
+      onValidation({ kind: "error", message: err.message || t("Validation failed") });
+    } finally {
+      setMaintenanceBusy("");
+    }
+  }
+
+  async function handleRegenerate() {
+    setMaintenanceBusy("regenerate");
+    try {
+      await apiFetch("/api/run-jobs", { method: "POST" });
+      await onRefresh();
+      onValidation({ kind: "success", message: t("Projections regenerated.") });
+    } catch (err) {
+      onValidation({ kind: "error", message: err.message || t("Failed to regenerate projections") });
+    } finally {
+      setMaintenanceBusy("");
+    }
+  }
 
   return (
     <section className="beta-view">
-      <div className="beta-view-head">
-        <h1>Settings</h1>
-        <p>Preferences for this budget.</p>
-      </div>
-
-      <p className="beta-hint">
-        Looking for Theme or Density? They moved to the account menu in the top-right corner.
-      </p>
+      {!embedded ? <div className="beta-view-head">
+        <h1>{t("Settings")}</h1>
+        <p>{t("Preferences for this budget.")}</p>
+      </div> : null}
 
       {message ? <div className="beta-success">{message}</div> : null}
-      {error ? <div className="beta-error">{error}</div> : null}
+      {error ? <div className="beta-error beta-dismissible">{error}<button type="button" onClick={() => setError("")} aria-label={t("Dismiss error")}>&times;</button></div> : null}
+      {canValidate || canMaintain ? (
+        <div className="beta-panel beta-settings-maintenance">
+          <h3>{t("Budget maintenance")}</h3>
+          <p className="beta-hint">{t("Check the budget for data problems or rebuild its future projections.")}</p>
+          <div className="beta-form-actions beta-form-actions-start">
+            {canValidate ? <button type="button" className="beta-btn-small" disabled={Boolean(maintenanceBusy)} onClick={handleValidate}>{maintenanceBusy === "validate" ? t("Validating...") : t("Validate data")}</button> : null}
+            {canMaintain ? <button type="button" className="beta-btn-small" disabled={Boolean(maintenanceBusy)} onClick={handleRegenerate}>{maintenanceBusy === "regenerate" ? t("Regenerating...") : t("Regenerate projections")}</button> : null}
+          </div>
+          {validationResult ? <div className={`beta-validation-panel ${validationResult.kind === "error" ? "beta-error" : "beta-success"}`}><pre>{validationResult.message}</pre><button type="button" className="beta-btn-small" onClick={onDismissValidation}>{t("Dismiss")}</button></div> : null}
+        </div>
+      ) : null}
 
       <form className="beta-panel" onSubmit={handleSave}>
         <details className="beta-details" open>
-          <summary>Currency &amp; Exchange</summary>
+          <summary>{t("Currency & Exchange")}</summary>
           <div className="beta-settings-section">
-            <div className="beta-form-grid">
+            <div className="beta-form-grid beta-form-grid-wide beta-form-grid-three">
               <label className="beta-field">
-                <span>Ledger currency</span>
+                <span>{t("Language")}</span>
+                <select value={locale} onChange={e => setLocale(e.target.value)}>
+                  {availableLocales().map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+                </select>
+                <small className="beta-hint">{t("Ledger currency is used for balances, summaries, and projections. Changing it creates a pending conversion row.")}</small>
+                <small className="beta-hint">{t("Language controls labels and formatting in the app.")}</small>
+              </label>
+              <label className="beta-field">
+                <span>{t("Ledger currency")}</span>
                 <select value={ledgerCurrency} onChange={e => {
                   const newLedger = e.target.value;
                   setLedgerCurrency(newLedger);
@@ -380,34 +418,37 @@ export default function SettingsView({ snapshot, onRefresh }) {
                 </select>
               </label>
               <label className="beta-field">
-                <span>Timezone</span>
+                <span>{t("Timezone")}</span>
                 <input type="text" value={timezone} onChange={e => setTimezone(e.target.value)} list="beta-timezones" />
                 <datalist id="beta-timezones">
                   {TIMEZONE_OPTIONS.map(tz => <option key={tz} value={tz} />)}
                 </datalist>
+                <small className="beta-hint">{t("Dates and daily jobs use this timezone, including the budget’s definition of today.")}</small>
               </label>
               <label className="beta-field">
-                <span>Default holiday country</span>
+                <span>{t("Default holiday country")}</span>
                 <select value={holidayCountry} onChange={e => setHolidayCountry(e.target.value)}>
-                  {HOLIDAY_COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.code} - {c.label}</option>)}
+                  {HOLIDAY_COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.code} - {t(c.label)}</option>)}
                 </select>
+                <small className="beta-hint">{t("Holiday calendars are used when recurring dates move to a business day.")}</small>
               </label>
               <label className="beta-field">
-                <span>FX buffer (%)</span>
+                <span>{t("FX buffer (%)")}</span>
                 <input type="number" min="0" max="100" step="0.5" value={fxBufferPercent} onChange={e => setFxBufferPercent(e.target.value)} />
+                <small className="beta-hint">{t("The FX buffer adds a safety margin only when a transaction currency differs from the ledger currency.")}</small>
               </label>
               <label className="beta-field">
-                <span>FX provider</span>
+                <span>{t("FX provider")}</span>
                 <select value={fxProvider} onChange={e => setFxProvider(e.target.value)}>
-                  {FX_PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                  {FX_PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{t(p.label)}</option>)}
                 </select>
-                <small className="beta-hint">{fxProviderNote}</small>
+                <small className="beta-hint">{t(fxProviderNote)}</small>
               </label>
             </div>
 
             <div className="beta-fx-currency-picker">
               <div>
-                <span className="beta-fx-picker-label">Available currencies</span>
+                <span className="beta-fx-picker-label">{t("Available currencies")}</span>
                 <select multiple size="8" className="beta-fx-picker-select" ref={fxAvailableRef}>
                   {availableCurrencies.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
@@ -421,7 +462,7 @@ export default function SettingsView({ snapshot, onRefresh }) {
                 </button>
               </div>
               <div>
-                <span className="beta-fx-picker-label">Used currencies</span>
+                <span className="beta-fx-picker-label">{t("Used currencies")}</span>
                 <select multiple size="8" className="beta-fx-picker-select" ref={fxSelectedRef}>
                   {fxCurrencies.map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
@@ -430,10 +471,17 @@ export default function SettingsView({ snapshot, onRefresh }) {
 
             <ManualFxRates currencies={fxCurrencies} rates={manualRates} ledgerCurrency={ledgerCurrency} onChange={setManualRate} />
 
+            {visibleProjectionFxRates.length ? (
+              <div className="beta-fx-rates-used">
+                <span className="beta-fx-picker-label">{t("Rates used by the latest projection")}</span>
+                <div>{visibleProjectionFxRates.map(({ pair, rate }) => <span key={pair} className="beta-pill beta-pill-muted">{pair} {rate.toFixed(4)}</span>)}</div>
+              </div>
+            ) : <p className="beta-hint">{t("The latest projection did not use any exchange rates.")}</p>}
+
             {canMaintain ? (
               <div className="beta-form-actions beta-form-actions-start">
                 <button type="button" className="beta-btn-small" disabled={fxRefreshing} onClick={handleRefreshFx}>
-                  {fxRefreshing ? "Refreshing..." : "Refresh FX rates"}
+                  {fxRefreshing ? t("Refreshing...") : t("Refresh FX rates")}
                 </button>
               </div>
             ) : null}
@@ -441,40 +489,43 @@ export default function SettingsView({ snapshot, onRefresh }) {
         </details>
 
         <details className="beta-details">
-          <summary>Budget period</summary>
+          <summary>{t("Budget period")}</summary>
           <div className="beta-settings-section">
-            <div className="beta-form-grid">
+            <div className="beta-form-grid beta-form-grid-wide beta-form-grid-three">
               <label className="beta-field">
-                <span>Budget period income</span>
+                <span>{t("Budget period income")}</span>
                 <select value={budgetPeriodIncomeId} onChange={e => setBudgetPeriodIncomeId(e.target.value)}>
-                  <option value="">Calendar month</option>
+                  <option value="">{t("Calendar month")}</option>
                   {(snapshot?.recurringIncomes || []).map(r => (
-                    <option key={r.id} value={r.id}>{r.name}{r.active ? "" : " (Inactive)"}</option>
+                    <option key={r.id} value={r.id}>{r.active ? r.name : `${r.name} (${t("Inactive")})`}</option>
                   ))}
                 </select>
+                <small className="beta-hint">{t("A selected income defines each budget period; otherwise periods follow calendar months.")}</small>
               </label>
               <label className="beta-field">
-                <span>Periods to generate</span>
+                <span>{t("Periods to generate")}</span>
                 <input type="number" min="1" max="60" value={futurePeriods} onChange={e => setFuturePeriods(e.target.value)} />
+                <small className="beta-hint">{t("This controls how many future budget periods Cashflow projects.")}</small>
               </label>
               <label className="beta-field beta-field-checkbox">
                 <input type="checkbox" checked={minReserveEnabled} onChange={e => setMinReserveEnabled(e.target.checked)} />
-                <span>Protect minimum reserve</span>
+                <span>{t("Protect minimum reserve")}</span>
+                <small className="beta-hint">{t("Reserve protection keeps this amount available before funding optional items.")}</small>
               </label>
               <label className="beta-field">
-                <span>Minimum reserve</span>
+                <span>{t("Minimum reserve")}</span>
                 <input type="number" step="0.01" value={minReserveAmount} onChange={e => setMinReserveAmount(e.target.value)} />
               </label>
               <label className="beta-field">
-                <span>Ledger history compaction (months)</span>
+                <span>{t("Ledger history compaction (months)")}</span>
                 <input type="number" min="0" max="600" value={compactionMonths} onChange={e => setCompactionMonths(e.target.value)} />
-                <small className="beta-hint">Use 0 to keep detailed ledger history forever.</small>
+                <small className="beta-hint">{t("Use 0 to keep detailed ledger history forever.")}</small>
               </label>
             </div>
             {canMaintain ? (
               <div className="beta-form-actions beta-form-actions-start">
                 <button type="button" className="beta-btn-small" disabled={compacting} onClick={handleCompact}>
-                  {compacting ? "Compacting..." : "Compact ledger history now"}
+                  {compacting ? t("Compacting...") : t("Compact ledger history now")}
                 </button>
               </div>
             ) : null}
@@ -482,40 +533,40 @@ export default function SettingsView({ snapshot, onRefresh }) {
         </details>
 
         <details className="beta-details">
-          <summary>Notifications</summary>
+          <summary>{t("Notifications")}</summary>
           <div className="beta-settings-section">
-            <p className="beta-hint">Cashflow checks the ledger and sends queued notifications at the same profile-local time.</p>
-            <div className="beta-form-grid">
+            <p className="beta-hint">{t("Cashflow checks the ledger and sends queued notifications at the same profile-local time.")}</p>
+            <div className="beta-form-grid beta-form-grid-wide beta-form-grid-three">
               <label className="beta-field">
-                <span>Notification service</span>
+                <span>{t("Notification service")}</span>
                 <select value={notificationChannel} onChange={e => setNotificationChannel(e.target.value)}>
-                  <option value="ntfy">ntfy</option>
-                  <option value="discord">Discord</option>
+                  <option value="ntfy">{t("ntfy")}</option>
+                  <option value="discord">{t("Discord")}</option>
                 </select>
               </label>
               <label className="beta-field">
-                <span>Full ntfy URL</span>
+                <span>{t("Full ntfy URL")}</span>
                 <input type="url" value={ntfyUrl} onChange={e => setNtfyUrl(e.target.value)} placeholder="https://ntfy.example.com/topic" />
               </label>
               <label className="beta-field">
-                <span>ntfy access token</span>
+                <span>{t("ntfy access token")}</span>
                 <div style={{ display: "flex", gap: "0.25rem" }}>
                   <input type={showNtfyToken ? "text" : "password"} autoComplete="off" value={ntfyAuthToken} onChange={e => setNtfyAuthToken(e.target.value)} placeholder="tk_..." style={{ flex: 1 }} />
-                  <button type="button" className="beta-btn" onClick={() => setShowNtfyToken(s => !s)} title="Toggle reveal">
-                    {showNtfyToken ? "Hide" : "Show"}
+                  <button type="button" className="beta-btn" onClick={() => setShowNtfyToken(s => !s)} title={t("Toggle reveal")}>
+                    {showNtfyToken ? t("Hide") : t("Show")}
                   </button>
                 </div>
               </label>
               <label className="beta-field">
-                <span>Discord webhook URL</span>
+                <span>{t("Discord webhook URL")}</span>
                 <input type="url" value={discordWebhookUrl} onChange={e => setDiscordWebhookUrl(e.target.value)} placeholder="https://discord.com/api/webhooks/..." />
               </label>
               <label className="beta-field">
-                <span>Ledger check and notification time</span>
+                <span>{t("Ledger check and notification time")}</span>
                 <input type="time" value={deliveryTime} onChange={e => setDeliveryTime(e.target.value)} />
               </label>
               <label className="beta-field">
-                <span>Repeat necessary-underfunded every X days</span>
+                <span>{t("Repeat necessary-underfunded every X days")}</span>
                 <input type="number" min="1" value={repeatDays} onChange={e => setRepeatDays(e.target.value)} />
               </label>
             </div>
@@ -529,15 +580,15 @@ export default function SettingsView({ snapshot, onRefresh }) {
                       checked={notifyToggles[n.key]}
                       onChange={e => setNotifyToggles(prev => ({ ...prev, [n.key]: e.target.checked }))}
                     />
-                    <span>{n.label}</span>
+                    <span>{t(n.label)}</span>
                   </label>
                   <label className="beta-field beta-field-inline">
-                    <span>ntfy priority</span>
+                    <span>{t("ntfy priority")}</span>
                     <select
                       value={notifyPriorities[n.key]}
                       onChange={e => setNotifyPriorities(prev => ({ ...prev, [n.key]: e.target.value }))}
                     >
-                      {NOTIFICATION_PRIORITY_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+                      {NOTIFICATION_PRIORITY_OPTIONS.map(p => <option key={p} value={p}>{t(p)}</option>)}
                     </select>
                   </label>
                 </div>
@@ -548,7 +599,7 @@ export default function SettingsView({ snapshot, onRefresh }) {
 
         <div className="beta-form-actions">
           <button type="submit" className="beta-btn-primary" disabled={saving}>
-            {saving ? "Saving..." : "Save"}
+            {saving ? t("Saving...") : t("Save")}
           </button>
         </div>
       </form>

@@ -12,6 +12,8 @@ import {
 loadDotenv({ quiet: true });
 
 const CASHFLOW_POSTGRES_SCHEMA_TABLES = [
+  "cashflow_schema_migrations",
+  "cashflow_schema_backups",
   "cashflow_backup_artifacts",
   "cashflow_budget_schema_version",
   "cashflow_global_schema_version",
@@ -61,6 +63,12 @@ export async function resetPostgresCashflowObjects(client) {
 
   await client.query("BEGIN");
   try {
+    const backupSchemas = await client.query(`SELECT nspname
+      FROM pg_namespace
+      WHERE nspname LIKE 'cashflow_premigration\\_%' ESCAPE '\\'`);
+    for (const row of backupSchemas.rows) {
+      await client.query(`DROP SCHEMA ${quoteIdentifier(row.nspname)} CASCADE`);
+    }
     if (tables) {
       await client.query(`DROP TABLE IF EXISTS ${tables} CASCADE`);
     }

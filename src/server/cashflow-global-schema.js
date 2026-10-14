@@ -1,4 +1,4 @@
-export const GLOBAL_SCHEMA_VERSION = 5;
+export const GLOBAL_SCHEMA_VERSION = 6;
 export const LEGACY_ADMIN_ACCOUNT_ID = "legacy-admin";
 export const GLOBAL_TABLE_NAMES = [
   "users",
@@ -51,6 +51,7 @@ const GLOBAL_SCHEMA_SQL = `
     id TEXT PRIMARY KEY,
     email TEXT UNIQUE COLLATE NOCASE,
     display_name TEXT NOT NULL,
+    avatar TEXT,
     status TEXT NOT NULL DEFAULT 'active'
       CHECK (status IN ('active', 'disabled', 'deleted')),
     created_at TEXT NOT NULL,
@@ -335,6 +336,13 @@ function addGlobalOptionsCompatibilityColumns(db) {
   }
 }
 
+function addAccountAvatarCompatibilityColumn(db) {
+  const columns = tableColumns(db, "accounts");
+  if (!columns.includes("avatar")) {
+    db.exec("ALTER TABLE accounts ADD COLUMN avatar TEXT");
+  }
+}
+
 export function ensureLegacyAdminAccount(db) {
   const existing = db.prepare("SELECT id FROM accounts WHERE id = ?").get(LEGACY_ADMIN_ACCOUNT_ID);
   db.prepare(`
@@ -439,6 +447,12 @@ export function applyGlobalMigrations(db, {
       beforeStep(5, db);
       db.exec(GLOBAL_SCHEMA_SQL);
       db.pragma("user_version = 5");
+    }
+    if (currentVersion < 6) {
+      beforeStep(6, db);
+      addAccountAvatarCompatibilityColumn(db);
+      db.exec(GLOBAL_SCHEMA_SQL);
+      db.pragma("user_version = 6");
     }
   })();
 }

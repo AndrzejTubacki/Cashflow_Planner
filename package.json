@@ -1,6 +1,6 @@
 {
   "name": "cashflow",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "type": "module",
   "private": true,
   "scripts": {
@@ -26,6 +26,7 @@
     "db:migrate:postgres-to-sqlite": "node scripts/migrate-postgres-to-sqlite.mjs",
     "db:sqlite:verify": "node scripts/verify-sqlite-migration.mjs",
     "db:postgres:schema": "node scripts/print-postgres-schema.mjs",
+    "db:migrate": "node scripts/migrate-postgres-schema.mjs",
     "docs:screenshots": "node scripts/generate-readme-screenshots.mjs",
     "operator:grant-admin": "node scripts/operator-admin.mjs",
     "beta:install": "npm --prefix frontend-beta install",

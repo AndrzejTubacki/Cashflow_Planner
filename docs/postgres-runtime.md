@@ -13,8 +13,8 @@ CASHFLOW_RUNTIME_LOCK_BACKEND=postgres
 ```
 
 Provision and initialize the database before starting the app. The app does not
-create databases, manage the Postgres server, or migrate its application schema
-at startup. For a fresh database, generate the complete global and budget DDL
+create databases or manage the Postgres server. For a fresh database, generate
+the complete global and budget DDL
 and apply it with `psql`:
 
 ```sh
@@ -27,12 +27,102 @@ does not connect to Postgres or apply anything itself. Treat database URLs as
 secrets. SQLite files must never be shared between multiple app replicas, even
 if Postgres runtime locks are enabled.
 
-For v1.0.1, apply the additive, repeatable
-[`postgres-v1.0.1.sql`](../scripts/migrations/postgres-v1.0.1.sql) migration before
-rolling out the new code. It adds shared backup artifacts and auth rate-limit
-windows plus the income-anchor column for recurring expenses without replacing
-financial or account rows. This is an operator action; starting a replica does
-not apply it. Existing backup metadata remains valid.
+For an existing installation, startup checks both the global schema version and
+the budget planning/ledger versions. It takes a fixed Postgres advisory lock,
+checks again after acquiring it, and applies pending `postgres-v*.sql` files in
+version order. Applied file names and SHA-256 checksums are recorded in
+`cashflow_schema_migrations`. A database previously updated by hand is detected
+from its schema and remains supported. Existing backup metadata remains valid.
+
+Set `CASHFLOW_DB_AUTO_MIGRATE=false` to keep schema changes operator-controlled.
+In that mode, or after an automatic migration fails, run this where Cashflow
+runs with `CASHFLOW_DATABASE_URL` pointing to a role allowed to alter its tables:
+
+```sh
+npm run db:migrate
+```
+
+When at least one migration is pending, both startup migration and
+`npm run db:migrate` default to creating a same-database safety copy first.
+While holding the migration advisory lock, Cashflow discovers every base table
+in the active application schema (`current_schema()`), including global,
+budget, ledger, artifact, and schema-version tables, and copies their rows into
+a schema named like
+`cashflow_premigration_g5_p6_l6_20261014t080910123z`. The operation and its
+`cashflow_schema_backups` registry record are transactional. The registry stores
+the source and target versions, creation time, table count, and per-table row
+counts. `npm run db:migrate` prints the created schema name.
+
+The database role needs `CREATE` on the database in addition to its normal
+rights on the application schema and tables. If the copy fails, no migration is
+applied. Cashflow enters update-needed mode and tells the operator to make a
+backup, then run:
+
+```sh
+CASHFLOW_DB_MIGRATION_BACKUP=false npm run db:migrate
+```
+
+Only use that override after making and verifying another backup.
+`CASHFLOW_DB_MIGRATION_BACKUP=false` disables the safety copy;
+`CASHFLOW_DB_MIGRATION_BACKUP_KEEP=3` controls how many recorded schemas remain
+after a successful migration. Invalid values are logged and use their defaults.
+Retention drops only schemas recorded in `cashflow_schema_backups`; set the keep
+count to `0` if none should remain.
+
+These schemas live in the same database as the source. They protect against a
+bad schema migration, but not database loss, storage corruption, compromised
+credentials, or an operator dropping the database. Continue taking verified,
+off-site whole-database backups.
+
+To inspect or recover one table, substitute the recorded schema name. A safe
+first step is to copy it into a separately named recovery table, compare it with
+the live table, and then merge the required rows with explicit column lists.
+Replacing a live table is safest while the app is stopped and only when the
+layouts are compatible; dependent tables may require a coordinated restore:
+
+```sql
+SELECT * FROM cashflow_premigration_g5_p6_l6_20261014t080910123z.accounts;
+
+BEGIN;
+CREATE TABLE public.accounts_recovery AS TABLE
+  cashflow_premigration_g5_p6_l6_20261014t080910123z.accounts;
+COMMIT;
+```
+
+To remove a retained copy manually, drop its schema and registry row together
+(automatic retention normally does this):
+
+```sql
+BEGIN;
+DROP SCHEMA cashflow_premigration_g5_p6_l6_20261014t080910123z CASCADE;
+DELETE FROM public.cashflow_schema_backups
+WHERE schema_name = 'cashflow_premigration_g5_p6_l6_20261014t080910123z';
+COMMIT;
+```
+
+The update-needed page also prints per-file `psql` commands and generic
+`docker exec`/`kubectl exec` alternatives. It contains no configured database
+URL. Cashflow rechecks every 30 seconds and on the next browser page request,
+then resumes normal service without a restart when the schema is current.
+
+`CASHFLOW_DB_UPDATE_READINESS=ready` is the default. `/readyz` returns 200 with
+`databaseUpdateRequired: true`, keeping the notice reachable behind Kubernetes.
+During a rolling update, however, Kubernetes then replaces working old pods
+even when every new pod lacks migration permission; the whole app shows the
+notice until `npm run db:migrate` succeeds.
+
+With `CASHFLOW_DB_UPDATE_READINESS=not_ready`, `/readyz` returns 503 while the
+pod still serves the notice directly. A rolling update stops after the first new
+pod, old pods continue serving, and Kubernetes marks the rollout failed after
+its progress deadline. Once the schema is current, the new pod becomes ready
+and the rollout resumes automatically. With no old pod (a fresh install or a
+Recreate strategy), users normally see the proxy's generic unavailable page
+instead of Cashflow's notice. Unknown setting values are logged and use `ready`.
+
+For the first rolling upgrade, remember that the first new pod able to migrate
+changes the shared database before old pods terminate. Migration files are
+additive and must remain compatible with those old pods for the duration of the
+rollout. Back up the whole database first and monitor both old and new replicas.
 
 ## Replica coordination and connections
 

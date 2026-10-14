@@ -43,10 +43,20 @@ test("account self-service edits profile and password on Postgres with lockout a
         id: "pg_self",
         displayName: "Self",
         email: "",
+        avatar: null,
         hasPasswordCredential: false,
         authMode: "none",
         identities: []
       });
+
+      await globalStore.transaction(async repo => {
+        await repo.accounts.updateAvatar("pg_self", "fox");
+        assert.equal((await repo.accounts.get("pg_self")).avatar, "fox");
+        await repo.accounts.updateAvatar("pg_self", null);
+      });
+      const avatarAccount = await service.updateOwnAccount("pg_self", { avatar: "owl" });
+      assert.equal(avatarAccount.avatar, "owl");
+      assert.equal((await pool.query("SELECT avatar FROM accounts WHERE id = $1::text", ["pg_self"])).rows[0].avatar, "owl");
 
       await assert.rejects(service.changeOwnPassword("pg_self", "keep", { newPassword: "correct horse battery staple" }),
         error => error.status === 409);

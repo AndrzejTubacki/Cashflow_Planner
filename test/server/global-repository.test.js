@@ -126,6 +126,9 @@ test("SQLite global repository exposes account and session state without leaking
 
     const account = repo.accounts.require("alice");
     assert.equal(account.email, "alice@example.com");
+    assert.equal(account.avatar, null);
+    repo.accounts.updateAvatar("alice", "cat");
+    assert.equal(repo.accounts.get("alice").avatar, "cat");
     assert.equal(repo.accounts.listActive().some(row => row.id === "alice"), true);
     assert.equal(repo.memberships.countForAccount("alice"), 1);
     assert.equal(repo.memberships.countOwnedForAccount("alice"), 1);

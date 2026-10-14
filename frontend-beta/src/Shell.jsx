@@ -1,3 +1,4 @@
+import { formatMessage, t } from "./i18n.js";
 import { NAV_SECTIONS as DEFAULT_NAV_SECTIONS } from "./NAV_SECTIONS.js";
 
 function NavIcon({ id }) {
@@ -18,15 +19,19 @@ function NavIcon({ id }) {
   );
 }
 
-export default function Shell({ activeSection, onSelectSection, budgetLabel, ledgerCurrency, sections, children }) {
+export default function Shell({ activeSection, onSelectSection, budgetLabel, ledgerCurrency, sections, installedVersion, updateNotice, children }) {
   const navSections = sections || DEFAULT_NAV_SECTIONS;
   return (
     <div className="beta-shell">
       <aside className="beta-rail">
         <div className="beta-wordmark">
-          <span className="beta-mark">&#8353;</span>
-          Cashflow
-          <span className="beta-badge">BETA</span>
+          <span className="beta-mark">&#8353;</span>{t("Cashflow")}<span className="beta-badge">{t("BETA")}</span>
+        </div>
+        <div className="beta-rail-version">
+          {installedVersion ? <span>{formatMessage("Version {version}", { version: installedVersion })}</span> : null}
+          {updateNotice ? <a href={updateNotice.url || "https://github.com/AndrzejTubacki/Cashflow_Planner/releases"} target="_blank" rel="noreferrer">
+            {formatMessage("Update available: {version}", { version: `v${updateNotice.latest}` })}
+          </a> : null}
         </div>
         <nav className="beta-sections">
           {navSections.map(section => (
@@ -35,20 +40,19 @@ export default function Shell({ activeSection, onSelectSection, budgetLabel, led
               type="button"
               className={`beta-section-btn${activeSection === section.id ? " active" : ""}`}
               onClick={() => onSelectSection(section.id)}
-              aria-label={section.label}
+              aria-label={t(section.label)}
               aria-current={activeSection === section.id ? "page" : undefined}
-              title={section.label}
+              title={t(section.label)}
             >
               <NavIcon id={section.id} />
-              <span>{section.label}</span>
-              {!section.ready ? <span className="beta-soon">soon</span> : null}
+              <span>{t(section.label)}</span>
+              {!section.ready ? <span className="beta-soon">{t("Soon")}</span> : null}
             </button>
           ))}
         </nav>
         <div className="beta-rail-footer">
           {budgetLabel}
-          <br />
-          Ledger currency: {ledgerCurrency}
+          <br />{t("Ledger currency:")} {ledgerCurrency}
         </div>
       </aside>
       <div className="beta-main">{children}</div>

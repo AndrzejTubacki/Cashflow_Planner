@@ -56,7 +56,7 @@ export function createPostgresGlobalRepository(client, {
   async function getAccount(accountId) {
     const normalizedId = normalizeUserId(accountId);
     return await one(`
-      SELECT id, email, display_name, status, created_at, updated_at,
+      SELECT id, email, display_name, avatar, status, created_at, updated_at,
         disabled_at, deleted_at
       FROM accounts
       WHERE id = $1
@@ -253,6 +253,14 @@ export function createPostgresGlobalRepository(client, {
               updated_at = $3
           WHERE id = $1
         `, [normalizeUserId(id), email, nowIso(now)]);
+      },
+      async updateAvatar(id, avatar) {
+        await run(`
+          UPDATE accounts
+          SET avatar = $2::text,
+              updated_at = $3::timestamptz
+          WHERE id = $1::text
+        `, [normalizeUserId(id), avatar, nowIso(now)]);
       },
       async updateStatus(id, status) {
         const timestamp = nowIso(now);

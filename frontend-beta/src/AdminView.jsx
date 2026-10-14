@@ -10,6 +10,7 @@ import {
   SUPPORTED_FX_CURRENCIES,
   TIMEZONE_OPTIONS
 } from "./constants.js";
+import { availableLocales, formatMessage, t } from "./i18n.js";
 
 function isSystemAdmin(account) {
   return Array.isArray(account?.globalRoles) && account.globalRoles.includes("system_admin");
@@ -17,13 +18,13 @@ function isSystemAdmin(account) {
 
 function AccountSessions({ account, busy, onRevoke }) {
   const sessions = Array.isArray(account?.sessions) ? account.sessions : [];
-  if (!sessions.length) return <small className="beta-hint">No active sessions</small>;
+  if (!sessions.length) return <small className="beta-hint">{t("No active sessions")}</small>;
   return (
     <div className="beta-budget-list">
       {sessions.map(session => (
         <div className="beta-budget-row" key={session.id}>
           <div className="beta-budget-row-main">
-            <strong>{session.auth_method || "none"}</strong>
+            <strong>{t(session.auth_method || "none")}</strong>
             <span className="beta-budget-meta">{session.id} &middot; {session.last_seen_at || session.created_at || ""}</span>
           </div>
           <div className="beta-budget-row-actions">
@@ -32,9 +33,7 @@ function AccountSessions({ account, busy, onRevoke }) {
               className="beta-btn-small beta-btn-danger"
               disabled={busy}
               onClick={() => onRevoke(account.id, session.id)}
-            >
-              Revoke session
-            </button>
+            >{t("Revoke session")}</button>
           </div>
         </div>
       ))}
@@ -59,7 +58,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
     try {
       await fn();
     } catch (err) {
-      setError(err.message || "Something went wrong");
+      setError(err.message || t("Something went wrong"));
     } finally {
       setBusy(false);
     }
@@ -90,7 +89,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
   }
 
   async function setStatus(status) {
-    if (status === "disabled" && !window.confirm("Disable this account?")) return;
+    if (status === "disabled" && !window.confirm(t("Disable this account?"))) return;
     await withBusy(async () => {
       await apiFetch(`/api/admin/accounts/${encodeURIComponent(account.id)}`, { method: "PUT", body: { status } });
       await onChanged();
@@ -98,7 +97,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
   }
 
   async function setSystemAdmin(enabled) {
-    if (!enabled && !window.confirm("Revoke system admin from this account?")) return;
+    if (!enabled && !window.confirm(t("Revoke system admin from this account?"))) return;
     await withBusy(async () => {
       await apiFetch(`/api/admin/accounts/${encodeURIComponent(account.id)}/system-admin`, { method: "PUT", body: { enabled } });
       await onChanged();
@@ -106,7 +105,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
   }
 
   async function revokeSession(accountId, sessionId) {
-    if (!window.confirm("Revoke this session?")) return;
+    if (!window.confirm(t("Revoke this session?"))) return;
     await withBusy(async () => {
       await apiFetch(`/api/admin/accounts/${encodeURIComponent(accountId)}/sessions/${encodeURIComponent(sessionId)}/revoke`, { method: "POST", body: {} });
       await onChanged();
@@ -114,7 +113,7 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
   }
 
   async function deleteAccount() {
-    if (!window.confirm("Delete this account?")) return;
+    if (!window.confirm(t("Delete this account?"))) return;
     await withBusy(async () => {
       await apiFetch(`/api/admin/accounts/${encodeURIComponent(account.id)}`, { method: "DELETE" });
       await onChanged();
@@ -130,13 +129,15 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
           <span className="beta-budget-meta">{account.id}</span>
         </div>
         <div className="beta-admin-account-badges">
-          <span className="beta-pill beta-pill-muted">{account.status || "active"}</span>
+          <span className="beta-pill beta-pill-muted">{t(account.status || "active")}</span>
           <span className={`beta-pill ${admin ? "beta-pill-accent" : "beta-pill-muted"}`}>
-            {admin ? "System admin" : "Budget member"}
+            {admin ? t("System admin") : t("Budget member")}
           </span>
           <span className="beta-admin-account-budgets-count">
-            {account.ownedBudgetCount ?? 0} / {account.membershipCount ?? 0} budgets
-          </span>
+            {formatMessage("Budgets: {owned} owned / {total} memberships", {
+              owned: account.ownedBudgetCount ?? 0,
+              total: account.membershipCount ?? 0
+            })}</span>
         </div>
       </button>
 
@@ -144,31 +145,31 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
         <div className="beta-admin-account-body">
           {error ? <div className="beta-error">{error}</div> : null}
 
-          <div className="beta-form-grid">
+          <div className="beta-form-grid beta-form-grid-wide beta-form-grid-three beta-admin-account-grid">
         <label className="beta-field">
-          <span>Display name</span>
+          <span>{t("Display name")}</span>
           <input value={name} disabled={deleted} onChange={e => setName(e.target.value)} />
         </label>
         <label className="beta-field">
-          <span>Email</span>
+          <span>{t("Email")}</span>
           <input value={email} disabled={deleted} onChange={e => setEmail(e.target.value)} />
         </label>
         <label className="beta-field">
-          <span>External subject</span>
+          <span>{t("External subject")}</span>
           <input value={externalSubject} disabled={deleted} onChange={e => setExternalSubject(e.target.value)} />
-          <small className="beta-hint">{externalIdentity?.provider_id || "No external identity"}</small>
+          <small className="beta-hint">{externalIdentity?.provider_id || t("No external identity")}</small>
         </label>
-        <div className="beta-field">
-          <span>Internal password</span>
-          <strong>{account.hasPasswordCredential ? "Configured" : "Not configured"}</strong>
+        <div className="beta-field beta-admin-account-sessions">
+          <span>{t("Internal password")}</span>
+          <strong>{account.hasPasswordCredential ? t("Configured") : t("Not configured")}</strong>
         </div>
         <div className="beta-field">
-          <span>Budgets</span>
+          <span>{t("Budgets")}</span>
           <strong>{account.ownedBudgetCount ?? 0} / {account.membershipCount ?? 0}</strong>
-          <small className="beta-hint">Owned / memberships</small>
+          <small className="beta-hint">{t("Owned / memberships")}</small>
         </div>
         <div className="beta-field">
-          <span>Active sessions</span>
+          <span>{t("Active sessions")}</span>
           <AccountSessions account={account} busy={busy} onRevoke={revokeSession} />
         </div>
       </div>
@@ -185,28 +186,24 @@ function AdminAccountCard({ account, expanded, onToggle, onChanged, internalLogi
 
       {!deleted ? (
         <div className="beta-row-actions beta-row-actions-wrap">
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={saveAccount}>Save account</button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={saveAccount}>{t("Save account")}</button>
           {!account.hasPasswordCredential ? (
-            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => createPasswordToken("password_setup")}>
-              Create password setup token
-            </button>
+            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => createPasswordToken("password_setup")}>{t("Create password setup token")}</button>
           ) : (
-            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => createPasswordToken("password_reset")}>
-              Create password reset token
-            </button>
+            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => createPasswordToken("password_reset")}>{t("Create password reset token")}</button>
           )}
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={linkExternalIdentity}>Link external identity</button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={linkExternalIdentity}>{t("Link external identity")}</button>
           {account.status === "active" ? (
-            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setStatus("disabled")}>Disable account</button>
+            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setStatus("disabled")}>{t("Disable account")}</button>
           ) : (
-            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setStatus("active")}>Enable account</button>
+            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setStatus("active")}>{t("Enable account")}</button>
           )}
           {admin ? (
-            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setSystemAdmin(false)}>Revoke admin</button>
+            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setSystemAdmin(false)}>{t("Revoke admin")}</button>
           ) : (
-            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setSystemAdmin(true)}>Grant admin</button>
+            <button type="button" className="beta-btn-small" disabled={busy} onClick={() => setSystemAdmin(true)}>{t("Grant admin")}</button>
           )}
-          <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={deleteAccount}>Delete account</button>
+          <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={deleteAccount}>{t("Delete account")}</button>
         </div>
       ) : null}
         </div>
@@ -236,21 +233,17 @@ function AdminAccountsPanel({ accounts, onChanged, internalLoginActive, currentA
 
   return (
     <div className="beta-panel">
-      <h3>Account management</h3>
-      <p className="beta-hint">
-        Manage who can sign in, who can administer Cashflow, and which active sessions can be revoked.
-        Budget access is still controlled by budget membership. Click an account to see and edit its
-        details.
-      </p>
+      <h3>{t("Account management")}</h3>
+      <p className="beta-hint">{t("Manage who can sign in, who can administer Cashflow, and which active sessions can be revoked. Budget access is still controlled by budget membership. Click an account to see and edit its details.")}</p>
 
       {accounts.length > 8 ? (
         <label className="beta-field">
-          <span>Search accounts</span>
+          <span>{t("Search accounts")}</span>
           <input
             type="text"
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Name, id, or email"
+            placeholder={t("Name, id, or email")}
           />
         </label>
       ) : null}
@@ -258,7 +251,7 @@ function AdminAccountsPanel({ accounts, onChanged, internalLoginActive, currentA
       {accounts.length ? (
         <>
           {normalizedQuery ? (
-            <p className="beta-hint">{filtered.length} of {accounts.length} accounts</p>
+            <p className="beta-hint">{formatMessage("Showing {visible} of {total} accounts", { visible: filtered.length, total: accounts.length })}</p>
           ) : null}
           {filtered.length ? (
             <div className="beta-admin-account-list">
@@ -274,9 +267,9 @@ function AdminAccountsPanel({ accounts, onChanged, internalLoginActive, currentA
                 />
               ))}
             </div>
-          ) : <p className="beta-empty">No accounts match &ldquo;{query}&rdquo;.</p>}
+          ) : <p className="beta-empty">{formatMessage("No accounts match “{query}”.", { query })}</p>}
         </>
-      ) : <p className="beta-empty">No accounts yet.</p>}
+      ) : <p className="beta-empty">{t("No accounts yet.")}</p>}
     </div>
   );
 }
@@ -350,7 +343,7 @@ function AdminAuthPanel({ authConfig, onChanged }) {
       setTestResult(null);
       await onChanged();
     } catch (err) {
-      setError(err.message || "Failed to save auth draft");
+      setError(err.message || t("Failed to save auth draft"));
     } finally {
       setBusy(false);
     }
@@ -362,21 +355,21 @@ function AdminAuthPanel({ authConfig, onChanged }) {
     try {
       setTestResult(await apiFetch("/api/admin/auth/test", { method: "POST" }));
     } catch (err) {
-      setError(err.message || "Auth draft test failed");
+      setError(err.message || t("Auth draft test failed"));
     } finally {
       setBusy(false);
     }
   }
 
   async function handleActivate() {
-    if (!window.confirm("Activate this authentication draft for the whole instance?")) return;
+    if (!window.confirm(t("Activate this authentication draft for the whole instance?"))) return;
     setBusy(true);
     setError("");
     try {
       await apiFetch("/api/admin/auth/activate", { method: "POST" });
       await onChanged();
     } catch (err) {
-      setError(err.message || "Failed to activate auth draft");
+      setError(err.message || t("Failed to activate auth draft"));
     } finally {
       setBusy(false);
     }
@@ -384,45 +377,42 @@ function AdminAuthPanel({ authConfig, onChanged }) {
 
   return (
     <div className="beta-panel">
-      <h3>Authentication</h3>
+      <h3>{t("Authentication")}</h3>
       {error ? <div className="beta-error">{error}</div> : null}
       <form className="beta-settings-section" onSubmit={handleSave}>
         <div className="beta-field">
-          <span>Active authentication mode</span>
-          <strong>{AUTH_MODE_OPTIONS.find(o => o.value === String(config.activeMode || "none"))?.label || "None"}</strong>
-          <small className="beta-hint">The active mode is changed only by activating a tested draft.</small>
+          <span>{t("Active authentication mode")}</span>
+          <strong>{t(AUTH_MODE_OPTIONS.find(o => o.value === String(config.activeMode || "none"))?.label || "None")}</strong>
+          <small className="beta-hint">{t("The active mode is changed only by activating a tested draft.")}</small>
         </div>
 
         <div className="beta-form-grid">
           <label className="beta-field">
-            <span>Draft authentication mode</span>
+            <span>{t("Draft authentication mode")}</span>
             <select value={draftMode} onChange={e => { setDraftMode(e.target.value); setTestResult(null); }}>
-              {AUTH_MODE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+              {AUTH_MODE_OPTIONS.map(o => <option key={o.value} value={o.value}>{t(o.label)}</option>)}
             </select>
           </label>
           <label className="beta-field">
-            <span>Session idle timeout (minutes)</span>
+            <span>{t("Session idle timeout (minutes)")}</span>
             <input type="number" min="5" max="10080" value={sessionIdleMinutes} onChange={e => setSessionIdleMinutes(e.target.value)} />
           </label>
           <label className="beta-field">
-            <span>Session absolute timeout (minutes)</span>
+            <span>{t("Session absolute timeout (minutes)")}</span>
             <input type="number" min="5" max="43200" value={sessionAbsoluteMinutes} onChange={e => setSessionAbsoluteMinutes(e.target.value)} />
           </label>
         </div>
 
         {draftMode === "none" ? (
-          <p className="beta-hint">
-            No sign-in: anyone who can reach Cashflow can pick any account. Only use this behind a VPN or a reverse
-            proxy that already restricts access.
-          </p>
+          <p className="beta-hint">{t("No sign-in: anyone who can reach Cashflow can pick any account. Only use this behind a VPN or a reverse proxy that already restricts access.")}</p>
         ) : null}
 
         {draftMode === "external" ? (
           <fieldset className="beta-admin-fieldset beta-fieldset-stack">
-            <legend>Reverse-proxy SSO (the proxy signs people in before they reach Cashflow)</legend>
+            <legend>{t("Reverse-proxy SSO (the proxy signs people in before they reach Cashflow)")}</legend>
             <div className="beta-settings-section">
-              <span className="beta-setup-step">Which proxy signs people in?</span>
-              <div className="beta-setup-choices" role="radiogroup" aria-label="Sign-in proxy">
+              <span className="beta-setup-step">{t("Which proxy signs people in?")}</span>
+              <div className="beta-setup-choices" role="radiogroup" aria-label={t("Sign-in proxy")}>
                 {Object.entries(PROXY_GUIDES).map(([id, guide]) => (
                   <button
                     key={id}
@@ -443,55 +433,55 @@ function AdminAuthPanel({ authConfig, onChanged }) {
                 <ProxyGuide presetId={proxyPreset} secretHeader={assertionSecretHeader} secretEnv={assertionSecretEnv} />
                 <div className="beta-form-grid beta-form-grid-wide">
                   <label className="beta-field">
-                    <span>User ID header</span>
+                    <span>{t("User ID header")}</span>
                     <input value={subjectHeader} required onChange={e => setSubjectHeader(e.target.value)} />
-                    <small className="beta-hint">A stable ID the proxy sends for the signed-in person.</small>
+                    <small className="beta-hint">{t("A stable ID the proxy sends for the signed-in person.")}</small>
                   </label>
                   <label className="beta-field">
-                    <span>Email header</span>
+                    <span>{t("Email header")}</span>
                     <input value={emailHeader} onChange={e => setEmailHeader(e.target.value)} />
                   </label>
                   <label className="beta-field">
-                    <span>Display name header</span>
+                    <span>{t("Display name header")}</span>
                     <input value={displayNameHeader} onChange={e => setDisplayNameHeader(e.target.value)} />
                   </label>
                   <label className="beta-field">
-                    <span>Groups header</span>
+                    <span>{t("Groups header")}</span>
                     <input value={groupsHeader} onChange={e => setGroupsHeader(e.target.value)} />
-                    <small className="beta-hint">Comma- or semicolon-separated group names.</small>
+                    <small className="beta-hint">{t("Comma- or semicolon-separated group names.")}</small>
                   </label>
                   <label className="beta-field">
-                    <span>Assertion secret header</span>
+                    <span>{t("Assertion secret header")}</span>
                     <input value={assertionSecretHeader} required onChange={e => setAssertionSecretHeader(e.target.value)} />
                   </label>
                   <label className="beta-field">
-                    <span>Assertion secret environment variable</span>
+                    <span>{t("Assertion secret environment variable")}</span>
                     <input value={assertionSecretEnv} required onChange={e => setAssertionSecretEnv(e.target.value)} />
-                    <small className="beta-hint">The name of the variable on the Cashflow server, not the secret.</small>
+                    <small className="beta-hint">{t("The name of the variable on the Cashflow server, not the secret.")}</small>
                   </label>
                   <label className="beta-field">
-                    <span>Unknown people</span>
+                    <span>{t("Unknown people")}</span>
                     <select value={provisioningMode} onChange={e => setProvisioningMode(e.target.value)}>
-                      {AUTH_PROVISIONING_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                      {AUTH_PROVISIONING_OPTIONS.map(o => <option key={o.value} value={o.value}>{t(o.label)}</option>)}
                     </select>
-                    <small className="beta-hint">Keep &ldquo;Deny unknown identities&rdquo; until linking works for your accounts.</small>
+                    <small className="beta-hint">{t("Keep “Deny unknown identities” until linking works for your accounts.")}</small>
                   </label>
                   <label className="beta-field">
-                    <span>Allowed email domains</span>
+                    <span>{t("Allowed email domains")}</span>
                     <input value={allowedDomains} onChange={e => setAllowedDomains(e.target.value)} placeholder="example.com, example.org" />
                   </label>
                   <label className="beta-field">
-                    <span>Admin groups</span>
+                    <span>{t("Admin groups")}</span>
                     <input value={adminGroups} onChange={e => setAdminGroups(e.target.value)} placeholder="admins, ops" />
-                    <small className="beta-hint">Members of these groups become administrators.</small>
+                    <small className="beta-hint">{t("Members of these groups become administrators.")}</small>
                   </label>
                 </div>
                 <details className="beta-details">
-                  <summary>Advanced</summary>
+                  <summary>{t("Advanced")}</summary>
                   <label className="beta-field">
-                    <span>Trusted issuer label</span>
+                    <span>{t("Trusted issuer label")}</span>
                     <input value={trustedIssuer} onChange={e => setTrustedIssuer(e.target.value)} placeholder="external" />
-                    <small className="beta-hint">Groups the linked identities under one name. Changing it later unlinks everyone.</small>
+                    <small className="beta-hint">{t("Groups the linked identities under one name. Changing it later unlinks everyone.")}</small>
                   </label>
                 </details>
               </>
@@ -501,23 +491,19 @@ function AdminAuthPanel({ authConfig, onChanged }) {
 
         {draftMode === "internal" ? (
           <fieldset className="beta-admin-fieldset beta-fieldset-stack">
-            <legend>Cashflow sign-in</legend>
-            <p className="beta-hint">
-              The sign-in page offers email and password plus a button for each enabled sign-in provider (set up under
-              Sign-in providers below). Each person uses whichever they prefer: they can link providers and turn their own
-              password off under Account settings.
-            </p>
+            <legend>{t("Cashflow sign-in")}</legend>
+            <p className="beta-hint">{t("The sign-in page offers email and password plus a button for each enabled sign-in provider (set up under Sign-in providers below). Each person uses whichever they prefer: they can link providers and turn their own password off under Account settings.")}</p>
             <label className="beta-field beta-field-checkbox">
               <input type="checkbox" checked={allowPasswordLogin} onChange={e => setAllowPasswordLogin(e.target.checked)} />
-              <span>Allow email and password sign-in</span>
+              <span>{t("Allow email and password sign-in")}</span>
             </label>
-            <p className="beta-hint">Before activating, set your own email and password under Account settings in the account menu.</p>
+            <p className="beta-hint">{t("Before activating, set your own email and password under Account settings in the account menu.")}</p>
           </fieldset>
         ) : null}
 
         {testResult ? (
           <div className={testResult.ok ? "beta-success" : "beta-error"} role="status">
-            <strong>{testResult.ok ? "This draft can be activated." : "This draft can't be activated yet:"}</strong>
+            <strong>{testResult.ok ? t("This draft can be activated.") : t("This draft can't be activated yet:")}</strong>
             <ul className="beta-check-list">
               {(testResult.checks || []).map(check => (
                 <li key={check.code}>{check.ok ? "✓" : "✗"} {check.message}</li>
@@ -527,17 +513,18 @@ function AdminAuthPanel({ authConfig, onChanged }) {
         ) : null}
 
         <div className="beta-form-actions beta-form-actions-start">
-          <button type="submit" className="beta-btn-primary" disabled={busy}>Save auth draft</button>
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={handleTest}>Test auth draft</button>
-          <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={handleActivate}>Activate auth draft</button>
+          <button type="submit" className="beta-btn-primary" disabled={busy}>{t("Save auth draft")}</button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={handleTest}>{t("Test auth draft")}</button>
+          <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={handleActivate}>{t("Activate auth draft")}</button>
         </div>
-        <small className="beta-hint">Save the draft, test it, then activate. Activating a different mode signs everyone out.</small>
+        <small className="beta-hint">{t("Save the draft, test it, then activate. Activating a different mode signs everyone out.")}</small>
       </form>
     </div>
   );
 }
 
 function AdminOptionsPanel({ options, onChanged }) {
+  const [locale, setLocale] = useState(options.locale || "en");
   const [ledgerCurrency, setLedgerCurrency] = useState(String(options.ledger_currency || "PLN").toUpperCase());
   const [timezone, setTimezone] = useState(options.timezone || "Europe/Warsaw");
   const [holidayCountry, setHolidayCountry] = useState(String(options.holiday_country || "PL").toUpperCase());
@@ -555,6 +542,7 @@ function AdminOptionsPanel({ options, onChanged }) {
       await apiFetch("/api/admin/options", {
         method: "PUT",
         body: {
+          locale,
           ledger_currency: ledgerCurrency,
           timezone,
           holiday_country: holidayCountry,
@@ -565,7 +553,7 @@ function AdminOptionsPanel({ options, onChanged }) {
       });
       await onChanged();
     } catch (err) {
-      setError(err.message || "Failed to save global options");
+      setError(err.message || t("Failed to save global options"));
     } finally {
       setBusy(false);
     }
@@ -573,53 +561,59 @@ function AdminOptionsPanel({ options, onChanged }) {
 
   return (
     <div className="beta-panel">
-      <h3>Global options</h3>
+      <h3>{t("Global options")}</h3>
       {error ? <div className="beta-error">{error}</div> : null}
       <form className="beta-settings-section" onSubmit={handleSubmit}>
-        <div className="beta-form-grid">
+        <div className="beta-form-grid beta-form-grid-wide beta-form-grid-three">
           <label className="beta-field">
-            <span>Default ledger currency</span>
+            <span>{t("Default language")}</span>
+            <select value={locale} onChange={e => setLocale(e.target.value)}>
+              {availableLocales().map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+            </select>
+          </label>
+          <label className="beta-field">
+            <span>{t("Default ledger currency")}</span>
             <select value={ledgerCurrency} onChange={e => setLedgerCurrency(e.target.value)}>
               {SUPPORTED_FX_CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </label>
           <label className="beta-field">
-            <span>Default timezone</span>
+            <span>{t("Default timezone")}</span>
             <input value={timezone} onChange={e => setTimezone(e.target.value)} list="beta-admin-timezones" />
             <datalist id="beta-admin-timezones">
               {TIMEZONE_OPTIONS.map(tz => <option key={tz} value={tz} />)}
             </datalist>
           </label>
           <label className="beta-field">
-            <span>Default holiday country</span>
+            <span>{t("Default holiday country")}</span>
             <select value={holidayCountry} onChange={e => setHolidayCountry(e.target.value)}>
-              {HOLIDAY_COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.code} - {c.label}</option>)}
+              {HOLIDAY_COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.code} - {t(c.label)}</option>)}
             </select>
           </label>
           <label className="beta-field">
-            <span>Default projection horizon</span>
+            <span>{t("Default projection horizon")}</span>
             <input type="number" min="1" max="60" value={futurePeriods} onChange={e => setFuturePeriods(e.target.value)} />
           </label>
           <label className="beta-field">
-            <span>Default FX provider</span>
+            <span>{t("Default FX provider")}</span>
             <select value={fxProvider} onChange={e => setFxProvider(e.target.value)}>
-              {FX_PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+              {FX_PROVIDER_OPTIONS.map(p => <option key={p.id} value={p.id}>{t(p.label)}</option>)}
             </select>
           </label>
           <label className="beta-field">
-            <span>Default FX buffer (%)</span>
+            <span>{t("Default FX buffer (%)")}</span>
             <input type="number" min="0" max="100" step="0.5" value={fxBufferPercent} onChange={e => setFxBufferPercent(e.target.value)} />
           </label>
         </div>
         <div className="beta-form-actions">
-          <button type="submit" className="beta-btn-primary" disabled={busy}>Save global options</button>
+          <button type="submit" className="beta-btn-primary" disabled={busy}>{t("Save global options")}</button>
         </div>
       </form>
     </div>
   );
 }
 
-export default function AdminView({ snapshot, onRefresh }) {
+export default function AdminView({ snapshot, onRefresh, embedded = false }) {
   const admin = snapshot?.admin || {};
   const accounts = Array.isArray(admin.accounts) ? admin.accounts : [];
   const providers = Array.isArray(admin.providers) ? admin.providers : [];
@@ -627,10 +621,10 @@ export default function AdminView({ snapshot, onRefresh }) {
 
   return (
     <section className="beta-view">
-      <div className="beta-view-head">
-        <h1>Admin</h1>
-        <p>Instance-wide account and authentication administration. Changes here affect every user.</p>
-      </div>
+      {!embedded ? <div className="beta-view-head">
+        <h1>{t("Admin")}</h1>
+        <p>{t("Instance-wide account and authentication administration. Changes here affect every user.")}</p>
+      </div> : null}
 
       <AdminAccountsPanel
         accounts={accounts}

@@ -1,3 +1,4 @@
+import { formatMessage, t } from "./i18n.js";
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, setCsrfToken } from "./api.js";
 import ProviderButton from "./ProviderButton.jsx";
@@ -10,12 +11,10 @@ function EntryFrame({ title, subtitle, onSignOut, centered = false, children }) 
     <div className={centered ? "beta-entry beta-entry--centered" : "beta-entry"}>
       <header className="beta-entry-head">
         <div className="beta-wordmark">
-          <span className="beta-mark">&#8353;</span>
-          Cashflow
-          <span className="beta-badge">BETA</span>
+          <span className="beta-mark">&#8353;</span>{t("Cashflow")}<span className="beta-badge">{t("BETA")}</span>
         </div>
         {onSignOut ? (
-          <button type="button" className="beta-btn-small" onClick={onSignOut}>Sign out</button>
+          <button type="button" className="beta-btn-small" onClick={onSignOut}>{t("Sign out")}</button>
         ) : null}
       </header>
       <div className="beta-entry-title">
@@ -24,7 +23,7 @@ function EntryFrame({ title, subtitle, onSignOut, centered = false, children }) 
       </div>
       {children}
       <p className="beta-entry-foot">
-        <a href="/?ui=legacy" onClick={() => localStorage.setItem("cashflow_preferred_ui", "legacy")}>Use the legacy app instead</a>
+        <a href="/?ui=legacy" onClick={() => localStorage.setItem("cashflow_preferred_ui", "legacy")}>{t("Use the legacy app instead")}</a>
       </p>
     </div>
   );
@@ -39,7 +38,7 @@ function useSubmit() {
     try {
       await fn();
     } catch (err) {
-      setError(err.message || "Something went wrong");
+      setError(err.message || t("Something went wrong"));
     } finally {
       setBusy(false);
     }
@@ -115,10 +114,10 @@ function AccountPicker({ onSignedIn }) {
   return (
     <div className="beta-entry-grid">
       <div className="beta-panel">
-        <h3>Accounts</h3>
-        {accounts === null ? <p className="beta-empty">Loading accounts...</p> : null}
+        <h3>{t("Accounts")}</h3>
+        {accounts === null ? <p className="beta-empty">{t("Loading accounts...")}</p> : null}
         {accounts !== null && !visibleAccounts.length && !showLegacyUsers ? (
-          <p className="beta-empty">No accounts yet. Create the first one to get started &mdash; it becomes the administrator.</p>
+          <p className="beta-empty">{t("No accounts yet. Create the first one to get started — it becomes the administrator.")}</p>
         ) : null}
         <div className="beta-budget-list">
           {visibleAccounts.map(account => (
@@ -131,8 +130,9 @@ function AccountPicker({ onSignedIn }) {
             >
               <strong>{account.display_name || account.id}</strong>
               <span className="beta-budget-meta">
-                {account.id}
-                {(account.globalRoles || []).includes("system_admin") ? " · administrator" : ""}
+                {(account.globalRoles || []).includes("system_admin")
+                  ? formatMessage("Account {id} · administrator", { id: account.id })
+                  : account.id}
                 {account.status && account.status !== "active" ? ` · ${account.status}` : ""}
               </span>
             </button>
@@ -153,10 +153,10 @@ function AccountPicker({ onSignedIn }) {
       </div>
 
       <form className="beta-panel beta-settings-section" onSubmit={createAccount}>
-        <h3>Create account</h3>
+        <h3>{t("Create account")}</h3>
         {error ? <div className="beta-error">{error}</div> : null}
         <label className="beta-field">
-          <span>Account ID</span>
+          <span>{t("Account ID")}</span>
           <input
             id="beta-create-account-id"
             value={userId}
@@ -166,14 +166,14 @@ function AccountPicker({ onSignedIn }) {
             autoComplete="username"
             onChange={e => setUserId(e.target.value)}
           />
-          <small className="beta-hint">Letters, numbers, underscores or hyphens. It can&rsquo;t be changed later.</small>
+          <small className="beta-hint">{t("Letters, numbers, underscores or hyphens. It can’t be changed later.")}</small>
         </label>
         <label className="beta-field">
-          <span>Display name</span>
+          <span>{t("Display name")}</span>
           <input id="beta-create-account-name" value={displayName} maxLength={120} onChange={e => setDisplayName(e.target.value)} />
         </label>
         <div className="beta-form-actions beta-form-actions-start">
-          <button type="submit" className="beta-btn-primary" disabled={busy}>Create and continue</button>
+          <button type="submit" className="beta-btn-primary" disabled={busy}>{t("Create and continue")}</button>
         </div>
       </form>
     </div>
@@ -207,7 +207,7 @@ function InternalLogin({ auth, onSignedIn, onRegister, onPasswordSetup }) {
         body: {},
         scoped: false
       });
-      if (!result?.authorizationUrl) throw new Error("Provider login did not return an authorization URL");
+      if (!result?.authorizationUrl) throw new Error(t("Provider login did not return an authorization URL"));
       window.location.assign(result.authorizationUrl);
     });
   }
@@ -218,11 +218,11 @@ function InternalLogin({ auth, onSignedIn, onRegister, onPasswordSetup }) {
       {passwordLogin ? (
         <form className="beta-settings-section beta-signin-form" onSubmit={handleLogin}>
           <label className="beta-field">
-            <span>Email</span>
+            <span>{t("Email")}</span>
             <input id="beta-login-email" type="email" value={email} required autoComplete="username" onChange={e => setEmail(e.target.value)} />
           </label>
           <label className="beta-field">
-            <span>Password</span>
+            <span>{t("Password")}</span>
             <input
               id="beta-login-password"
               type="password"
@@ -233,15 +233,15 @@ function InternalLogin({ auth, onSignedIn, onRegister, onPasswordSetup }) {
               autoComplete="current-password"
               onChange={e => setPassword(e.target.value)}
             />
-            <small className="beta-hint">Got a password token from an administrator? Paste it here to choose your password.</small>
+            <small className="beta-hint">{t("Got a password token from an administrator? Paste it here to choose your password.")}</small>
           </label>
           <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={login.busy}>
-            {login.busy ? "Signing in..." : "Sign in"}
+            {login.busy ? t("Signing in...") : t("Sign in")}
           </button>
         </form>
       ) : null}
 
-      {passwordLogin && providers.length ? <div className="beta-signin-divider" role="separator"><span>or</span></div> : null}
+      {passwordLogin && providers.length ? <div className="beta-signin-divider" role="separator"><span>{t("or")}</span></div> : null}
 
       {providers.length ? (
         <div className="beta-signin-providers">
@@ -251,9 +251,8 @@ function InternalLogin({ auth, onSignedIn, onRegister, onPasswordSetup }) {
         </div>
       ) : null}
 
-      <p className="beta-signin-foot">
-        Have an invitation?{" "}
-        <button type="button" className="beta-link-btn" onClick={onRegister}>Create your account</button>
+      <p className="beta-signin-foot">{t("Have an invitation?")}{" "}
+        <button type="button" className="beta-link-btn" onClick={onRegister}>{t("Create your account")}</button>
       </p>
     </div>
   );
@@ -267,7 +266,7 @@ function RegisterView({ onSignedIn, onBack }) {
   function handleSubmit(event) {
     event.preventDefault();
     if (form.password !== form.confirm) {
-      register.setError("The passwords don't match.");
+      register.setError(t("The passwords don't match."));
       return;
     }
     register.run(async () => {
@@ -282,34 +281,33 @@ function RegisterView({ onSignedIn, onBack }) {
     <form className="beta-panel beta-settings-section beta-signin-card" onSubmit={handleSubmit}>
       {register.error ? <div className="beta-error">{register.error}</div> : null}
       <label className="beta-field">
-        <span>Invitation token</span>
+        <span>{t("Invitation token")}</span>
         <input id="beta-invite-token" value={form.invitationToken} required autoComplete="off" onChange={e => set("invitationToken", e.target.value)} />
-        <small className="beta-hint">From the invitation someone sent you.</small>
+        <small className="beta-hint">{t("From the invitation someone sent you.")}</small>
       </label>
       <label className="beta-field">
-        <span>Email</span>
+        <span>{t("Email")}</span>
         <input id="beta-invite-email" type="email" value={form.email} required autoComplete="username" onChange={e => set("email", e.target.value)} />
       </label>
       <label className="beta-field">
-        <span>Display name</span>
+        <span>{t("Display name")}</span>
         <input id="beta-invite-name" value={form.displayName} required maxLength={120} autoComplete="name" onChange={e => set("displayName", e.target.value)} />
       </label>
       <label className="beta-field">
-        <span>Password</span>
+        <span>{t("Password")}</span>
         <input id="beta-invite-password" type="password" value={form.password} required minLength={12} maxLength={1024}
           autoComplete="new-password" onChange={e => set("password", e.target.value)} />
-        <small className="beta-hint">At least 12 characters.</small>
+        <small className="beta-hint">{t("At least 12 characters.")}</small>
       </label>
       <label className="beta-field">
-        <span>Confirm password</span>
+        <span>{t("Confirm password")}</span>
         <input id="beta-invite-confirm" type="password" value={form.confirm} required minLength={12} maxLength={1024}
           autoComplete="new-password" onChange={e => set("confirm", e.target.value)} />
       </label>
       <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={register.busy}>
-        {register.busy ? "Creating..." : "Create account"}
+        {register.busy ? t("Creating...") : t("Create account")}
       </button>
-      <p className="beta-signin-foot">
-        Already have an account? <button type="button" className="beta-link-btn" onClick={onBack}>Sign in</button>
+      <p className="beta-signin-foot">{t("Already have an account?")} <button type="button" className="beta-link-btn" onClick={onBack}>{t("Sign in")}</button>
       </p>
     </form>
   );
@@ -323,7 +321,7 @@ function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
   function handleSubmit(event) {
     event.preventDefault();
     if (password !== confirm) {
-      setup.setError("The passwords don't match.");
+      setup.setError(t("The passwords don't match."));
       return;
     }
     setup.run(async () => {
@@ -338,30 +336,30 @@ function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
     <form className="beta-panel beta-settings-section beta-signin-card" onSubmit={handleSubmit}>
       <p className="beta-hint">
         {purpose === "password_reset"
-          ? "Your administrator reset your password. Choose a new one; this signs you out everywhere else."
-          : "Choose the password you'll sign in with."}
+          ? t("Your administrator reset your password. Choose a new one; this signs you out everywhere else.")
+          : t("Choose the password you'll sign in with.")}
       </p>
       {setup.error ? <div className="beta-error">{setup.error}</div> : null}
       <div className="beta-field">
-        <span>Email</span>
+        <span>{t("Email")}</span>
         <strong>{email}</strong>
       </div>
       <label className="beta-field">
-        <span>New password</span>
+        <span>{t("New password")}</span>
         <input id="beta-setup-new-password" type="password" value={password} required minLength={12} maxLength={1024}
           autoComplete="new-password" autoFocus onChange={e => setPassword(e.target.value)} />
-        <small className="beta-hint">At least 12 characters.</small>
+        <small className="beta-hint">{t("At least 12 characters.")}</small>
       </label>
       <label className="beta-field">
-        <span>Confirm new password</span>
+        <span>{t("Confirm new password")}</span>
         <input id="beta-setup-confirm-password" type="password" value={confirm} required minLength={12} maxLength={1024}
           autoComplete="new-password" onChange={e => setConfirm(e.target.value)} />
       </label>
       <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={setup.busy}>
-        {setup.busy ? "Saving..." : "Save password and sign in"}
+        {setup.busy ? t("Saving...") : t("Save password and sign in")}
       </button>
       <p className="beta-signin-foot">
-        <button type="button" className="beta-link-btn" onClick={onBack}>Back to sign in</button>
+        <button type="button" className="beta-link-btn" onClick={onBack}>{t("Back to sign in")}</button>
       </p>
     </form>
   );
@@ -378,11 +376,11 @@ function ExternalLogin({ onSignedIn }) {
   }
   return (
     <div className="beta-panel beta-settings-section beta-entry-narrow">
-      <h3>Single sign-on</h3>
+      <h3>{t("Single sign-on")}</h3>
       {error ? <div className="beta-error">{error}</div> : null}
-      <p className="beta-hint">This Cashflow instance signs you in through your organisation&rsquo;s sign-in provider.</p>
+      <p className="beta-hint">{t("This Cashflow instance signs you in through your organisation’s sign-in provider.")}</p>
       <div className="beta-form-actions beta-form-actions-start">
-        <button type="button" className="beta-btn-primary" disabled={busy} onClick={handleContinue}>Continue with SSO</button>
+        <button type="button" className="beta-btn-primary" disabled={busy} onClick={handleContinue}>{t("Continue with SSO")}</button>
       </div>
     </div>
   );
@@ -394,14 +392,14 @@ export function SignInView({ auth, notice, onSignedIn }) {
 
   if (mode === "internal" && screen.name === "register") {
     return (
-      <EntryFrame centered title="Create your account" subtitle="Use the invitation you were sent.">
+      <EntryFrame centered title={t("Create your account")} subtitle={t("Use the invitation you were sent.")}>
         <RegisterView onSignedIn={onSignedIn} onBack={() => setScreen({ name: "login" })} />
       </EntryFrame>
     );
   }
   if (mode === "internal" && screen.name === "set-password") {
     return (
-      <EntryFrame centered title={screen.purpose === "password_reset" ? "Reset your password" : "Create your password"}>
+      <EntryFrame centered title={screen.purpose === "password_reset" ? t("Reset your password") : t("Create your password")}>
         <PasswordSetupView
           email={screen.email}
           token={screen.token}
@@ -416,8 +414,8 @@ export function SignInView({ auth, notice, onSignedIn }) {
   return (
     <EntryFrame
       centered={mode !== "none"}
-      title={mode === "none" ? "Choose an account" : "Sign in"}
-      subtitle={mode === "none" ? "This instance runs without sign-in, so pick an account or create one." : null}
+      title={mode === "none" ? t("Choose an account") : t("Sign in")}
+      subtitle={mode === "none" ? t("This instance runs without sign-in, so pick an account or create one.") : null}
     >
       {notice ? <div className="beta-error beta-entry-narrow">{notice}</div> : null}
       {mode === "internal" ? (
@@ -462,7 +460,7 @@ export function BudgetPickerView({ session, authError = "", onSelected, onSignOu
     create.run(async () => {
       const created = await apiFetch("/api/budgets", { method: "POST", body: { displayName: newName.trim() }, scoped: false });
       const id = created?.budget?.id;
-      if (!id) throw new Error("The budget was created but no id came back. Reload the page.");
+      if (!id) throw new Error(t("The budget was created but no id came back. Reload the page."));
       await select(id);
     });
   }
@@ -473,7 +471,7 @@ export function BudgetPickerView({ session, authError = "", onSelected, onSignOu
     invite.run(async () => {
       await apiFetch("/api/invitations/accept", { method: "POST", body: { token: inviteToken.trim() }, scoped: false });
       setInviteToken("");
-      setNotice("Invitation accepted. The shared budget is now in your list.");
+      setNotice(t("Invitation accepted. The shared budget is now in your list."));
       await loadBudgets();
     });
   }
@@ -481,14 +479,14 @@ export function BudgetPickerView({ session, authError = "", onSelected, onSignOu
   const name = session?.accountDisplayName || session?.displayName || session?.accountId || "";
 
   return (
-    <EntryFrame title="Choose a budget" subtitle={name ? `Signed in as ${name}.` : null} onSignOut={onSignOut}>
+    <EntryFrame title={t("Choose a budget")} subtitle={name ? `Signed in as ${name}.` : null} onSignOut={onSignOut}>
       {authError ? <div className="beta-error beta-entry-narrow">{authError}</div> : null}
       <div className="beta-entry-grid">
         <div className="beta-panel">
-          <h3>Your budgets</h3>
+          <h3>{t("Your budgets")}</h3>
           {list.error ? <div className="beta-error">{list.error}</div> : null}
-          {budgets === null ? <p className="beta-empty">Loading budgets...</p> : null}
-          {budgets && !budgets.length ? <p className="beta-empty">No budgets yet. Create one to get started.</p> : null}
+          {budgets === null ? <p className="beta-empty">{t("Loading budgets...")}</p> : null}
+          {budgets && !budgets.length ? <p className="beta-empty">{t("No budgets yet. Create one to get started.")}</p> : null}
           <div className="beta-budget-list">
             {(budgets || []).map(budget => (
               <button
@@ -500,7 +498,7 @@ export function BudgetPickerView({ session, authError = "", onSelected, onSignOu
               >
                 <strong>{budget.display_name || budget.id}</strong>
                 <span className="beta-budget-meta">
-                  {budget.id} &middot; {budget.role || "viewer"}{budget.status !== "active" ? ` · ${budget.status}` : ""}
+                  {budget.id} &middot; {t(budget.role || "viewer")}{budget.status !== "active" ? ` · ${t(budget.status)}` : ""}
                 </span>
               </button>
             ))}
@@ -509,27 +507,27 @@ export function BudgetPickerView({ session, authError = "", onSelected, onSignOu
 
         <div className="beta-entry-stack">
           <form className="beta-panel beta-settings-section" onSubmit={handleCreate}>
-            <h3>Create budget</h3>
+            <h3>{t("Create budget")}</h3>
             {create.error ? <div className="beta-error">{create.error}</div> : null}
             <label className="beta-field">
-              <span>Budget name</span>
+              <span>{t("Budget name")}</span>
               <input id="beta-new-budget-name" value={newName} required maxLength={120} onChange={e => setNewName(e.target.value)} />
             </label>
             <div className="beta-form-actions beta-form-actions-start">
-              <button type="submit" className="beta-btn-primary" disabled={create.busy}>Create and continue</button>
+              <button type="submit" className="beta-btn-primary" disabled={create.busy}>{t("Create and continue")}</button>
             </div>
           </form>
 
           <form className="beta-panel beta-settings-section" onSubmit={handleAccept}>
-            <h3>Accept an invitation</h3>
+            <h3>{t("Accept an invitation")}</h3>
             {invite.error ? <div className="beta-error">{invite.error}</div> : null}
             {notice ? <div className="beta-success" role="status">{notice}</div> : null}
             <label className="beta-field">
-              <span>Invitation token</span>
+              <span>{t("Invitation token")}</span>
               <input id="beta-accept-invite-token" value={inviteToken} required autoComplete="off" onChange={e => setInviteToken(e.target.value)} />
             </label>
             <div className="beta-form-actions beta-form-actions-start">
-              <button type="submit" className="beta-btn-small" disabled={invite.busy}>Accept invitation</button>
+              <button type="submit" className="beta-btn-small" disabled={invite.busy}>{t("Accept invitation")}</button>
             </div>
           </form>
         </div>
@@ -585,7 +583,7 @@ export function SetupView({ snapshot, onDone, onSignOut, onSwitchBudget }) {
 
   return (
     <EntryFrame
-      title="Set up your budget"
+      title={t("Set up your budget")}
       subtitle={`${budgetName ? `${budgetName}: ` : ""}a few basics before the planner can project your cashflow. You can change all of these later in Settings.`}
       onSignOut={onSignOut}
     >
@@ -593,48 +591,48 @@ export function SetupView({ snapshot, onDone, onSignOut, onSwitchBudget }) {
         {error ? <div className="beta-error">{error}</div> : null}
 
         <fieldset className="beta-admin-fieldset">
-          <legend>Money</legend>
+          <legend>{t("Money")}</legend>
           <div className="beta-form-grid">
             <label className="beta-field">
-              <span>Ledger currency</span>
+              <span>{t("Ledger currency")}</span>
               <select id="beta-setup-currency" value={form.ledger_currency} onChange={e => set("ledger_currency", e.target.value)}>
                 {SUPPORTED_FX_CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
             </label>
             <label className="beta-field">
-              <span>Opening balance</span>
+              <span>{t("Opening balance")}</span>
               <input id="beta-setup-opening" inputMode="decimal" pattern={AMOUNT_PATTERN} value={form.opening_balance}
                 required onChange={e => set("opening_balance", e.target.value)} />
-              <small className="beta-hint">What the account holds today, in the ledger currency.</small>
+              <small className="beta-hint">{t("What the account holds today, in the ledger currency.")}</small>
             </label>
           </div>
         </fieldset>
 
         <fieldset className="beta-admin-fieldset">
-          <legend>Regional</legend>
+          <legend>{t("Regional")}</legend>
           <div className="beta-form-grid">
             <label className="beta-field">
-              <span>Language</span>
+              <span>{t("Language")}</span>
               <select id="beta-setup-locale" value={form.locale} onChange={e => set("locale", e.target.value)}>
                 {locales.map(l => <option key={l.id} value={l.id}>{l.label || l.id}</option>)}
               </select>
             </label>
             <label className="beta-field">
-              <span>Timezone</span>
+              <span>{t("Timezone")}</span>
               <input id="beta-setup-timezone" list="beta-setup-timezones" value={form.timezone} required onChange={e => set("timezone", e.target.value)} />
               <datalist id="beta-setup-timezones">
                 {TIMEZONE_OPTIONS.map(tz => <option key={tz} value={tz} />)}
               </datalist>
             </label>
             <label className="beta-field">
-              <span>Holiday country</span>
+              <span>{t("Holiday country")}</span>
               <select id="beta-setup-holidays" value={form.holiday_country} onChange={e => set("holiday_country", e.target.value)}>
-                {HOLIDAY_COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.code} &ndash; {c.label}</option>)}
+                {HOLIDAY_COUNTRIES.map(c => <option key={c.code} value={c.code}>{c.code} &ndash; {t(c.label)}</option>)}
               </select>
-              <small className="beta-hint">Payment dates that land on a public holiday move to a working day.</small>
+              <small className="beta-hint">{t("Payment dates that land on a public holiday move to a working day.")}</small>
             </label>
             <label className="beta-field">
-              <span>Projection horizon (periods)</span>
+              <span>{t("Projection horizon (periods)")}</span>
               <input id="beta-setup-horizon" type="number" min="1" max="60" value={form.future_periods} required
                 onChange={e => set("future_periods", e.target.value)} />
             </label>
@@ -642,35 +640,35 @@ export function SetupView({ snapshot, onDone, onSignOut, onSwitchBudget }) {
         </fieldset>
 
         <fieldset className="beta-admin-fieldset">
-          <legend>Income</legend>
+          <legend>{t("Income")}</legend>
           <label className="beta-field beta-field-checkbox">
             <input id="beta-setup-income-enabled" type="checkbox" checked={form.income_enabled} onChange={e => set("income_enabled", e.target.checked)} />
-            <span>Add a monthly income now</span>
+            <span>{t("Add a monthly income now")}</span>
           </label>
           {form.income_enabled ? (
             <div className="beta-form-grid">
               <label className="beta-field">
-                <span>Income name</span>
+                <span>{t("Income name")}</span>
                 <input id="beta-setup-income-name" value={form.income_name} required maxLength={120} onChange={e => set("income_name", e.target.value)} />
               </label>
               <label className="beta-field">
-                <span>Monthly amount</span>
+                <span>{t("Monthly amount")}</span>
                 <input id="beta-setup-income-amount" inputMode="decimal" pattern={AMOUNT_PATTERN} value={form.income_amount} required
                   onChange={e => set("income_amount", e.target.value)} />
               </label>
               <label className="beta-field">
-                <span>Pay day</span>
+                <span>{t("Pay day")}</span>
                 <input id="beta-setup-income-day" type="number" min="1" max="31" value={form.income_anchor_day} required
                   onChange={e => set("income_anchor_day", e.target.value)} />
-                <small className="beta-hint">Day of the month the income arrives.</small>
+                <small className="beta-hint">{t("Day of the month the income arrives.")}</small>
               </label>
             </div>
           ) : null}
         </fieldset>
 
         <div className="beta-form-actions beta-form-actions-gap">
-          {onSwitchBudget ? <button type="button" className="beta-btn-small" onClick={onSwitchBudget} disabled={busy}>Choose another budget</button> : null}
-          <button type="submit" className="beta-btn-primary" disabled={busy}>{busy ? "Setting up..." : "Complete setup"}</button>
+          {onSwitchBudget ? <button type="button" className="beta-btn-small" onClick={onSwitchBudget} disabled={busy}>{t("Choose another budget")}</button> : null}
+          <button type="submit" className="beta-btn-primary" disabled={busy}>{busy ? t("Setting up...") : t("Complete setup")}</button>
         </div>
       </form>
     </EntryFrame>

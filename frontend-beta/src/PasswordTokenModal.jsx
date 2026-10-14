@@ -1,5 +1,7 @@
+import { formatMessage, formatParts, t } from "./i18n.js";
 import { useEffect, useRef, useState } from "react";
 import { apiFetch } from "./api.js";
+import { formatDateTime } from "./format.js";
 
 const EXPIRY_OPTIONS = [
   { hours: 1, label: "1 hour" },
@@ -30,9 +32,7 @@ async function copyText(text, input) {
 }
 
 function formatExpiry(expiresAt) {
-  const date = new Date(expiresAt);
-  if (Number.isNaN(date.getTime())) return String(expiresAt || "");
-  return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return formatDateTime(expiresAt) || String(expiresAt || "");
 }
 
 export default function PasswordTokenModal({ account, purpose, internalLoginActive, isSelf, onClose }) {
@@ -65,7 +65,7 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
       });
       setResult(created);
     } catch (err) {
-      setError(err.message || "Failed to create password token");
+      setError(err.message || t("Failed to create password token"));
     } finally {
       setBusy(false);
     }
@@ -83,29 +83,29 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
       <div className="beta-modal" role="dialog" aria-modal="true" aria-labelledby="beta-token-title">
         <div className="beta-modal-head">
           <h2 id="beta-token-title">{title}</h2>
-          <button type="button" className="beta-modal-close" onClick={onClose} aria-label="Close">&times;</button>
+          <button type="button" className="beta-modal-close" onClick={onClose} aria-label={t("Close")}>&times;</button>
         </div>
 
         {!result ? (
           <form className="beta-modal-form" onSubmit={handleCreate}>
             {error ? <div className="beta-error">{error}</div> : null}
-            <p className="beta-token-copy-line">Account: <strong>{label}</strong></p>
+            <p className="beta-token-copy-line">{t("Account:")} <strong>{label}</strong></p>
             <label className="beta-field">
-              <span>Token expires after</span>
+              <span>{t("Token expires after")}</span>
               <select id="beta-token-expiry" value={expiresInHours} onChange={e => setExpiresInHours(e.target.value)}>
-                {EXPIRY_OPTIONS.map(o => <option key={o.hours} value={o.hours}>{o.label}</option>)}
+                {EXPIRY_OPTIONS.map(o => <option key={o.hours} value={o.hours}>{t(o.label)}</option>)}
               </select>
             </label>
-            <p className="beta-hint">Creating a token cancels any earlier unused token for this account.</p>
+            <p className="beta-hint">{t("Creating a token cancels any earlier unused token for this account.")}</p>
             <div className="beta-form-actions beta-form-actions-gap">
-              <button type="button" className="beta-btn-small" onClick={onClose} disabled={busy}>Cancel</button>
-              <button type="submit" className="beta-btn-primary" disabled={busy}>{busy ? "Creating..." : "Create token"}</button>
+              <button type="button" className="beta-btn-small" onClick={onClose} disabled={busy}>{t("Cancel")}</button>
+              <button type="submit" className="beta-btn-primary" disabled={busy}>{busy ? t("Creating...") : t("Create token")}</button>
             </div>
           </form>
         ) : (
           <div className="beta-modal-form">
             <div className="beta-field">
-              <label htmlFor="beta-token-value">Password token</label>
+              <label htmlFor="beta-token-value">{t("Password token")}</label>
               <div className="beta-token-row">
                 <input
                   id="beta-token-value"
@@ -115,41 +115,44 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
                   onFocus={e => e.target.select()}
                 />
                 <button type="button" className="beta-btn-primary" onClick={handleCopy}>
-                  {copyStatus === "copied" ? "Copied" : "Copy"}
+                  {copyStatus === "copied" ? t("Copied") : t("Copy")}
                 </button>
               </div>
             </div>
-            {copyStatus === "copied" ? <p className="beta-success" role="status">Copied to clipboard.</p> : null}
+            {copyStatus === "copied" ? <p className="beta-success" role="status">{t("Copied to clipboard.")}</p> : null}
             {copyStatus === "failed" ? (
-              <p className="beta-error" role="status">Copy failed. Select the token and copy it manually.</p>
+              <p className="beta-error" role="status">{t("Copy failed. Select the token and copy it manually.")}</p>
             ) : null}
 
-            <p className="beta-token-copy-line">Valid until <strong>{formatExpiry(result.expiresAt)}</strong>. It can be used once.</p>
+            <p className="beta-token-copy-line">{formatParts("Valid until {date}. It can be used once.", {
+              date: <strong>{formatExpiry(result.expiresAt)}</strong>
+            })}</p>
 
             {!internalLoginActive ? (
-              <div className="beta-error">
-                Cashflow sign-in isn&rsquo;t the active sign-in mode yet, so the token can&rsquo;t be used on the sign-in page.{" "}
+              <div className="beta-error">{t("Cashflow sign-in isn’t the active sign-in mode yet, so the token can’t be used on the sign-in page.")}{" "}
                 {isSelf
-                  ? "To set your own password now, use Account settings in the account menu instead."
-                  : "Activate Cashflow sign-in under Authentication before sending this token."}
+                  ? t("To set your own password now, use Account settings in the account menu instead.")
+                  : t("Activate Cashflow sign-in under Authentication before sending this token.")}
               </div>
             ) : null}
 
             <div className="beta-token-steps">
-              <h3>How to use it</h3>
+              <h3>{t("How to use it")}</h3>
               <ol>
-                <li>Send the token to {label} privately. Anyone who has it can set this account&rsquo;s password.</li>
-                <li>They open Cashflow, enter {email || "their email"} on the sign-in page, paste the token into the password field and select Sign in.</li>
-                <li>Cashflow asks them to choose a password of at least 12 characters, then signs them in.</li>
+                <li>{formatMessage("Send the token to {account} privately. Anyone who has it can set this account’s password.", { account: label })}</li>
+                <li>{formatParts("They open Cashflow, enter {email} on the sign-in page, paste the token into the password field and select Sign in.", {
+                  email: <strong>{email || t("Their email")}</strong>
+                })}</li>
+                <li>{t("Cashflow asks them to choose a password of at least 12 characters, then signs them in.")}</li>
               </ol>
               {(result.purpose || purpose) === "password_reset" ? (
-                <p className="beta-hint">Setting the new password signs this account out of every existing session.</p>
+                <p className="beta-hint">{t("Setting the new password signs this account out of every existing session.")}</p>
               ) : null}
-              <p className="beta-hint">This is the only time the token is shown. If it is lost, create a new one.</p>
+              <p className="beta-hint">{t("This is the only time the token is shown. If it is lost, create a new one.")}</p>
             </div>
 
             <div className="beta-form-actions">
-              <button type="button" className="beta-btn-primary" onClick={onClose}>Done</button>
+              <button type="button" className="beta-btn-primary" onClick={onClose}>{t("Done")}</button>
             </div>
           </div>
         )}

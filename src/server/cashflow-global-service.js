@@ -43,6 +43,11 @@ const GLOBAL_OPTIONS_KEYS = new Set([
 
 const AUTH_MODES = new Set(["none", "external", "internal"]);
 const AUTH_PROVISIONING_MODES = new Set(["deny_unknown", "allow_invited", "allow_any"]);
+
+export const ACCOUNT_AVATAR_IDS = Object.freeze([
+  "fox", "owl", "cat", "whale", "cactus", "rocket",
+  "mushroom", "robot", "penguin", "hedgehog", "ghost", "planet"
+]);
 const AUTH_PROVIDER_KINDS = new Set(["oidc", "google", "github", "facebook"]);
 const SECRET_FIELD_PATTERN = /(secret|token|password|clientsecret|client_secret|privatekey|private_key)/i;
 const PASSWORD_TOKEN_BYTES = 32;
@@ -1013,6 +1018,7 @@ export function createCashflowGlobalService({
       id: account.id,
       displayName: account.display_name || account.id,
       email: account.email || "",
+      avatar: account.avatar || null,
       hasPasswordCredential: Boolean(credential),
       authMode,
       identities: identities.filter(isSelfManagedIdentity).map(identity => ({
@@ -1202,6 +1208,11 @@ export function createCashflowGlobalService({
     });
     const { account, credential, authMode } = await readOwnAccountState(normalizedId);
     const emailChanged = Boolean(updates.email) && updates.email !== account.email;
+    const avatarSupplied = Object.prototype.hasOwnProperty.call(input, "avatar");
+    const avatar = input.avatar === null ? null : String(input.avatar || "").trim();
+    if (avatarSupplied && avatar !== null && !ACCOUNT_AVATAR_IDS.includes(avatar)) {
+      throw badRequest("Choose one of the available account icons", [{ field: "avatar", reason: "invalid" }]);
+    }
 
     if (emailChanged) {
       if (authMode === "external") {
@@ -1215,7 +1226,8 @@ export function createCashflowGlobalService({
       actorAccountId: normalizedId,
       details: {
         changedDisplayName: Boolean(updates.displayName),
-        changedEmail: emailChanged
+        changedEmail: emailChanged,
+        changedAvatar: avatarSupplied
       },
       targetId: normalizedId,
       targetType: "account"
@@ -1234,6 +1246,7 @@ export function createCashflowGlobalService({
           throw emailConflictError(error);
         }
       }
+      if (avatarSupplied) await repo.accounts.updateAvatar(normalizedId, avatar);
       await repo.audit.insertSecurityEvent(audit);
     }, () => {
       const db = openGlobalDb();
@@ -1252,6 +1265,7 @@ export function createCashflowGlobalService({
               throw emailConflictError(error);
             }
           }
+          if (avatarSupplied) repo.accounts.updateAvatar(normalizedId, avatar);
           auditGlobalSecurity(db, audit);
         })();
       } finally {

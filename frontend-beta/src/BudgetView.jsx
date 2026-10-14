@@ -1,3 +1,4 @@
+import { formatParts, t } from "./i18n.js";
 import { useEffect, useState } from "react";
 import { apiFetch, downloadFile } from "./api.js";
 
@@ -30,44 +31,32 @@ function BudgetRow({ budget, isCurrent, onSwitch, onRename, onExport, onArchive,
           <strong>{budget.display_name || budget.id}</strong>
         )}
         <span className="beta-budget-meta">
-          {budget.id} &middot; {budget.role || "viewer"} &middot; {budget.status}
+          {budget.id} &middot; {t(budget.role || "viewer")} &middot; {t(budget.status)}
         </span>
       </div>
       <div className="beta-budget-row-actions">
         {dirty ? (
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onRename(budget.id, name)}>
-            Rename
-          </button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onRename(budget.id, name)}>{t("Rename")}</button>
         ) : null}
         <button
           type="button"
           className="beta-btn-small"
           disabled={busy}
           onClick={() => onExport(budget.id)}
-        >
-          Export
-        </button>
+        >{t("Export")}</button>
         {isCurrent ? (
-          <span className="beta-pill beta-pill-accent">Current</span>
+          <span className="beta-pill beta-pill-accent">{t("Current")}</span>
         ) : isActive ? (
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onSwitch(budget.id)}>
-            Switch
-          </button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onSwitch(budget.id)}>{t("Switch")}</button>
         ) : null}
         {canOwn(budget.role) && isActive ? (
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onArchive(budget.id)}>
-            Archive
-          </button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onArchive(budget.id)}>{t("Archive")}</button>
         ) : null}
         {canOwn(budget.role) && isArchived ? (
-          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onRestore(budget.id)}>
-            Restore
-          </button>
+          <button type="button" className="beta-btn-small" disabled={busy} onClick={() => onRestore(budget.id)}>{t("Restore")}</button>
         ) : null}
         {canOwn(budget.role) && isArchived ? (
-          <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={() => onPurge(budget.id)}>
-            Purge
-          </button>
+          <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={() => onPurge(budget.id)}>{t("Purge")}</button>
         ) : null}
       </div>
     </div>
@@ -78,6 +67,7 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
   const [members, setMembers] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [roleDrafts, setRoleDrafts] = useState({});
 
   useEffect(() => {
     let active = true;
@@ -86,7 +76,7 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
         const result = await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/members`);
         if (active) setMembers(result.members || []);
       } catch (err) {
-        if (active) setError(err.message || "Failed to load members");
+        if (active) setError(err.message || t("Failed to load members"));
       }
     }
     load();
@@ -99,7 +89,7 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
       const result = await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/members`);
       setMembers(result.members || []);
     } catch (err) {
-      setError(err.message || "Failed to load members");
+      setError(err.message || t("Failed to load members"));
     }
   }
 
@@ -113,28 +103,28 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
       });
       await load();
     } catch (err) {
-      setError(err.message || "Failed to update member");
+      setError(err.message || t("Failed to update member"));
     } finally {
       setBusy(false);
     }
   }
 
   async function removeMember(accountId) {
-    if (!window.confirm("Remove this member from the budget?")) return;
+    if (!window.confirm(t("Remove this member from the budget?"))) return;
     setBusy(true);
     setError("");
     try {
       await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/members/${encodeURIComponent(accountId)}`, { method: "DELETE" });
       await load();
     } catch (err) {
-      setError(err.message || "Failed to remove member");
+      setError(err.message || t("Failed to remove member"));
     } finally {
       setBusy(false);
     }
   }
 
   async function transferOwnership(accountId) {
-    if (!window.confirm("Transfer ownership to this member? You will become a manager.")) return;
+    if (!window.confirm(t("Transfer ownership to this member? You will become a manager."))) return;
     setBusy(true);
     setError("");
     try {
@@ -145,7 +135,7 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
       await load();
       await onChanged();
     } catch (err) {
-      setError(err.message || "Failed to transfer ownership");
+      setError(err.message || t("Failed to transfer ownership"));
     } finally {
       setBusy(false);
     }
@@ -155,15 +145,15 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
 
   return (
     <div className="beta-panel">
-      <h3>Members</h3>
-      {error ? <div className="beta-error">{error}</div> : null}
+      <h3>{t("Members")}</h3>
+      {error ? <div className="beta-error beta-dismissible">{error}<button type="button" onClick={() => setError("")} aria-label={t("Dismiss error")}>&times;</button></div> : null}
       {members === null ? (
-        <p className="beta-empty">{error ? "Couldn't load members." : "Loading..."}</p>
+        <p className="beta-empty">{error ? t("Couldn't load members.") : t("Loading...")}</p>
       ) : members.length ? (
         <div className="beta-panel-table">
           <table>
             <thead>
-              <tr><th>Account</th><th>Role</th><th>Status</th><th></th></tr>
+              <tr><th>{t("Account")}</th><th>{t("Role")}</th><th>{t("Status")}</th><th></th></tr>
             </thead>
             <tbody>
               {members.map(member => {
@@ -179,27 +169,26 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
                       <span className="beta-budget-meta">{accountId}</span>
                     </td>
                     <td>
-                      {isOwner ? "owner" : (
+                      {isOwner ? t("Owner") : (
                         <select
-                          value={role}
+                          value={roleDrafts[accountId] ?? role}
                           disabled={!editable || busy}
-                          onChange={e => updateRole(accountId, e.target.value)}
+                          onChange={e => setRoleDrafts(current => ({ ...current, [accountId]: e.target.value }))}
                         >
-                          {ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                          {ROLE_OPTIONS.map(r => <option key={r} value={r}>{t(r)}</option>)}
                         </select>
                       )}
                     </td>
-                    <td>{member.status || "active"}</td>
+                    <td>{t(member.status || "active")}</td>
                     <td className="beta-row-actions">
+                      {!isOwner && editable && roleDrafts[accountId] && roleDrafts[accountId] !== role ? (
+                        <button type="button" className="beta-btn-small" disabled={busy} onClick={() => updateRole(accountId, roleDrafts[accountId])}>{t("Save role")}</button>
+                      ) : null}
                       {!isOwner && editable ? (
-                        <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={() => removeMember(accountId)}>
-                          Remove
-                        </button>
+                        <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={() => removeMember(accountId)}>{t("Remove")}</button>
                       ) : null}
                       {currentRole === "owner" && !isSelf && !isOwner ? (
-                        <button type="button" className="beta-btn-small" disabled={busy} onClick={() => transferOwnership(accountId)}>
-                          Transfer ownership
-                        </button>
+                        <button type="button" className="beta-btn-small" disabled={busy} onClick={() => transferOwnership(accountId)}>{t("Transfer ownership")}</button>
                       ) : null}
                     </td>
                   </tr>
@@ -208,7 +197,7 @@ function MembersPanel({ budgetId, currentAccountId, currentRole, onChanged }) {
             </tbody>
           </table>
         </div>
-      ) : <p className="beta-empty">No members yet.</p>}
+      ) : <p className="beta-empty">{t("No members yet.")}</p>}
     </div>
   );
 }
@@ -237,7 +226,7 @@ function InvitationsPanel({ budgetId, currentRole }) {
           setAccounts(accResult.accounts || []);
         }
       } catch (err) {
-        if (active) setError(err.message || "Failed to load invitations");
+        if (active) setError(err.message || t("Failed to load invitations"));
       }
     }
     load();
@@ -254,7 +243,7 @@ function InvitationsPanel({ budgetId, currentRole }) {
       setInvitations(invResult.invitations || []);
       setAccounts(accResult.accounts || []);
     } catch (err) {
-      setError(err.message || "Failed to load invitations");
+      setError(err.message || t("Failed to load invitations"));
     }
   }
 
@@ -273,25 +262,25 @@ function InvitationsPanel({ budgetId, currentRole }) {
         }
       });
       setLastToken(result.invitation?.token || "");
-      setTimeout(() => setLastToken(""), 60000);
       setEmail("");
       setAccountId("");
       await load();
     } catch (err) {
-      setError(err.message || "Failed to create invitation");
+      setError(err.message || t("Failed to create invitation"));
     } finally {
       setBusy(false);
     }
   }
 
   async function revoke(invitationId) {
+    if (!window.confirm(t("Revoke this invitation? The token will stop working immediately."))) return;
     setBusy(true);
     setError("");
     try {
       await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
       await load();
     } catch (err) {
-      setError(err.message || "Failed to revoke invitation");
+      setError(err.message || t("Failed to revoke invitation"));
     } finally {
       setBusy(false);
     }
@@ -301,68 +290,69 @@ function InvitationsPanel({ budgetId, currentRole }) {
 
   return (
     <div className="beta-panel">
-      <h3>Invitations</h3>
-      {error ? <div className="beta-error">{error}</div> : null}
+      <h3>{t("Invitations")}</h3>
+      {error ? <div className="beta-error beta-dismissible">{error}<button type="button" onClick={() => setError("")} aria-label={t("Dismiss error")}>&times;</button></div> : null}
       {lastToken ? (
-        <label className="beta-field">
-          <span>Invitation token</span>
-          <input readOnly value={lastToken} onFocus={e => e.target.select()} />
-        </label>
+        <div className="beta-token-result">
+          <label className="beta-field">
+            <span>{t("Invitation token")}</span>
+            <input readOnly value={lastToken} onFocus={e => e.target.select()} />
+          </label>
+          <button type="button" className="beta-btn-small" onClick={() => setLastToken("")}>{t("Dismiss")}</button>
+        </div>
       ) : null}
 
       <form className="beta-form-grid" onSubmit={handleCreate}>
         <label className="beta-field">
-          <span>Account</span>
+          <span>{t("Account")}</span>
           <select value={accountId} onChange={e => setAccountId(e.target.value)}>
-            <option value="">Invite by email</option>
+            <option value="">{t("Invite by email")}</option>
             {accounts.map(a => <option key={a.id} value={a.id}>{a.display_name || a.id} ({a.id})</option>)}
           </select>
         </label>
         <label className="beta-field">
-          <span>Email</span>
+          <span>{t("Email")}</span>
           <input type="email" value={email} onChange={e => setEmail(e.target.value)} />
         </label>
         <label className="beta-field">
-          <span>Role</span>
+          <span>{t("Role")}</span>
           <select value={role} onChange={e => setRole(e.target.value)}>
-            {ROLE_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+            {ROLE_OPTIONS.map(r => <option key={r} value={r}>{t(r)}</option>)}
           </select>
         </label>
         <label className="beta-field">
-          <span>Expires in hours</span>
+          <span>{t("Expires in hours")}</span>
           <input type="number" min="1" max="720" value={expiresInHours} onChange={e => setExpiresInHours(e.target.value)} />
         </label>
         <div className="beta-form-actions beta-form-actions-start">
-          <button type="submit" className="beta-btn-primary" disabled={busy}>Create invitation</button>
+          <button type="submit" className="beta-btn-primary" disabled={busy}>{t("Create invitation")}</button>
         </div>
       </form>
 
       <div className="beta-budget-list">
         {invitations === null ? (
-          <p className="beta-empty">{error ? "Couldn't load invitations." : "Loading..."}</p>
+          <p className="beta-empty">{error ? t("Couldn't load invitations.") : t("Loading...")}</p>
         ) : invitations.length ? invitations.map(invitation => (
           <div className="beta-budget-row" key={invitation.id}>
             <div className="beta-budget-row-main">
-              <strong>{invitation.target_account_id || invitation.target_email || "Invitation"}</strong>
+              <strong>{invitation.target_account_id || invitation.target_email || t("Invitation")}</strong>
               <span className="beta-budget-meta">
-                {invitation.role || "viewer"} &middot; {invitation.status} &middot; {invitation.expires_at || ""}
+                {t(invitation.role || "viewer")} &middot; {t(invitation.status)} &middot; {invitation.expires_at || ""}
               </span>
             </div>
             <div className="beta-budget-row-actions">
               {invitation.status === "pending" ? (
-                <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={() => revoke(invitation.id)}>
-                  Revoke
-                </button>
+                <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={() => revoke(invitation.id)}>{t("Revoke")}</button>
               ) : null}
             </div>
           </div>
-        )) : <p className="beta-empty">No invitations.</p>}
+        )) : <p className="beta-empty">{t("No invitations.")}</p>}
       </div>
     </div>
   );
 }
 
-export default function BudgetView({ snapshot, onRefresh }) {
+export default function BudgetView({ snapshot, onRefresh, onCurrentBudgetRemoved }) {
   const [budgets, setBudgets] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -382,7 +372,7 @@ export default function BudgetView({ snapshot, onRefresh }) {
       setBudgets(result.budgets || []);
       setLoadError("");
     } catch (err) {
-      setLoadError(err.message || "Failed to load budgets");
+      setLoadError(err.message || t("Failed to load budgets"));
     }
   }
 
@@ -400,7 +390,7 @@ export default function BudgetView({ snapshot, onRefresh }) {
       await onRefresh();
       await loadBudgets();
     } catch (err) {
-      setActionError(err.message || "Failed to switch budget");
+      setActionError(err.message || t("Failed to switch budget"));
     } finally {
       setBusy(false);
     }
@@ -417,7 +407,7 @@ export default function BudgetView({ snapshot, onRefresh }) {
       await loadBudgets();
       if (budgetId === currentBudgetId) await onRefresh();
     } catch (err) {
-      setActionError(err.message || "Failed to rename budget");
+      setActionError(err.message || t("Failed to rename budget"));
     } finally {
       setBusy(false);
     }
@@ -433,7 +423,7 @@ export default function BudgetView({ snapshot, onRefresh }) {
         `cashflow-${budgetId}-full-export.json`
       );
     } catch (err) {
-      setActionError(`Export failed: ${err.message}`);
+      setActionError(formatMessage("Export failed: {error}", { error: err.message }));
     } finally {
       setBusy(false);
     }
@@ -444,25 +434,29 @@ export default function BudgetView({ snapshot, onRefresh }) {
     setCreating(true);
     setActionError("");
     try {
-      await apiFetch("/api/budgets", { method: "POST", body: { displayName: newName.trim() || "New budget" } });
+      await apiFetch("/api/budgets", { method: "POST", body: { displayName: newName.trim() } });
       setNewName("");
       await loadBudgets();
     } catch (err) {
-      setActionError(err.message || "Failed to create budget");
+      setActionError(err.message || t("Failed to create budget"));
     } finally {
       setCreating(false);
     }
   }
 
   async function handleArchive(budgetId) {
-    if (!window.confirm("Archive this budget? It can be restored later.")) return;
+    if (!window.confirm(t("Archive this budget? It can be restored later."))) return;
     setBusy(true);
     setActionError("");
     try {
       await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/archive`, { method: "POST" });
+      if (budgetId === currentBudgetId) {
+        onCurrentBudgetRemoved();
+        return;
+      }
       await loadBudgets();
     } catch (err) {
-      setActionError(err.message || "Failed to archive budget");
+      setActionError(err.message || t("Failed to archive budget"));
     } finally {
       setBusy(false);
     }
@@ -475,28 +469,32 @@ export default function BudgetView({ snapshot, onRefresh }) {
       await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}/restore`, { method: "POST" });
       await loadBudgets();
     } catch (err) {
-      setActionError(err.message || "Failed to restore budget");
+      setActionError(err.message || t("Failed to restore budget"));
     } finally {
       setBusy(false);
     }
   }
 
   async function handlePurge(budgetId) {
-    if (!window.confirm("Permanently delete this archived budget? This cannot be undone.")) return;
+    if (!window.confirm(t("Permanently delete this archived budget? This cannot be undone."))) return;
     setBusy(true);
     setActionError("");
     try {
       await apiFetch(`/api/budgets/${encodeURIComponent(budgetId)}`, { method: "DELETE" });
+      if (budgetId === currentBudgetId) {
+        onCurrentBudgetRemoved();
+        return;
+      }
       await loadBudgets();
     } catch (err) {
-      setActionError(err.message || "Failed to purge budget");
+      setActionError(err.message || t("Failed to purge budget"));
     } finally {
       setBusy(false);
     }
   }
 
   async function handleLeave() {
-    if (!window.confirm("Leave this budget? You will lose access unless invited again.")) return;
+    if (!window.confirm(t("Leave this budget? You will lose access unless invited again."))) return;
     setBusy(true);
     setActionError("");
     try {
@@ -504,7 +502,7 @@ export default function BudgetView({ snapshot, onRefresh }) {
       await onRefresh();
       await loadBudgets();
     } catch (err) {
-      setActionError(err.message || "Failed to leave budget");
+      setActionError(err.message || t("Failed to leave budget"));
     } finally {
       setBusy(false);
     }
@@ -513,41 +511,44 @@ export default function BudgetView({ snapshot, onRefresh }) {
   return (
     <section className="beta-view">
       <div className="beta-view-head">
-        <h1>Budget</h1>
-        <p>Switch between budgets you have access to, or start a new one.</p>
+        <h1>{t("Budget")}</h1>
+        <p>{t("Switch between budgets you have access to, or start a new one.")}</p>
       </div>
 
-      {actionError ? <div className="beta-error">{actionError}</div> : null}
+      {actionError ? <div className="beta-error beta-dismissible">{actionError}<button type="button" onClick={() => setActionError("")} aria-label={t("Dismiss error")}>&times;</button></div> : null}
       {loadError ? (
-        <div className="beta-error">
-          {loadError}. Try reloading the page — if that doesn&rsquo;t help, open the{" "}
-          <a href="/">legacy app</a> once to refresh your session, then come back.
-        </div>
+        <div className="beta-error beta-dismissible">
+          {formatParts("Couldn’t load budgets: {error}. Try reloading the page. If that doesn’t help, open the {legacyApp} once to refresh your session, then come back.", {
+            error: loadError,
+            legacyApp: <a href="/">{t("Legacy app")}</a>
+          })}<button type="button" onClick={() => setLoadError("")} aria-label={t("Dismiss error")}>&times;</button></div>
       ) : null}
 
       <form className="beta-panel beta-inline-form" onSubmit={handleCreate}>
         <div className="beta-form-grid">
           <label className="beta-field">
-            <span>New budget name</span>
+            <span>{t("New budget name")}</span>
             <input
               type="text"
+              required
+              maxLength={120}
               value={newName}
               onChange={e => setNewName(e.target.value)}
-              placeholder="Household 2026"
+              placeholder={t("Household 2026")}
             />
           </label>
         </div>
         <div className="beta-form-actions">
           <button type="submit" className="beta-btn-primary" disabled={creating}>
-            {creating ? "Creating..." : "Create budget"}
+            {creating ? t("Creating...") : t("Create budget")}
           </button>
         </div>
       </form>
 
       <div className="beta-panel">
-        <h3>Your budgets</h3>
+        <h3>{t("Your budgets")}</h3>
         {budgets === null ? (
-          <p className="beta-empty">{loadError ? "Couldn't load your budgets." : "Loading..."}</p>
+          <p className="beta-empty">{loadError ? t("Couldn't load your budgets.") : t("Loading...")}</p>
         ) : budgets.length ? (
           <div className="beta-budget-list">
             {budgets.map(budget => (
@@ -566,22 +567,20 @@ export default function BudgetView({ snapshot, onRefresh }) {
             ))}
           </div>
         ) : (
-          <p className="beta-empty">No budgets yet.</p>
+          <p className="beta-empty">{t("No budgets yet.")}</p>
         )}
       </div>
 
       <div className="beta-panel">
-        <h3>Current budget</h3>
+        <h3>{t("Current budget")}</h3>
         <div className="beta-budget-row">
           <div className="beta-budget-row-main">
-            <strong>{snapshot?.session?.displayName || currentBudgetId || "Budget"}</strong>
-            <span className="beta-budget-meta">{currentBudgetId} &middot; {currentRole || "viewer"}</span>
+            <strong>{snapshot?.session?.displayName || currentBudgetId || t("Budget")}</strong>
+            <span className="beta-budget-meta">{currentBudgetId} &middot; {t(currentRole || "viewer")}</span>
           </div>
           <div className="beta-budget-row-actions">
             {currentRole && currentRole !== "owner" ? (
-              <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={handleLeave}>
-                Leave budget
-              </button>
+              <button type="button" className="beta-btn-small beta-btn-danger" disabled={busy} onClick={handleLeave}>{t("Leave budget")}</button>
             ) : null}
           </div>
         </div>

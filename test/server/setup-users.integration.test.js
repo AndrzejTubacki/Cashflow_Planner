@@ -2431,10 +2431,21 @@ test("account settings let the signed-in account bootstrap its own password and 
       id: "self_admin",
       displayName: "Self Admin",
       email: "",
+      avatar: null,
       hasPasswordCredential: false,
       authMode: "none",
       identities: []
     });
+
+    const invalidAvatar = await me({ method: "PUT", body: { avatar: "dragon" } });
+    assert.equal(invalidAvatar.response.status, 400);
+    const avatarSaved = await me({ method: "PUT", body: { avatar: "fox" } });
+    assert.equal(avatarSaved.response.status, 200);
+    assert.equal(avatarSaved.body.account.avatar, "fox");
+    assert.equal((await me()).body.account.avatar, "fox");
+    const avatarReset = await me({ method: "PUT", body: { avatar: null } });
+    assert.equal(avatarReset.response.status, 200);
+    assert.equal(avatarReset.body.account.avatar, null);
 
     const passwordWithoutEmail = await harness.request("/api/account/password", {
       method: "POST",

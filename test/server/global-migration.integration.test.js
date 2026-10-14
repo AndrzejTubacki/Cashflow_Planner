@@ -14,8 +14,37 @@ import {
 } from "../../src/server/cashflow-schema.js";
 import {
   GLOBAL_SCHEMA_VERSION,
-  LEGACY_ADMIN_ACCOUNT_ID
+  LEGACY_ADMIN_ACCOUNT_ID,
+  applyGlobalMigrations
 } from "../../src/server/cashflow-global-schema.js";
+
+test("global schema version 5 migrates accounts in place with a nullable avatar", () => {
+  const db = new Database(":memory:");
+  try {
+    db.exec(`
+      PRAGMA user_version = 5;
+      CREATE TABLE accounts (
+        id TEXT PRIMARY KEY,
+        email TEXT,
+        display_name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        disabled_at TEXT,
+        deleted_at TEXT
+      );
+      INSERT INTO accounts (id, display_name, created_at, updated_at)
+      VALUES ('kept', 'Kept Account', '2026-01-01', '2026-01-01');
+    `);
+    applyGlobalMigrations(db);
+    assert.equal(db.pragma("user_version", { simple: true }), GLOBAL_SCHEMA_VERSION);
+    assert.deepEqual(db.prepare("SELECT id, display_name, avatar FROM accounts").get(), {
+      id: "kept", display_name: "Kept Account", avatar: null
+    });
+  } finally {
+    db.close();
+  }
+});
 
 function createVersionOneGlobalDb(dataDir, users = []) {
   fs.mkdirSync(dataDir, { recursive: true });

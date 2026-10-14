@@ -33,6 +33,7 @@ export const POSTGRES_GLOBAL_COLUMNS = {
     "id",
     "email",
     "display_name",
+    "avatar",
     "status",
     "created_at",
     "updated_at",
@@ -227,6 +228,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
   email TEXT,
   display_name TEXT NOT NULL,
+  avatar TEXT,
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active', 'disabled', 'deleted')),
   created_at TIMESTAMPTZ NOT NULL,
