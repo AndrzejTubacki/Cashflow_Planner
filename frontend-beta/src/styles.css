@@ -615,7 +615,8 @@ body {
 }
 
 .beta-field select,
-.beta-field input {
+.beta-field input,
+.beta-field textarea {
   font: inherit;
   font-size: 13px;
   padding: 8px 10px;
@@ -623,6 +624,10 @@ body {
   border: 1px solid var(--line);
   background: var(--bg);
   color: var(--text);
+}
+
+.beta-field textarea {
+  resize: vertical;
 }
 
 .beta-form-actions {

@@ -20,6 +20,7 @@ import {
   normalizeSupportedCurrency
 } from "./cashflow-fx-provider-utils.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
+import { normalizeNtfyAllowedPrivateHosts } from "./cashflow-ntfy-private-hosts.js";
 import {
   badRequest,
   conflict,
@@ -38,7 +39,8 @@ const GLOBAL_OPTIONS_KEYS = new Set([
   "holiday_country",
   "future_periods",
   "fx_provider",
-  "fx_buffer_percent"
+  "fx_buffer_percent",
+  "ntfy_allowed_private_hosts"
 ]);
 
 const AUTH_MODES = new Set(["none", "external", "internal"]);
@@ -573,14 +575,49 @@ export function createCashflowGlobalService({
   function getGlobalOptions() {
     const db = openGlobalDb();
     try {
-      return globalRepository(db).globalOptions.get();
+      return globalOptionsFromRow(globalRepository(db).globalOptions.get());
     } finally {
       db.close();
     }
   }
 
   async function getGlobalOptionsAsync() {
-    return await withGlobalRepository(async repo => await repo.globalOptions.get());
+    return globalOptionsFromRow(await withGlobalRepository(async repo => await repo.globalOptions.get()));
+  }
+
+  function globalOptionsFromRow(row) {
+    if (!row) return row;
+    let storedHosts = row.ntfy_allowed_private_hosts;
+    if (typeof storedHosts === "string") {
+      try {
+        storedHosts = JSON.parse(storedHosts);
+      } catch {
+        storedHosts = [];
+      }
+    }
+    return {
+      ...row,
+      ntfy_allowed_private_hosts: normalizeNtfyAllowedPrivateHosts(storedHosts)
+    };
+  }
+
+  function normalizeGlobalOptionsUpdate(updates, current) {
+    const settingsUpdates = { ...(updates || {}) };
+    const hasAllowedHosts = Object.prototype.hasOwnProperty.call(settingsUpdates, "ntfy_allowed_private_hosts");
+    const allowedHosts = settingsUpdates.ntfy_allowed_private_hosts;
+    delete settingsUpdates.ntfy_allowed_private_hosts;
+    const normalized = validateAndNormalizeSettings(settingsUpdates, {
+      allowedKeys: GLOBAL_OPTIONS_KEYS,
+      allowedKeysOnly: true,
+      currentSettings: current,
+      normalizeLocale
+    });
+    if (hasAllowedHosts) {
+      normalized.ntfy_allowed_private_hosts = normalizeNtfyAllowedPrivateHosts(allowedHosts, {
+        invalid: message => badRequest(message, [{ field: "ntfy_allowed_private_hosts", reason: "invalid_host" }])
+      });
+    }
+    return normalized;
   }
 
   function ensureUserMetadata(db, userId, displayName = "") {
@@ -2125,12 +2162,7 @@ export function createCashflowGlobalService({
 
   function updateGlobalOptions(updates = {}) {
     const current = getGlobalOptions();
-    const normalized = validateAndNormalizeSettings(updates, {
-      allowedKeys: GLOBAL_OPTIONS_KEYS,
-      allowedKeysOnly: true,
-      currentSettings: current,
-      normalizeLocale
-    });
+    const normalized = normalizeGlobalOptionsUpdate(updates, current);
     const safe = {
       ...current,
       ...normalized
@@ -2148,12 +2180,7 @@ export function createCashflowGlobalService({
 
   async function updateGlobalOptionsAsync(updates = {}) {
     const current = await getGlobalOptionsAsync();
-    const normalized = validateAndNormalizeSettings(updates, {
-      allowedKeys: GLOBAL_OPTIONS_KEYS,
-      allowedKeysOnly: true,
-      currentSettings: current,
-      normalizeLocale
-    });
+    const normalized = normalizeGlobalOptionsUpdate(updates, current);
     const safe = {
       ...current,
       ...normalized

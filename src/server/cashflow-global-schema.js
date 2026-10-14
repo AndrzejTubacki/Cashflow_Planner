@@ -1,4 +1,4 @@
-export const GLOBAL_SCHEMA_VERSION = 6;
+export const GLOBAL_SCHEMA_VERSION = 7;
 export const LEGACY_ADMIN_ACCOUNT_ID = "legacy-admin";
 export const GLOBAL_TABLE_NAMES = [
   "users",
@@ -44,6 +44,7 @@ const GLOBAL_SCHEMA_SQL = `
     future_periods INTEGER NOT NULL DEFAULT 11,
     fx_provider TEXT NOT NULL DEFAULT 'nbp',
     fx_buffer_percent REAL NOT NULL DEFAULT 0,
+    ntfy_allowed_private_hosts TEXT NOT NULL DEFAULT '[]',
     updated_at TEXT NOT NULL
   );
 
@@ -343,6 +344,13 @@ function addAccountAvatarCompatibilityColumn(db) {
   }
 }
 
+function addNtfyAllowedPrivateHostsCompatibilityColumn(db) {
+  const columns = tableColumns(db, "global_options");
+  if (!columns.includes("ntfy_allowed_private_hosts")) {
+    db.exec("ALTER TABLE global_options ADD COLUMN ntfy_allowed_private_hosts TEXT NOT NULL DEFAULT '[]'");
+  }
+}
+
 export function ensureLegacyAdminAccount(db) {
   const existing = db.prepare("SELECT id FROM accounts WHERE id = ?").get(LEGACY_ADMIN_ACCOUNT_ID);
   db.prepare(`
@@ -453,6 +461,12 @@ export function applyGlobalMigrations(db, {
       addAccountAvatarCompatibilityColumn(db);
       db.exec(GLOBAL_SCHEMA_SQL);
       db.pragma("user_version = 6");
+    }
+    if (currentVersion < 7) {
+      beforeStep(7, db);
+      addNtfyAllowedPrivateHostsCompatibilityColumn(db);
+      db.exec(GLOBAL_SCHEMA_SQL);
+      db.pragma("user_version = 7");
     }
   })();
 }

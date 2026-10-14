@@ -8,6 +8,7 @@ import {
 import { generateId } from "./cashflow-id-utils.js";
 import { latestBalanceFromConfirmedRows } from "./cashflow-ledger-balance-utils.js";
 import { multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
+import { normalizeNtfyAllowedPrivateHosts, normalizeNtfyHost, ntfyHostIsAllowed } from "./cashflow-ntfy-private-hosts.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 
 import dns from "node:dns";
@@ -32,7 +33,9 @@ export function isPrivateIp(ip) {
   return false;
 }
 
-export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAsync) {
+export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAsync, {
+  allowedPrivateHosts = []
+} = {}) {
   if (!url) return;
   let parsed;
   try {
@@ -40,9 +43,12 @@ export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAs
   } catch {
     return;
   }
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (host.toLowerCase() === "localhost" || isPrivateIp(host)) {
-    throw badRequest(`${field} must point to a public external service`);
+  const host = normalizeNtfyHost(parsed.hostname);
+  const allowed = field === "ntfy_url" && ntfyHostIsAllowed(host, allowedPrivateHosts);
+  if (!allowed && (host === "localhost" || isPrivateIp(host))) {
+    throw badRequest(field === "ntfy_url"
+      ? "ntfy_url resolves to a private IP address. An administrator can allow this host under Settings > Admin > Global options."
+      : `${field} must point to a public external service`);
   }
   let addresses;
   try {
@@ -53,9 +59,12 @@ export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAs
   if (!Array.isArray(addresses) || addresses.length === 0) {
     throw badRequest(`${field} hostname could not be resolved`);
   }
-  if (addresses.some(result => isPrivateIp(result?.address))) {
-    throw badRequest(`${field} resolves to a private IP address and is not allowed`);
+  if (!allowed && addresses.some(result => isPrivateIp(result?.address))) {
+    throw badRequest(field === "ntfy_url"
+      ? "ntfy_url resolves to a private IP address. An administrator can allow this host under Settings > Admin > Global options."
+      : `${field} resolves to a private IP address and is not allowed`);
   }
+  return { allowedPrivateHost: allowed ? host : null };
 }
 
 import { badRequest, conflict } from "./cashflow-user-utils.js";
@@ -78,8 +87,10 @@ export function createCashflowSettingsService({
   fetchProviderRate = null,
   getCachedFxRate = null,
   getCachedFxRateAsync = null,
+  getGlobalOptions = async () => ({}),
   latestConfirmedBalance = null,
   latestConfirmedBalanceAsync = null,
+  logServerEvent = () => {},
   lookupHost = lookupAsync,
   normalizeLocale = value => String(value || "en"),
   openPlanningDb,
@@ -89,14 +100,19 @@ export function createCashflowSettingsService({
   async function assertExternalNotificationUrls(safeUpdates) {
     // This save-time DNS check blocks current private targets. DNS rebinding remains a
     // residual TOCTOU risk because delivery happens later and may resolve the host again.
-    await Promise.all([
+    const globalOptions = Object.prototype.hasOwnProperty.call(safeUpdates, "ntfy_url")
+      ? await getGlobalOptions()
+      : {};
+    const allowedPrivateHosts = normalizeNtfyAllowedPrivateHosts(globalOptions?.ntfy_allowed_private_hosts);
+    const [ntfyResult] = await Promise.all([
       Object.prototype.hasOwnProperty.call(safeUpdates, "ntfy_url")
-        ? assertUrlIsExternalAsync(safeUpdates.ntfy_url, "ntfy_url", lookupHost)
+        ? assertUrlIsExternalAsync(safeUpdates.ntfy_url, "ntfy_url", lookupHost, { allowedPrivateHosts })
         : null,
       Object.prototype.hasOwnProperty.call(safeUpdates, "discord_webhook_url")
         ? assertUrlIsExternalAsync(safeUpdates.discord_webhook_url, "discord_webhook_url", lookupHost)
         : null
     ]);
+    return ntfyResult?.allowedPrivateHost || null;
   }
 
   function getSettings(userId) {
@@ -132,7 +148,7 @@ export function createCashflowSettingsService({
         currentSettings,
         normalizeLocale
       });
-      await assertExternalNotificationUrls(safeUpdates);
+      const allowedPrivateHost = await assertExternalNotificationUrls(safeUpdates);
 
       if (safeUpdates.budget_period_income_id) {
         const income = db.prepare(`
@@ -336,7 +352,11 @@ export function createCashflowSettingsService({
         }
       })();
 
-      return db.prepare("SELECT * FROM settings WHERE id = 1").get() || currentSettings || {};
+      const result = db.prepare("SELECT * FROM settings WHERE id = 1").get() || currentSettings || {};
+      if (allowedPrivateHost) {
+        logServerEvent("cashflow_ntfy_private_host_allowed", { host: allowedPrivateHost });
+      }
+      return result;
     } finally {
       db.close();
     }
@@ -469,7 +489,7 @@ export function createCashflowSettingsService({
       currentSettings,
       normalizeLocale
     });
-    await assertExternalNotificationUrls(safeUpdates);
+    const allowedPrivateHost = await assertExternalNotificationUrls(safeUpdates);
     const ledgerSwitch = await buildLedgerSwitch(userId, currentSettings, safeUpdates);
 
     const result = await budgetStore.transaction(async writer => {
@@ -585,6 +605,9 @@ export function createCashflowSettingsService({
         .find(row => Number(row.id) === 1) || currentSettings || {};
     });
 
+    if (allowedPrivateHost) {
+      logServerEvent("cashflow_ntfy_private_host_allowed", { host: allowedPrivateHost });
+    }
     return result;
   }
 

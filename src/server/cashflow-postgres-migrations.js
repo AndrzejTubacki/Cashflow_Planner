@@ -8,19 +8,19 @@ import { POSTGRES_GLOBAL_SCHEMA_VERSION } from "./cashflow-postgres-global-schem
 
 export const CASHFLOW_POSTGRES_MIGRATION_LOCK_KEY = 73190199;
 export const DEFAULT_POSTGRES_MIGRATION_BACKUP_KEEP = 3;
-const MIGRATION_NAME = /^postgres-v(\d+)\.(\d+)\.(\d+)\.sql$/;
+const MIGRATION_NAME = /^postgres-v(\d+)\.(\d+)\.(\d+)(?:-r([1-9]\d*))?\.sql$/;
 const MIGRATION_BACKUP_SCHEMA = /^cashflow_premigration_g(?:\d+|unknown)_p(?:\d+|unknown)_l(?:\d+|unknown)_\d{8}t\d{9}z$/;
 
 function versionParts(name) {
   const match = String(name).match(MIGRATION_NAME);
-  return match ? match.slice(1).map(Number) : null;
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3]), Number(match[4] || 1)] : null;
 }
 
 export function orderPostgresMigrationNames(names = []) {
   return names.filter(name => versionParts(name)).sort((left, right) => {
     const a = versionParts(left);
     const b = versionParts(right);
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 4; index += 1) {
       if (a[index] !== b[index]) return a[index] - b[index];
     }
     return left.localeCompare(right);
@@ -70,6 +70,11 @@ async function migrationAlreadyApplied(client, migration) {
   if (migration.name === "postgres-v1.1.0.sql") {
     const version = await client.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1");
     return Number(version.rows?.[0]?.version) >= 6 && await columnExists(client, "accounts", "avatar");
+  }
+  if (migration.name === "postgres-v1.1.0-r2.sql") {
+    const version = await client.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1");
+    return Number(version.rows?.[0]?.version) >= 7
+      && await columnExists(client, "global_options", "ntfy_allowed_private_hosts");
   }
   return false;
 }

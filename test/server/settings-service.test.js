@@ -20,6 +20,29 @@ function sqliteSettingsDb() {
   };
 }
 
+function writableSqliteSettingsDb() {
+  const settings = { id: 1, ledger_currency: "PLN", timezone: "UTC", ntfy_url: null };
+  return {
+    settings,
+    close() {},
+    transaction(work) {
+      return () => work();
+    },
+    prepare(sql) {
+      if (/SELECT \* FROM settings WHERE id = 1/.test(sql)) return { get: () => ({ ...settings }) };
+      if (/UPDATE settings/.test(sql)) {
+        return {
+          run(value) {
+            settings.ntfy_url = value;
+            return { changes: 1 };
+          }
+        };
+      }
+      throw new Error(`Unexpected SQL in settings test: ${sql}`);
+    }
+  };
+}
+
 test("settings service can read settings through the budget-store facade", async () => {
   const calls = [];
   const service = createCashflowSettingsService({
@@ -85,7 +108,7 @@ test("settings save rejects bracketed and complete link-local IPv6 ranges before
 
   await assert.rejects(
     () => service.updateSettings("household", { ntfy_url: "http://[::1]/topic" }),
-    /public external service/
+    /administrator can allow this host/
   );
   await assert.rejects(
     () => service.updateSettings("household", { discord_webhook_url: "http://[fe9a::1]/hook" }),
@@ -129,4 +152,64 @@ test("Postgres settings save checks every resolved webhook address before openin
     /resolves to a private IP address/
   );
   assert.equal(transactionOpened, false);
+});
+
+test("settings save rejects a private ntfy host unless an administrator allowed it", async () => {
+  const service = createCashflowSettingsService({
+    getGlobalOptions: async () => ({ ntfy_allowed_private_hosts: [] }),
+    lookupHost: async () => [{ address: "192.168.1.20", family: 4 }],
+    openPlanningDb: writableSqliteSettingsDb
+  });
+
+  await assert.rejects(
+    () => service.updateSettings("household", { ntfy_url: "https://ntfy.lan/topic" }),
+    /administrator can allow this host under Settings > Admin > Global options/
+  );
+});
+
+test("settings save accepts and logs an exactly allowed private ntfy host", async () => {
+  const db = writableSqliteSettingsDb();
+  const events = [];
+  const service = createCashflowSettingsService({
+    getGlobalOptions: async () => ({ ntfy_allowed_private_hosts: ["NTFY.LAN."] }),
+    logServerEvent: (kind, details) => events.push({ kind, details }),
+    lookupHost: async hostname => {
+      assert.equal(hostname, "ntfy.lan");
+      return [{ address: "192.168.1.20", family: 4 }];
+    },
+    openPlanningDb: () => db
+  });
+
+  const saved = await service.updateSettings("household", { ntfy_url: "https://ntfy.lan/topic/token" });
+  assert.equal(saved.ntfy_url, "https://ntfy.lan/topic/token");
+  assert.deepEqual(events, [{
+    kind: "cashflow_ntfy_private_host_allowed",
+    details: { host: "ntfy.lan" }
+  }]);
+});
+
+test("an allowed private ntfy host must still resolve", async () => {
+  const service = createCashflowSettingsService({
+    getGlobalOptions: async () => ({ ntfy_allowed_private_hosts: ["missing.lan"] }),
+    lookupHost: async () => { throw new Error("not found"); },
+    openPlanningDb: writableSqliteSettingsDb
+  });
+
+  await assert.rejects(
+    () => service.updateSettings("household", { ntfy_url: "https://missing.lan/topic" }),
+    /ntfy_url hostname could not be resolved/
+  );
+});
+
+test("an ntfy allow-list entry never permits a private Discord webhook", async () => {
+  const service = createCashflowSettingsService({
+    getGlobalOptions: async () => ({ ntfy_allowed_private_hosts: ["hooks.lan"] }),
+    lookupHost: async () => [{ address: "10.0.0.8", family: 4 }],
+    openPlanningDb: writableSqliteSettingsDb
+  });
+
+  await assert.rejects(
+    () => service.updateSettings("household", { discord_webhook_url: "https://hooks.lan/webhook" }),
+    /resolves to a private IP address and is not allowed/
+  );
 });

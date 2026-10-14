@@ -45,13 +45,19 @@ export function sortFundingEntries(entries = []) {
   });
 }
 
+// Projection snapshots can store the same rate under both a bare currency key
+// ("EUR") and a pair key ("EUR/PLN"); both normalize to one pair, so keep the
+// first valid rate per pair (explicit pair keys win over bare currency keys).
 export function parseProjectionFxRates(snapshot = {}, ledgerCurrency = "PLN") {
   let rates = snapshot?.latestProjectionSnapshot?.fx_rates_used || {};
   try { rates = typeof rates === "string" ? JSON.parse(rates) : rates; } catch { rates = {}; }
-  return Object.entries(rates || {}).flatMap(([key, raw]) => {
+  const byPair = new Map();
+  const entries = Object.entries(rates || {}).sort(([a], [b]) => Number(b.includes("/")) - Number(a.includes("/")));
+  for (const [key, raw] of entries) {
     const rate = Number(raw?.rate ?? raw);
-    if (!Number.isFinite(rate) || rate <= 0) return [];
+    if (!Number.isFinite(rate) || rate <= 0) continue;
     const pair = key.includes("/") ? key.toUpperCase() : `${key.toUpperCase()}/${String(ledgerCurrency).toUpperCase()}`;
-    return [{ pair, rate }];
-  }).sort((a, b) => a.pair.localeCompare(b.pair));
+    if (!byPair.has(pair)) byPair.set(pair, { pair, rate });
+  }
+  return [...byPair.values()].sort((a, b) => a.pair.localeCompare(b.pair));
 }

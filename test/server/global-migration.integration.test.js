@@ -46,6 +46,48 @@ test("global schema version 5 migrates accounts in place with a nullable avatar"
   }
 });
 
+test("global schema version 6 migrates ntfy private hosts in place without losing options", () => {
+  const db = new Database(":memory:");
+  try {
+    db.exec(`
+      PRAGMA user_version = 6;
+      CREATE TABLE global_options (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        ledger_currency TEXT NOT NULL DEFAULT 'PLN',
+        locale TEXT NOT NULL DEFAULT 'en',
+        timezone TEXT NOT NULL DEFAULT 'Europe/Warsaw',
+        holiday_country TEXT NOT NULL DEFAULT 'PL',
+        future_periods INTEGER NOT NULL DEFAULT 11,
+        fx_provider TEXT NOT NULL DEFAULT 'nbp',
+        fx_buffer_percent REAL NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO global_options (
+        id, ledger_currency, locale, timezone, holiday_country,
+        future_periods, fx_provider, fx_buffer_percent, updated_at
+      ) VALUES (1, 'EUR', 'pl', 'UTC', 'DE', 18, 'manual', 2.5, '2026-10-14');
+    `);
+    applyGlobalMigrations(db);
+    assert.equal(db.pragma("user_version", { simple: true }), 7);
+    assert.deepEqual(db.prepare(`
+      SELECT ledger_currency, locale, timezone, holiday_country, future_periods,
+        fx_provider, fx_buffer_percent, ntfy_allowed_private_hosts
+      FROM global_options WHERE id = 1
+    `).get(), {
+      ledger_currency: "EUR",
+      locale: "pl",
+      timezone: "UTC",
+      holiday_country: "DE",
+      future_periods: 18,
+      fx_provider: "manual",
+      fx_buffer_percent: 2.5,
+      ntfy_allowed_private_hosts: "[]"
+    });
+  } finally {
+    db.close();
+  }
+});
+
 function createVersionOneGlobalDb(dataDir, users = []) {
   fs.mkdirSync(dataDir, { recursive: true });
   const db = new Database(path.join(dataDir, "cashflow-global.sqlite"));

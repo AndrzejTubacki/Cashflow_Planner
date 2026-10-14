@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,6 +27,7 @@ async function preparePreviousSchema(databaseUrl, pool) {
     await global.initialize();
     await budget.initialize();
     await pool.query("ALTER TABLE accounts DROP COLUMN avatar");
+    await pool.query("ALTER TABLE global_options DROP COLUMN ntfy_allowed_private_hosts");
     await pool.query("UPDATE cashflow_global_schema_version SET version = 5 WHERE id = 1");
   } finally {
     await Promise.all([global.close(), budget.close()]);
@@ -62,22 +64,52 @@ test("a previous Postgres schema is migrated to current", gated, async () => {
     const beforeCounts = await schemaTableCounts(pool, "public");
     const manual = await runPostgresMigrations({ databaseUrl, migrationsDir, autoMigrate: false });
     assert.equal(manual.current, false);
-    assert.deepEqual(manual.pending, ["postgres-v1.1.0.sql"]);
+    assert.deepEqual(manual.pending, ["postgres-v1.1.0.sql", "postgres-v1.1.0-r2.sql"]);
     assert.equal((await pool.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1")).rows[0].version, 5);
     const result = await runPostgresMigrations({ databaseUrl, migrationsDir });
     assert.equal(result.current, true);
-    assert.deepEqual(result.applied, ["postgres-v1.1.0.sql"]);
+    assert.deepEqual(result.applied, ["postgres-v1.1.0.sql", "postgres-v1.1.0-r2.sql"]);
     assert.match(result.backupSchema, /^cashflow_premigration_/);
     assert.deepEqual(await backupSchemaNames(pool), [result.backupSchema]);
     assert.deepEqual(await schemaTableCounts(pool, result.backupSchema), beforeCounts);
     const backupRecord = (await pool.query("SELECT table_count, row_counts FROM cashflow_schema_backups WHERE schema_name = $1", [result.backupSchema])).rows[0];
     assert.equal(backupRecord.table_count, Object.keys(beforeCounts).length);
     assert.deepEqual(backupRecord.row_counts, beforeCounts);
-    assert.equal((await pool.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1")).rows[0].version, 6);
+    assert.equal((await pool.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1")).rows[0].version, 7);
     assert.deepEqual(
       (await pool.query("SELECT name FROM cashflow_schema_migrations ORDER BY name")).rows.map(row => row.name),
-      ["postgres-v1.0.1.sql", "postgres-v1.1.0.sql"]
+      ["postgres-v1.0.1.sql", "postgres-v1.1.0-r2.sql", "postgres-v1.1.0.sql"]
     );
+  });
+});
+
+test("a version 6 Postgres schema with v1.1.0 recorded applies only its r2 revision", gated, async () => {
+  await withDisposablePostgresDb(async ({ databaseUrl, pool }) => {
+    const global = await createPostgresGlobalStore({ databaseUrl });
+    const budget = await createPostgresBudgetStore({ databaseUrl });
+    try {
+      await global.initialize();
+      await budget.initialize();
+    } finally {
+      await Promise.all([global.close(), budget.close()]);
+    }
+    await pool.query("ALTER TABLE global_options DROP COLUMN ntfy_allowed_private_hosts");
+    await pool.query("UPDATE cashflow_global_schema_version SET version = 6 WHERE id = 1");
+    await pool.query(`CREATE TABLE cashflow_schema_migrations (
+      name TEXT PRIMARY KEY, checksum TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+    const v110 = fs.readFileSync(path.join(migrationsDir, "postgres-v1.1.0.sql"));
+    const checksum = crypto.createHash("sha256").update(v110).digest("hex");
+    await pool.query("INSERT INTO cashflow_schema_migrations (name, checksum) VALUES ($1, $2)", [
+      "postgres-v1.1.0.sql", checksum
+    ]);
+
+    const result = await runPostgresMigrations({ databaseUrl, migrationsDir });
+    assert.deepEqual(result.applied, ["postgres-v1.1.0-r2.sql"]);
+    assert.equal((await pool.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1")).rows[0].version, 7);
+    assert.equal((await pool.query(`SELECT data_type FROM information_schema.columns
+      WHERE table_schema = current_schema() AND table_name = 'global_options'
+        AND column_name = 'ntfy_allowed_private_hosts'`)).rows[0].data_type, "jsonb");
   });
 });
 
@@ -114,7 +146,7 @@ test("a failed Postgres migration backup prevents migration and explains update-
     }
     assert.ok(failure);
     assert.equal(failure.databaseMigrationBackupFailed, true);
-    assert.deepEqual(failure.pendingMigrations, ["postgres-v1.1.0.sql"]);
+    assert.deepEqual(failure.pendingMigrations, ["postgres-v1.1.0.sql", "postgres-v1.1.0-r2.sql"]);
     const state = { required: true, error: failure, pending: failure.pendingMigrations };
     let status;
     let body;
@@ -180,7 +212,9 @@ test("concurrent Postgres migration runners apply each migration once", gated, a
     })));
     assert.equal(results.every(result => result.current), true);
     assert.equal(events.filter(event => event.kind === "cashflow_postgres_migration_applied" && event.details.migration === "postgres-v1.1.0.sql").length, 1);
+    assert.equal(events.filter(event => event.kind === "cashflow_postgres_migration_applied" && event.details.migration === "postgres-v1.1.0-r2.sql").length, 1);
     assert.equal((await pool.query("SELECT count(*) FROM cashflow_schema_migrations WHERE name = 'postgres-v1.1.0.sql'")).rows[0].count, "1");
+    assert.equal((await pool.query("SELECT count(*) FROM cashflow_schema_migrations WHERE name = 'postgres-v1.1.0-r2.sql'")).rows[0].count, "1");
   });
 });
 

@@ -424,6 +424,7 @@ export function createSqliteGlobalRepository(db, {
               future_periods = ?,
               fx_provider = ?,
               fx_buffer_percent = ?,
+              ntfy_allowed_private_hosts = ?,
               updated_at = datetime('now')
           WHERE id = 1
         `).run(
@@ -433,7 +434,8 @@ export function createSqliteGlobalRepository(db, {
           settings.holiday_country,
           settings.future_periods,
           settings.fx_provider,
-          settings.fx_buffer_percent
+          settings.fx_buffer_percent,
+          JSON.stringify(settings.ntfy_allowed_private_hosts || [])
         );
       }
     },

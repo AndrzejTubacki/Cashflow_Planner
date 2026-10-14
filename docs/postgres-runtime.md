@@ -30,7 +30,9 @@ if Postgres runtime locks are enabled.
 For an existing installation, startup checks both the global schema version and
 the budget planning/ledger versions. It takes a fixed Postgres advisory lock,
 checks again after acquiring it, and applies pending `postgres-v*.sql` files in
-version order. Applied file names and SHA-256 checksums are recorded in
+version and numeric revision order (`postgres-v1.1.0.sql`, then optional
+revisions such as `postgres-v1.1.0-r2.sql`, then the next version). Applied file
+names and SHA-256 checksums are recorded in
 `cashflow_schema_migrations`. A database previously updated by hand is detected
 from its schema and remains supported. Existing backup metadata remains valid.
 

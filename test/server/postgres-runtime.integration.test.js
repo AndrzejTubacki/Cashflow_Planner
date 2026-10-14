@@ -248,6 +248,17 @@ test("Postgres schema readiness and runtime locks work against a disposable data
       assert.equal(ownedTables.includes("confirmed_transactions"), true);
       assert.equal(ownedTables.includes("cashflow_runtime_locks"), true);
 
+      await globalStore.withRepository(async repo => {
+        const current = await repo.globalOptions.get();
+        await repo.globalOptions.updatePlannerDefaults({
+          ...current,
+          ntfy_allowed_private_hosts: ["ntfy.lan", "192.168.1.20"]
+        });
+        assert.deepEqual((await repo.globalOptions.get()).ntfy_allowed_private_hosts, [
+          "ntfy.lan", "192.168.1.20"
+        ]);
+      });
+
       const workerA = globalStore.createLockService({ ownerId: "postgres_runtime_test_a" });
       const workerB = globalStore.createLockService({ ownerId: "postgres_runtime_test_b" });
       assert.equal((await workerA.tryAcquire("test:postgres-runtime", { ttlMs: 10_000 })).acquired, true);

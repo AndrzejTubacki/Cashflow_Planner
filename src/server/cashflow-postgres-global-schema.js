@@ -27,6 +27,7 @@ export const POSTGRES_GLOBAL_COLUMNS = {
     "future_periods",
     "fx_provider",
     "fx_buffer_percent",
+    "ntfy_allowed_private_hosts",
     "updated_at"
   ],
   accounts: [
@@ -221,6 +222,7 @@ CREATE TABLE IF NOT EXISTS global_options (
   future_periods INTEGER NOT NULL DEFAULT 11,
   fx_provider TEXT NOT NULL DEFAULT 'nbp',
   fx_buffer_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ntfy_allowed_private_hosts JSONB NOT NULL DEFAULT '[]'::jsonb,
   updated_at TIMESTAMPTZ NOT NULL
 );
 

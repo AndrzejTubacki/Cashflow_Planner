@@ -36,10 +36,12 @@ test("SQLite global repository covers global options, users, budgets, membership
       holiday_country: "PL",
       future_periods: 12,
       fx_provider: "manual",
-      fx_buffer_percent: 2
+      fx_buffer_percent: 2,
+      ntfy_allowed_private_hosts: ["ntfy.lan", "192.168.1.20"]
     });
     assert.equal(repo.globalOptions.get().ledger_currency, "EUR");
     assert.equal(repo.globalOptions.get().fx_provider, "manual");
+    assert.deepEqual(JSON.parse(repo.globalOptions.get().ntfy_allowed_private_hosts), ["ntfy.lan", "192.168.1.20"]);
 
     repo.users.ensureMetadata("alice", "Alice");
     assert.equal(repo.users.getMetadata("alice").display_name, "Alice");

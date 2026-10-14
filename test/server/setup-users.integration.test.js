@@ -3586,6 +3586,36 @@ test("admin global options reject malformed values without changing defaults", a
   assert.deepEqual(after.options, before.options);
 }));
 
+test("only administrators can save and read normalized private ntfy hosts", async () => withHarness(async harness => {
+  const saved = await harness.api("/api/admin/options", {
+    method: "PUT",
+    body: { ntfy_allowed_private_hosts: " NTFY.LAN.\n192.168.1.20,ntfy.lan" }
+  });
+  assert.deepEqual(saved.options.ntfy_allowed_private_hosts, ["ntfy.lan", "192.168.1.20"]);
+  assert.deepEqual((await harness.api("/api/admin/options")).options.ntfy_allowed_private_hosts, [
+    "ntfy.lan", "192.168.1.20"
+  ]);
+
+  const invalid = await harness.request("/api/admin/options", {
+    method: "PUT",
+    body: { ntfy_allowed_private_hosts: ["https://ntfy.lan/topic"] }
+  });
+  assert.equal(invalid.response.status, 400);
+  assert.match(invalid.body.error, /https:\/\/ntfy\.lan\/topic/);
+
+  await harness.api("/api/users", {
+    method: "POST",
+    body: { userId: "non_admin_ntfy_options", displayName: "Not an admin" }
+  });
+  const forbidden = await harness.request("/api/admin/options", {
+    method: "PUT",
+    useSession: true,
+    body: { ntfy_allowed_private_hosts: ["other.lan"] }
+  });
+  assert.equal(forbidden.response.status, 403);
+  assert.equal((await harness.request("/api/admin/options", { useSession: true })).response.status, 403);
+}));
+
 test("first-run setup marks setup complete and creates opening balance plus recurring income", async () => withHarness(async harness => {
   await harness.api("/api/users", {
     method: "POST",

@@ -359,8 +359,12 @@ async function createCashflowModule({
     fetchProviderRate,
     getCachedFxRate,
     getCachedFxRateAsync,
+    getGlobalOptions: async () => typeof getGlobalOptionsAsync === "function"
+      ? await getGlobalOptionsAsync()
+      : getGlobalOptions(),
     latestConfirmedBalance,
     latestConfirmedBalanceAsync,
+    logServerEvent,
     normalizeLocale,
     openPlanningDb,
     recalculatePlanningRunningBalances,
@@ -1253,7 +1257,6 @@ async function createCashflowModule({
   };
 }
 export { createCashflowModule };
-
 
 
 

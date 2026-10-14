@@ -516,7 +516,8 @@ export function createPostgresGlobalRepository(client, {
               future_periods = $5,
               fx_provider = $6,
               fx_buffer_percent = $7,
-              updated_at = $8
+              ntfy_allowed_private_hosts = $8::jsonb,
+              updated_at = $9::timestamptz
           WHERE id = 1
         `, [
           settings.ledger_currency,
@@ -526,6 +527,7 @@ export function createPostgresGlobalRepository(client, {
           settings.future_periods,
           settings.fx_provider,
           settings.fx_buffer_percent,
+          JSON.stringify(settings.ntfy_allowed_private_hosts || []),
           nowIso(now)
         ]);
       }

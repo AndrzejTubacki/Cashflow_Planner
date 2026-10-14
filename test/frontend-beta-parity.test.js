@@ -74,6 +74,11 @@ test("beta parity helpers cover budget dates, decimal input, priorities, FX, and
   assert.equal(manualRateForCurrency({ "EUR/PLN": "4.25" }, "EUR", "PLN"), "4.25");
   assert.deepEqual(selectedManualRates({ "EUR/PLN": "4,25", USD: "4" }, ["EUR"], "PLN"), { EUR: 4.25 });
   assert.deepEqual(parseProjectionFxRates({ latestProjectionSnapshot: { fx_rates_used: '{"eur/pln":{"rate":4.2}}' } }, "PLN"), [{ pair: "EUR/PLN", rate: 4.2 }]);
+  // Regression: a rate stored under both "EUR" and "EUR/PLN" is shown once.
+  assert.deepEqual(
+    parseProjectionFxRates({ latestProjectionSnapshot: { fx_rates_used: { EUR: 4.3889, "EUR/PLN": 4.3889, GBP: 5.1906, "GBP/PLN": 5.1906 } } }, "PLN"),
+    [{ pair: "EUR/PLN", rate: 4.3889 }, { pair: "GBP/PLN", rate: 5.1906 }]
+  );
   const sorted = sortFundingEntries([
     { name: "Later", item: { id: "2", funded_by_date: "2027-01-01" } },
     { name: "Missing", item: { id: "1", funded_by_date: null } }
@@ -126,6 +131,13 @@ test("account icons have a deterministic unsaved default and persist through the
   assert.match(account, /method: "PUT", body: \{ avatar \}/);
   assert.match(account, /role="radiogroup"/);
   assert.match(menu, /<AvatarIcon account=\{account/);
+});
+
+test("beta admin global options expose the private ntfy host allow-list", async () => {
+  const admin = await source("AdminView.jsx");
+  assert.match(admin, /Private ntfy hosts/);
+  assert.match(admin, /ntfy_allowed_private_hosts: ntfyAllowedPrivateHosts/);
+  assert.match(admin, /Only the exact hosts listed here are allowed, one per line/);
 });
 
 test("beta recurring expenses show current predictions and their ledger equivalents", async () => {

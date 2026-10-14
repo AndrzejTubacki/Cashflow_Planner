@@ -531,6 +531,9 @@ function AdminOptionsPanel({ options, onChanged }) {
   const [futurePeriods, setFuturePeriods] = useState(options.future_periods || 11);
   const [fxProvider, setFxProvider] = useState(options.fx_provider || "nbp");
   const [fxBufferPercent, setFxBufferPercent] = useState(options.fx_buffer_percent ?? 0);
+  const [ntfyAllowedPrivateHosts, setNtfyAllowedPrivateHosts] = useState(
+    Array.isArray(options.ntfy_allowed_private_hosts) ? options.ntfy_allowed_private_hosts.join("\n") : ""
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -548,7 +551,8 @@ function AdminOptionsPanel({ options, onChanged }) {
           holiday_country: holidayCountry,
           future_periods: Number(futurePeriods) || 11,
           fx_provider: fxProvider,
-          fx_buffer_percent: Number(fxBufferPercent) || 0
+          fx_buffer_percent: Number(fxBufferPercent) || 0,
+          ntfy_allowed_private_hosts: ntfyAllowedPrivateHosts
         }
       });
       await onChanged();
@@ -603,6 +607,11 @@ function AdminOptionsPanel({ options, onChanged }) {
           <label className="beta-field">
             <span>{t("Default FX buffer (%)")}</span>
             <input type="number" min="0" max="100" step="0.5" value={fxBufferPercent} onChange={e => setFxBufferPercent(e.target.value)} />
+          </label>
+          <label className="beta-field">
+            <span>{t("Private ntfy hosts")}</span>
+            <textarea rows="4" value={ntfyAllowedPrivateHosts} onChange={e => setNtfyAllowedPrivateHosts(e.target.value)} />
+            <small className="beta-hint">{t("Allow self-hosted ntfy servers on a private network. Only the exact hosts listed here are allowed, one per line.")}</small>
           </label>
         </div>
         <div className="beta-form-actions">

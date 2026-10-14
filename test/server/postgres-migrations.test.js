@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -15,10 +18,29 @@ import {
   resolveDatabaseUpdateReadiness
 } from "../../src/server/cashflow-database-update-mode.js";
 
-test("Postgres migration files are ordered by semantic version", () => {
+test("Postgres migration files are ordered by semantic version and numeric revision", () => {
   assert.deepEqual(orderPostgresMigrationNames([
-    "notes.txt", "postgres-v1.10.0.sql", "postgres-v2.0.0.sql", "postgres-v1.9.9.sql"
-  ]), ["postgres-v1.9.9.sql", "postgres-v1.10.0.sql", "postgres-v2.0.0.sql"]);
+    "postgres-v1.1.0-r10.sql", "postgres-v1.1.1.sql", "postgres-v1.1.0-r2.sql",
+    "postgres-v1.0.1.sql", "postgres-v1.1.0.sql"
+  ]), [
+    "postgres-v1.0.1.sql", "postgres-v1.1.0.sql", "postgres-v1.1.0-r2.sql",
+    "postgres-v1.1.0-r10.sql", "postgres-v1.1.1.sql"
+  ]);
+});
+
+test("Postgres migration ordering rejects malformed revision names", () => {
+  assert.deepEqual(orderPostgresMigrationNames([
+    "postgres-v1.1.0-r0.sql", "postgres-v1.1.0-r.sql", "postgres-v1.1.0-r2-extra.sql",
+    "postgres-v1.1.0-r02.sql", "postgres-v1.1.sql", "notes.txt"
+  ]), []);
+});
+
+test("the already-applied postgres-v1.1.0 migration checksum stays immutable", () => {
+  const sql = fs.readFileSync(path.resolve("scripts/migrations/postgres-v1.1.0.sql"));
+  assert.equal(
+    crypto.createHash("sha256").update(sql).digest("hex"),
+    "c562640ea47fe20558d6b9f5dc31230fe49e0428757a4669661bd3e05b77a4b4"
+  );
 });
 
 test("recorded and schema-detected migrations are not pending", () => {
