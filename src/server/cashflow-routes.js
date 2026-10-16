@@ -185,6 +185,7 @@ export function registerCashflowRoutes(app, {
   validatePlanMutationInput,
   translateLocale = async (_locale, key, params = {}) => String(key || "").replace(/\{([a-zA-Z0-9_]+)\}/g, (_, name) => params?.[name] ?? ""),
   validateCashflowData,
+  validateCashflowDataAsync = null,
   validateCsrfToken = null,
   withProjectionStatus
 }) {
@@ -2152,7 +2153,9 @@ export function registerCashflowRoutes(app, {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_VALIDATE);
         const userId = await resolveRequestUser(req);
-        res.json(validateCashflowData(userId));
+        res.json(typeof validateCashflowDataAsync === "function"
+          ? await validateCashflowDataAsync(userId)
+          : validateCashflowData(userId));
       } catch (error) {
         await fail(req, res, error, "Failed to run validation", "cashflow_validate_failed");
       }

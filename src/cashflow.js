@@ -601,7 +601,8 @@ async function createCashflowModule({
     restoreBackupFromPath,
     restoreBackupFromPathAsync,
     validateBackupFolderForRestore,
-    validateCashflowData
+    validateCashflowData,
+    validateCashflowDataAsync
   } = createCashflowBackupService({
     backupDir,
     backupHook: backupServiceHook,
@@ -990,6 +991,7 @@ async function createCashflowModule({
       setupRequiredAsync,
       translateLocale,
       validateCashflowData,
+      validateCashflowDataAsync,
       validateCsrfToken,
       withProjectionStatus
     });

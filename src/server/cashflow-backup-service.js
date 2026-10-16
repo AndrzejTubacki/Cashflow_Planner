@@ -268,18 +268,18 @@ export function createCashflowBackupService({
     return SOURCE_FIELDS.filter(field => row?.[field]).length;
   }
 
-  function collectSourceSets(db) {
+  function collectSourceSets(tables) {
     return {
-      source_recurring_expense_id: new Set(db.prepare("SELECT id FROM recurring_expenses").all().map(row => row.id)),
-      source_recurring_income_id: new Set(db.prepare("SELECT id FROM recurring_incomes").all().map(row => row.id)),
-      source_one_off_id: new Set(db.prepare("SELECT id FROM one_off_transactions").all().map(row => row.id)),
-      source_flex_id: new Set(db.prepare("SELECT id FROM flex_transactions").all().map(row => row.id)),
-      source_goal_id: new Set(db.prepare("SELECT id FROM goals").all().map(row => row.id))
+      source_recurring_expense_id: new Set(tables.recurring_expenses.map(row => row.id)),
+      source_recurring_income_id: new Set(tables.recurring_incomes.map(row => row.id)),
+      source_one_off_id: new Set(tables.one_off_transactions.map(row => row.id)),
+      source_flex_id: new Set(tables.flex_transactions.map(row => row.id)),
+      source_goal_id: new Set(tables.goals.map(row => row.id))
     };
   }
 
-  function validateSettingsRow(warnings, db) {
-    const settings = db.prepare("SELECT * FROM settings WHERE id = 1").get();
+  function validateSettingsRow(warnings, tables) {
+    const settings = tables.settings.find(row => Number(row.id) === 1);
     if (!settings) {
       pushWarning(warnings, "missing_settings", "Settings row is missing", { table: "settings", id: 1 });
       return { ledgerCurrency: "PLN" };
@@ -345,13 +345,8 @@ export function createCashflowBackupService({
     }
 
     if (settings.budget_period_income_id) {
-      const row = db.prepare(`
-        SELECT id
-        FROM recurring_incomes
-        WHERE id = ?
-          AND active = 1
-          AND period_setting = 1
-      `).get(settings.budget_period_income_id);
+      const row = tables.recurring_incomes.find(row => row.id === settings.budget_period_income_id
+        && Number(row.active) === 1 && Number(row.period_setting) === 1);
       if (!row) {
         pushWarning(warnings, "stale_budget_period_income", "Budget period income setting points to a missing or inactive income", {
           table: "settings",
@@ -364,11 +359,11 @@ export function createCashflowBackupService({
     return { ledgerCurrency };
   }
 
-  function validatePlanningSourceLinks(warnings, db) {
-    const sourceSets = collectSourceSets(db);
+  function validatePlanningSourceLinks(warnings, tables) {
+    const sourceSets = collectSourceSets(tables);
     const rowsByTable = [
-      ["pending_transactions", db.prepare("SELECT * FROM pending_transactions").all()],
-      ["future_transactions", db.prepare("SELECT * FROM future_transactions").all()]
+      ["pending_transactions", tables.pending_transactions],
+      ["future_transactions", tables.future_transactions]
     ];
 
     for (const [table, rows] of rowsByTable) {
@@ -394,14 +389,14 @@ export function createCashflowBackupService({
       }
     }
 
-    const plannedRows = db.prepare("SELECT * FROM planned_transactions").all();
+    const plannedRows = tables.planned_transactions;
     for (const planned of plannedRows) {
       const references = [
         ["recurring_expenses", "recurring_expense"],
         ["flex_transactions", "flex"],
         ["goals", "goal"]
       ].flatMap(([table, expectedType]) =>
-        db.prepare(`SELECT id FROM ${table} WHERE planned_transaction_id = ?`).all(planned.id)
+        tables[table].filter(row => row.planned_transaction_id === planned.id)
           .map(row => ({ table, id: row.id, expectedType }))
       );
 
@@ -427,7 +422,7 @@ export function createCashflowBackupService({
     }
   }
 
-  function validateOccurrenceKeys(warnings, db, confirmedRows) {
+  function validateOccurrenceKeys(warnings, tables, confirmedRows) {
     const occurrences = new Map();
     const add = (row, table, year = null) => {
       const key = row.occurrence_key;
@@ -436,10 +431,10 @@ export function createCashflowBackupService({
       occurrences.get(key).push({ table, id: row.id, year });
     };
 
-    for (const row of db.prepare("SELECT id, occurrence_key FROM pending_transactions WHERE occurrence_key IS NOT NULL").all()) {
+    for (const row of tables.pending_transactions.filter(row => row.occurrence_key != null)) {
       add(row, "pending_transactions");
     }
-    for (const row of db.prepare("SELECT id, occurrence_key FROM future_transactions WHERE occurrence_key IS NOT NULL").all()) {
+    for (const row of tables.future_transactions.filter(row => row.occurrence_key != null)) {
       add(row, "future_transactions");
     }
     for (const row of confirmedRows) {
@@ -561,151 +556,154 @@ export function createCashflowBackupService({
     }
   }
 
-  function validateCashflowData(userId) {
-    const db = openPlanningDb(userId);
-    const warnings = [];
+  // Both storage backends feed the same validation rules with plain rows.
+  const validationTables = ["settings", "planned_transactions", "recurring_expenses",
+    "recurring_incomes", "one_off_transactions", "flex_transactions", "goals",
+    "pending_transactions", "future_transactions"];
 
+  function duplicatePriorities(rows, field) {
+    const counts = new Map();
+    for (const row of rows) {
+      if (row[field] != null) counts.set(row[field], (counts.get(row[field]) || 0) + 1);
+    }
+    return [...counts].filter(([, count]) => count > 1).map(([priority, count]) => ({ priority, count }));
+  }
+
+  function validateRows(tables, confirmedRows) {
+    const warnings = [];
+    const { ledgerCurrency } = validateSettingsRow(warnings, tables);
+    const duplicateOperating = duplicatePriorities(tables.planned_transactions.filter(row =>
+      ["recurring_expense", "flex"].includes(row.type)), "operating_priority");
+
+    for (const row of duplicateOperating) {
+      warnings.push({
+        type: "duplicate_operating_priority",
+        message: `Duplicate operating priority ${row.priority}`,
+        details: row
+      });
+    }
+
+    const duplicateGoals = duplicatePriorities(tables.planned_transactions.filter(row =>
+      row.type === "goal"), "goal_priority");
+
+    for (const row of duplicateGoals) {
+      warnings.push({
+        type: "duplicate_goal_priority",
+        message: `Duplicate goal priority ${row.priority}`,
+        details: row
+      });
+    }
+
+    const badFlex = tables.flex_transactions.filter(row => Number(row.allow_split) === 1
+      && row.min_amount != null && row.max_amount != null
+      && Number(row.min_amount) > Number(row.max_amount));
+
+    for (const row of badFlex) {
+      warnings.push({
+        type: "invalid_flex_min_max",
+        message: `${row.name} has min_amount greater than max_amount`,
+        details: row
+      });
+    }
+
+    for (const table of ["pending_transactions", "future_transactions"]) {
+      const rows = tables[table];
+      for (const row of rows) {
+        const invalidFields = [];
+        if (!isFiniteNumber(row.amount) || Number(row.amount) < 0) invalidFields.push("amount");
+        if (!isValidDate(row.date)) invalidFields.push("date");
+        if (!isValidCurrency(row.currency)) invalidFields.push("currency");
+        if (row.ledger_currency && !isValidCurrency(row.ledger_currency)) invalidFields.push("ledger_currency");
+        if (!["income", "expense", "goal_allocation"].includes(row.type)) invalidFields.push("type");
+        if (row.running_balance !== null && row.running_balance !== undefined && !isFiniteNumber(row.running_balance)) invalidFields.push("running_balance");
+        if (row.ledger_amount !== null && row.ledger_amount !== undefined && !isFiniteNumber(row.ledger_amount)) invalidFields.push("ledger_amount");
+
+        for (const field of invalidFields) {
+          pushWarning(warnings, "invalid_generated_transaction", `${table} row ${row.id} has invalid ${field}`, {
+            table,
+            id: row.id,
+            field
+          });
+        }
+      }
+    }
+
+    const orphanPlanned = tables.planned_transactions.filter(row =>
+      ![...tables.recurring_expenses, ...tables.flex_transactions, ...tables.goals]
+        .some(source => source.planned_transaction_id === row.id));
+
+    for (const row of orphanPlanned) {
+      warnings.push({
+        type: "orphan_planned_transaction",
+        message: `Orphan planned transaction ${row.id}`,
+        details: row
+      });
+    }
+
+    validatePlanningSourceLinks(warnings, tables);
+    validateOccurrenceKeys(warnings, tables, confirmedRows);
+    validateLedgerRows(warnings, confirmedRows, ledgerCurrency);
+
+    const invalidPending = tables.pending_transactions.filter(row =>
+      Number(row.amount) < 0 || row.date == null || row.currency == null);
+
+    for (const row of invalidPending) {
+      warnings.push({
+        type: "invalid_pending_transaction",
+        message: `Invalid pending transaction ${row.id}`,
+        details: row
+      });
+    }
+
+    return { ok: warnings.length === 0, warnings };
+  }
+
+  function validationEvent(userId, result) {
+    return {
+      id: generateId("event"), action: "validation_completed", entity_type: "cashflow",
+      entity_id: userId, details: JSON.stringify({ warning_count: result.warnings.length, warnings: result.warnings }),
+      timestamp: now().toISOString()
+    };
+  }
+
+  function validateCashflowData(userId) {
+    // Preserve the synchronous SQLite API for existing callers.
+    const db = openPlanningDb(userId);
     try {
-      const { ledgerCurrency } = validateSettingsRow(warnings, db);
+      const tables = Object.fromEntries(validationTables.map(table =>
+        [table, db.prepare(`SELECT * FROM ${table}`).all()]));
       const confirmedRows = [];
       for (const year of listLedgerYears(userId)) {
         const ledgerDb = openLedgerDb(userId, year);
         try {
-          confirmedRows.push(...ledgerDb.prepare(`
-            SELECT *, ? AS ledger_year
-            FROM confirmed_transactions
-          `).all(year));
+          confirmedRows.push(...ledgerDb.prepare("SELECT *, ? AS ledger_year FROM confirmed_transactions").all(year));
         } finally {
           ledgerDb.close();
         }
       }
-
-      const duplicateOperating = db.prepare(`
-        SELECT operating_priority AS priority, COUNT(*) AS count
-        FROM planned_transactions
-        WHERE type IN ('recurring_expense', 'flex')
-          AND operating_priority IS NOT NULL
-        GROUP BY operating_priority
-        HAVING COUNT(*) > 1
-      `).all();
-
-      for (const row of duplicateOperating) {
-        warnings.push({
-          type: "duplicate_operating_priority",
-          message: `Duplicate operating priority ${row.priority}`,
-          details: row
-        });
-      }
-
-      const duplicateGoals = db.prepare(`
-        SELECT goal_priority AS priority, COUNT(*) AS count
-        FROM planned_transactions
-        WHERE type = 'goal'
-          AND goal_priority IS NOT NULL
-        GROUP BY goal_priority
-        HAVING COUNT(*) > 1
-      `).all();
-
-      for (const row of duplicateGoals) {
-        warnings.push({
-          type: "duplicate_goal_priority",
-          message: `Duplicate goal priority ${row.priority}`,
-          details: row
-        });
-      }
-
-      const badFlex = db.prepare(`
-        SELECT *
-        FROM flex_transactions
-        WHERE allow_split = 1
-          AND min_amount IS NOT NULL
-          AND max_amount IS NOT NULL
-          AND min_amount > max_amount
-      `).all();
-
-      for (const row of badFlex) {
-        warnings.push({
-          type: "invalid_flex_min_max",
-          message: `${row.name} has min_amount greater than max_amount`,
-          details: row
-        });
-      }
-
-      for (const table of ["pending_transactions", "future_transactions"]) {
-        const rows = db.prepare(`SELECT * FROM ${table}`).all();
-        for (const row of rows) {
-          const invalidFields = [];
-          if (!isFiniteNumber(row.amount) || Number(row.amount) < 0) invalidFields.push("amount");
-          if (!isValidDate(row.date)) invalidFields.push("date");
-          if (!isValidCurrency(row.currency)) invalidFields.push("currency");
-          if (row.ledger_currency && !isValidCurrency(row.ledger_currency)) invalidFields.push("ledger_currency");
-          if (!["income", "expense", "goal_allocation"].includes(row.type)) invalidFields.push("type");
-          if (row.running_balance !== null && row.running_balance !== undefined && !isFiniteNumber(row.running_balance)) invalidFields.push("running_balance");
-          if (row.ledger_amount !== null && row.ledger_amount !== undefined && !isFiniteNumber(row.ledger_amount)) invalidFields.push("ledger_amount");
-
-          for (const field of invalidFields) {
-            pushWarning(warnings, "invalid_generated_transaction", `${table} row ${row.id} has invalid ${field}`, {
-              table,
-              id: row.id,
-              field
-            });
-          }
-        }
-      }
-
-      const orphanPlanned = db.prepare(`
-        SELECT pt.*
-        FROM planned_transactions pt
-        LEFT JOIN recurring_expenses re ON re.planned_transaction_id = pt.id
-        LEFT JOIN flex_transactions f ON f.planned_transaction_id = pt.id
-        LEFT JOIN goals g ON g.planned_transaction_id = pt.id
-        WHERE re.id IS NULL AND f.id IS NULL AND g.id IS NULL
-      `).all();
-
-      for (const row of orphanPlanned) {
-        warnings.push({
-          type: "orphan_planned_transaction",
-          message: `Orphan planned transaction ${row.id}`,
-          details: row
-        });
-      }
-
-      validatePlanningSourceLinks(warnings, db);
-      validateOccurrenceKeys(warnings, db, confirmedRows);
-      validateLedgerRows(warnings, confirmedRows, ledgerCurrency);
-
-      const invalidPending = db.prepare(`
-        SELECT *
-        FROM pending_transactions
-        WHERE amount < 0
-          OR date IS NULL
-          OR currency IS NULL
-      `).all();
-
-      for (const row of invalidPending) {
-        warnings.push({
-          type: "invalid_pending_transaction",
-          message: `Invalid pending transaction ${row.id}`,
-          details: row
-        });
-      }
-
-      db.prepare(`
-        INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp)
-        VALUES (?, 'validation_completed', 'cashflow', ?, ?, datetime('now'))
-      `).run(
-        generateId("event"),
-        userId,
-        JSON.stringify({ warning_count: warnings.length, warnings })
-      );
-
-      return {
-        ok: warnings.length === 0,
-        warnings
-      };
+      const result = validateRows(tables, confirmedRows);
+      const event = validationEvent(userId, result);
+      db.prepare(`INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?)`).run(event.id, event.action, event.entity_type, event.entity_id, event.details, event.timestamp);
+      return result;
     } finally {
       db.close();
     }
+  }
+
+  async function validateCashflowDataAsync(userId) {
+    // Never open SQLite files when the budget store owns PostgreSQL storage.
+    if (budgetStore?.backend !== "postgres") return validateCashflowData(userId);
+    const tables = Object.fromEntries(await Promise.all(validationTables.map(async table =>
+      [table, await budgetStore.listPlanningRows(userId, table)])));
+    const confirmedRows = [];
+    for (const year of await budgetStore.listLedgerYears(userId)) {
+      const rows = await budgetStore.listConfirmedTransactions(userId, { ledgerYear: year });
+      confirmedRows.push(...rows.map(row => ({ ...row, ledger_year: year })));
+    }
+    const result = validateRows(tables, confirmedRows);
+    await budgetStore.insertPlanningRows(userId, "event_log", [validationEvent(userId, result)]);
+    return result;
   }
 
   function cleanupBackupFolders(userId) {
@@ -1508,6 +1506,7 @@ export function createCashflowBackupService({
     restoreBackupFromPath,
     restoreBackupFromPathAsync,
     validateBackupFolderForRestore,
-    validateCashflowData
+    validateCashflowData,
+    validateCashflowDataAsync
   };
 }

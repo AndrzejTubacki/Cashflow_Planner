@@ -1531,7 +1531,25 @@ export async function createPostgresBudgetStore(options = {}) {
     }
 
     async function upsertNotifications(budgetId, rows = []) {
-      const normalized = normalizeNotificationRows(budgetId, rows);
+      // PostgreSQL cannot update one conflict target twice in a single INSERT.
+      // Match sequential SQLite upserts: retain the first row's identity and
+      // immutable fields, but use the last row's updateable notification content.
+      const normalized = [];
+      const byKey = new Map();
+      for (const row of normalizeNotificationRows(budgetId, rows)) {
+        const previous = row.dedupe_key == null ? null : byKey.get(row.dedupe_key);
+        if (previous) {
+          Object.assign(previous, {
+            title: row.title,
+            message: row.message,
+            priority: row.priority,
+            queued_at: row.queued_at
+          });
+        } else {
+          normalized.push(row);
+          if (row.dedupe_key != null) byKey.set(row.dedupe_key, row);
+        }
+      }
       let upserted = 0;
       if (normalized.length > 0) {
         const chunkSize = 1000;

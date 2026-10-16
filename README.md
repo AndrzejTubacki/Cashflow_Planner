@@ -249,6 +249,10 @@ once it's running.
 
 ## Checking A Deployment
 
+The **Validate data** action in Settings checks budget data on both SQLite and
+PostgreSQL, including source links, duplicate occurrences, and ledger balances.
+It returns warnings and records a validation audit event; it does not repair data.
+
 ```sh
 npm run smoke
 ```
