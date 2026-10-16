@@ -112,7 +112,7 @@ function isReadableNote(note) {
   }
 }
 
-function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onMoveToPending, onDismiss, onEdit, confirming }) {
+function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onRegenerate, onMoveToPending, onDismiss, onEdit, confirming }) {
   const money = transactionMoneyDisplay(tx, ledgerCurrency);
   const isIncome = tx.type === "income";
   const runningBalance = tx.running_balance ?? tx.runningBalance;
@@ -168,6 +168,10 @@ function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onMoveToP
             {confirming === tx.id ? "..." : t("Confirm")}
           </button>
         ) : null}
+        {sectionStatus === "pending" && onRegenerate ? (
+          <button type="button" className="beta-btn-small" disabled={confirming === tx.id}
+            onClick={() => onRegenerate(tx)}>{t("Regenerate")}</button>
+        ) : null}
         {onMoveToPending ? (
           <button
             type="button"
@@ -197,7 +201,7 @@ function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onMoveToP
   );
 }
 
-function TxTable({ rows, status, ledgerCurrency, emptyLabel, onConfirm, onMoveToPending, onDismiss, onEdit, confirming }) {
+function TxTable({ rows, status, ledgerCurrency, emptyLabel, onConfirm, onRegenerate, onMoveToPending, onDismiss, onEdit, confirming }) {
   if (!rows.length) return <p className="beta-empty">{emptyLabel}</p>;
   return (
     <div className="beta-panel-table">
@@ -220,6 +224,7 @@ function TxTable({ rows, status, ledgerCurrency, emptyLabel, onConfirm, onMoveTo
               status={status}
               ledgerCurrency={ledgerCurrency}
               onConfirm={onConfirm}
+              onRegenerate={onRegenerate}
               onMoveToPending={onMoveToPending}
               onDismiss={onDismiss}
               onEdit={onEdit}
@@ -283,6 +288,7 @@ export default function LedgerView({ snapshot, onRefresh }) {
   }, [future, snapshot]);
 
   async function handleConfirm(id) {
+    if (!window.confirm(t("Confirm this transaction? This is irreversible and cannot be undone."))) return;
     setConfirming(id);
     setError("");
     try {
@@ -290,6 +296,21 @@ export default function LedgerView({ snapshot, onRefresh }) {
       await onRefresh();
     } catch (err) {
       setError(err.message || t("Failed to confirm transaction"));
+    } finally {
+      setConfirming(null);
+    }
+  }
+
+  // Rebuild from the source plan, without promising a future date or deleting it.
+  async function handleRegenerate(tx) {
+    if (!window.confirm(t("Remove this pending transaction and regenerate? It may return to pending, appear in future, or disappear if no longer needed."))) return;
+    setConfirming(tx.id);
+    setError("");
+    try {
+      await apiFetch(`/api/pending/${encodeURIComponent(tx.id)}/regenerate`, { method: "POST" });
+      await onRefresh();
+    } catch (err) {
+      setError(err.message || t("Failed to regenerate pending transaction"));
     } finally {
       setConfirming(null);
     }
@@ -384,6 +405,7 @@ export default function LedgerView({ snapshot, onRefresh }) {
           ledgerCurrency={ledgerCurrency}
           emptyLabel={t("No pending transactions.")}
           onConfirm={handleConfirm}
+          onRegenerate={(snapshot?.session?.capabilities || []).includes("planner:write") ? handleRegenerate : null}
           onDismiss={handleDismiss}
           onEdit={setEditing}
           confirming={confirming}

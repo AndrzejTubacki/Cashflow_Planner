@@ -175,6 +175,9 @@ function renderTransactionRow(tx, locale, options = {}) {
         ${canConfirmPending
           ? `<button type="button" class="btn-small" data-cashflow-confirm-pending="${escapeHtml(tx.id)}" data-cashflow-confirm-pending-date="${escapeHtml(tx.date || "")}" data-cashflow-confirm-pending-amount="${escapeHtml(tx.funded_amount ?? tx.amount ?? "")}">${escapeHtml(t(locale, "Confirm"))}</button>`
           : ""}
+        ${entityType === "pending" && canEdit
+          ? `<button type="button" class="btn-small" data-cashflow-regenerate-pending="${escapeHtml(tx.id)}">${escapeHtml(t(locale, "Regenerate"))}</button>`
+          : ""}
         ${canMoveToPending
           ? `<button type="button" class="btn-small" data-cashflow-move-future-to-pending="${escapeHtml(tx.id)}" data-cashflow-move-future-occurrence-key="${escapeHtml(tx.occurrence_key || "")}">${escapeHtml(t(locale, "To pending"))}</button>`
           : ""}

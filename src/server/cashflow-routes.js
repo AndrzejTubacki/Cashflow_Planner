@@ -60,6 +60,7 @@ export function registerCashflowRoutes(app, {
   deleteRecurringExpense,
   deleteRecurringIncome,
   dismissPendingOneOffRemainder,
+  regeneratePendingTransaction,
   ensureFxCacheForMutation,
   exportConfirmedLedgerCsv,
   exportConfirmedLedgerCsvAsync = null,
@@ -1679,6 +1680,19 @@ export function registerCashflowRoutes(app, {
         res.json(dismissed);
       } catch (error) {
         await fail(req, res, error, "Failed to dismiss pending one-off remainder", "cashflow_pending_remainder_dismiss_failed");
+      }
+    });
+
+    app.post("/api/pending/:id/regenerate", async (req, res) => {
+      try {
+        await requireBudgetCapability(req, CAPABILITIES.PLANNER_WRITE);
+        const userId = await resolveRequestUser(req);
+        const result = await withBudgetRouteLock(userId, BUDGET_RUNTIME_LOCK_JOBS.projection,
+          () => regeneratePendingTransaction(userId, req.params.id),
+          { message: "Pending regeneration is already running" });
+        res.json(result);
+      } catch (error) {
+        await fail(req, res, error, "Failed to regenerate pending transaction", "cashflow_pending_regenerate_failed");
       }
     });
 

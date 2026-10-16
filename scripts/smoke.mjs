@@ -22,6 +22,7 @@ async function requestJson(url, options = {}) {
   return JSON.parse(body);
 }
 
+// Retain the issued cookie: budget headers are not authentication.
 async function postJson(url, payload = {}) {
   const response = await fetch(url, {
     method: "POST",
@@ -36,7 +37,7 @@ async function postJson(url, payload = {}) {
     throw new Error(`${url} returned ${response.status}: ${body.slice(0, 200)}`);
   }
 
-  return JSON.parse(body);
+  return { body: JSON.parse(body), cookie: String(response.headers.get("set-cookie") || "").split(";")[0] };
 }
 
 async function waitForHealth(baseUrl, timeoutMs = Number(process.env.SMOKE_START_TIMEOUT_MS || 180000)) {
@@ -74,6 +75,8 @@ async function startServer() {
     cwd: path.resolve(import.meta.dirname, ".."),
     env: {
       ...process.env,
+      // A temporary DATA_DIR must never inherit a live PostgreSQL connection.
+      CASHFLOW_DB_BACKEND: "sqlite",
       PORT: port,
       DATA_DIR: dataDir,
       LOGS_DIR: logsDir
@@ -121,7 +124,8 @@ async function stopChildren() {
 async function main() {
   const deployed = Boolean(process.env.CASHFLOW_BASE_URL);
   let baseUrl = process.env.CASHFLOW_BASE_URL || "";
-  let userId = "local";
+  let userId = "smoke_isolated_user";
+  let cookie = "";
 
   if (!baseUrl) {
     const started = await startServer();
@@ -140,7 +144,15 @@ async function main() {
   }
 
   if (!deployed) {
-    await postJson(`${baseUrl}/api/session/select`, { userId });
+    // Fresh instances intentionally have no implicit local account. Create a
+    // synthetic account only on the temporary server owned by this script.
+    const created = await postJson(`${baseUrl}/api/users`, {
+      userId, displayName: "Isolated Smoke Test"
+    });
+    cookie = created.cookie;
+    if (!cookie || created.body?.session?.userId !== userId) {
+      throw new Error("Smoke account creation did not issue an authenticated session");
+    }
   } else {
     const session = await requestJson(`${baseUrl}/api/session`, {
       headers: {
@@ -155,7 +167,8 @@ async function main() {
   const response = await fetch(`${baseUrl}/api`, {
     cache: "no-store",
     headers: {
-      "x-cashflow-user-id": userId
+      "x-cashflow-user-id": userId,
+      ...(cookie ? { cookie } : {})
     }
   });
   const cashflow = await response.json().catch(() => ({}));

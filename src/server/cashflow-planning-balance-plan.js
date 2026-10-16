@@ -1,5 +1,7 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { todayInTimezone } from "./cashflow-date-utils.js";
+import { compareFutureRowsForDisplay, compareLedgerRowsForDisplay } from "./cashflow-display-order.js";
+export { compareFutureRowsForDisplay } from "./cashflow-display-order.js";
 import {
   addMoneyAmounts,
   roundMoneyAmount,
@@ -49,10 +51,10 @@ function comparePlanningBalanceRows(a = {}, b = {}) {
   const bucketOrder = (bucketRanks[a.bucket] ?? 99) - (bucketRanks[b.bucket] ?? 99);
   if (bucketOrder !== 0) return bucketOrder;
 
-  const createdCompare = String(a.created_at || "").localeCompare(String(b.created_at || ""));
-  if (createdCompare !== 0) return createdCompare;
-
-  return String(a.id || "").localeCompare(String(b.id || ""));
+  // Within each bucket, balances follow income-first display ordering. Bucket
+  // precedence remains unchanged; this does not participate in allocation.
+  if (a.bucket === "future") return compareFutureRowsForDisplay(a, b);
+  return compareLedgerRowsForDisplay(a, b);
 }
 
 export function createPlanningRunningBalancePlan({
@@ -113,6 +115,7 @@ export function createPlanningRunningBalancePlan({
       .filter(row => rowLedgerCurrency(row) === ledgerCurrency)
       .map(row => ({
         bucket: "future",
+        period: row.period,
         created_at: row.created_at,
         date: row.date,
         id: row.id,
@@ -181,7 +184,8 @@ export function computeReservedBalanceByRowId({
         date: row.date,
         id: row.id,
         ledger_amount: storedOrComputedConfirmedLedgerAmount(row),
-        occurrence_key: row.occurrence_key
+        occurrence_key: row.occurrence_key,
+        type: row.type
       })),
     ...pendingRows
       .filter(row => rowLedgerCurrency(row) === ledgerCurrency)
@@ -191,12 +195,15 @@ export function computeReservedBalanceByRowId({
         date: row.date,
         id: row.id,
         ledger_amount: row.ledger_amount,
-        occurrence_key: row.occurrence_key
+        occurrence_key: row.occurrence_key,
+        type: row.type
       })),
     ...futureRows
       .filter(row => rowLedgerCurrency(row) === ledgerCurrency)
       .map(row => ({
         bucket: "future",
+        period: row.period,
+        type: row.type,
         created_at: row.created_at,
         date: row.date,
         id: row.id,

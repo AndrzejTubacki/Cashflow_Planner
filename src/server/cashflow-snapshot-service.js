@@ -15,7 +15,8 @@ import {
   normalizeManualFxRates
 } from "./cashflow-fx-provider-utils.js";
 import { periodAnchorOverridesForIncome } from "./cashflow-period-utils.js";
-import { computeReservedBalanceByRowId } from "./cashflow-planning-balance-plan.js";
+import { compareFutureRowsForDisplay, computeReservedBalanceByRowId } from "./cashflow-planning-balance-plan.js";
+import { compareLedgerRowsForDisplay, confirmedRowsForDisplay } from "./cashflow-display-order.js";
 
 export function createCashflowSnapshotService({
   budgetStore = null,
@@ -224,7 +225,7 @@ export function createCashflowSnapshotService({
         SELECT *
         FROM pending_transactions
         ORDER BY date ASC, created_at ASC, id ASC
-      `).all();
+      `).all().sort(compareLedgerRowsForDisplay);
 
       const rawConfirmedTransactions = loadAllConfirmedTransactions(userId);
       const periodAnchorOverrides = periodAnchorOverridesForIncome(
@@ -247,7 +248,7 @@ export function createCashflowSnapshotService({
         SELECT *
         FROM future_transactions
         ORDER BY date ASC, period ASC, type DESC, created_at ASC, id ASC
-      `).all();
+      `).all().sort(compareFutureRowsForDisplay);
 
       const generatedTransactions = [
         ...futureTransactions,
@@ -339,7 +340,7 @@ export function createCashflowSnapshotService({
         ? confirmedFunding.source_flex_id.get(flexId) || 0
         : sumConfirmedFunding(userId, "source_flex_id", flexId, ledgerCurrency, settings));
 
-      const confirmedTransactions = rawConfirmedTransactions
+      const confirmedTransactions = confirmedRowsForDisplay(rawConfirmedTransactions
         .map(tx => ({
           ...tx,
           ledger_year: tx.ledger_year || String(tx.date || "").slice(0, 4),
@@ -353,17 +354,8 @@ export function createCashflowSnapshotService({
           running_balance:
             tx.running_balance !== null && tx.running_balance !== undefined
               ? roundMoneyAmount(tx.running_balance)
-              : roundMoneyAmount(tx.running_balance_pln)
-        }))
-        .sort((a, b) => {
-          const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
-          if (dateCompare !== 0) return dateCompare;
-
-          const createdCompare = String(b.created_at || "").localeCompare(String(a.created_at || ""));
-          if (createdCompare !== 0) return createdCompare;
-
-          return String(b.id || "").localeCompare(String(a.id || ""));
-        });
+              : tx.running_balance_pln == null ? null : roundMoneyAmount(tx.running_balance_pln)
+        })));
 
       const eventRows = db.prepare(`
         SELECT *
@@ -653,7 +645,7 @@ export function createCashflowSnapshotService({
       };
     });
 
-    const pendingTransactions = [...(pendingRows || [])].sort(asc("date", "created_at", "id"));
+    const pendingTransactions = [...(pendingRows || [])].sort(compareLedgerRowsForDisplay);
     const periodAnchorOverrides = periodAnchorOverridesForIncome(
       settings?.budget_period_income_id,
       [
@@ -670,11 +662,7 @@ export function createCashflowSnapshotService({
     );
 
     const futureTransactions = [...(futureRows || [])]
-      .sort((a, b) =>
-        asc("date", "period")(a, b)
-          || String(b?.type || "").localeCompare(String(a?.type || ""))
-          || asc("created_at", "id")(a, b)
-      );
+      .sort(compareFutureRowsForDisplay);
     const generatedTransactions = [
       ...futureTransactions,
       ...pendingTransactions
@@ -764,7 +752,7 @@ export function createCashflowSnapshotService({
       ? confirmedFunding.source_flex_id.get(flexId) || 0
       : (typeof sumConfirmedFundingAsync === "function" ? await sumConfirmedFundingAsync(userId, "source_flex_id", flexId, ledgerCurrency, settings) : sumConfirmedFunding(userId, "source_flex_id", flexId, ledgerCurrency, settings)));
 
-    const confirmedTransactions = rawConfirmedTransactions
+    const confirmedTransactions = confirmedRowsForDisplay(rawConfirmedTransactions
       .map(tx => ({
         ...tx,
         ledger_year: tx.ledger_year || String(tx.date || "").slice(0, 4),
@@ -778,17 +766,8 @@ export function createCashflowSnapshotService({
         running_balance:
           tx.running_balance !== null && tx.running_balance !== undefined
             ? roundMoneyAmount(tx.running_balance)
-            : roundMoneyAmount(tx.running_balance_pln)
-      }))
-      .sort((a, b) => {
-        const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
-        if (dateCompare !== 0) return dateCompare;
-
-        const createdCompare = String(b.created_at || "").localeCompare(String(a.created_at || ""));
-        if (createdCompare !== 0) return createdCompare;
-
-        return String(b.id || "").localeCompare(String(a.id || ""));
-      });
+            : tx.running_balance_pln == null ? null : roundMoneyAmount(tx.running_balance_pln)
+      })));
 
     const goalSummaries = await Promise.all(goals.map(async goal => {
       const target = safeConvertToLedger(goal.amount, goal.currency, "expense");

@@ -2,6 +2,10 @@ export default {
   id: "pl",
   label: "Polski",
   strings: {
+    "Regenerate": "Przelicz ponownie",
+    "Confirm this transaction? This is irreversible and cannot be undone.": "Potwierdzić tę transakcję? Ta operacja jest nieodwracalna i nie można jej cofnąć.",
+    "Remove this pending transaction and regenerate? It may return to pending, appear in future, or disappear if no longer needed.": "Usunąć tę oczekującą transakcję i przeliczyć ponownie? Może wrócić do oczekujących, pojawić się w przyszłych lub zniknąć, jeśli nie jest już potrzebna.",
+    "Failed to regenerate pending transaction": "Nie udało się ponownie przeliczyć oczekującej transakcji",
     "12-month maximum": "Maksimum z 12 miesięcy",
     "12-month minimum": "Minimum z 12 miesięcy",
     "Active": "Aktywne",

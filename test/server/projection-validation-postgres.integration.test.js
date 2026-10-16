@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { createCashflowModule } from "../../src/cashflow.js";
 import { createCashflowBackupService } from "../../src/server/cashflow-backup-service.js";
+import { createCashflowPlanMutationService } from "../../src/server/cashflow-plan-mutation-service.js";
 import { createPostgresBudgetStore, createSqliteBudgetStore } from "../../src/server/cashflow-budget-store.js";
 import { createPostgresGlobalStore } from "../../src/server/cashflow-postgres-global-store.js";
 import { initializeLedgerSchema } from "../../src/server/cashflow-schema.js";
@@ -19,6 +20,40 @@ import { postgresRuntimeTestsEnabled, withDisposablePostgresDb } from "../helper
 const gated = { skip: postgresRuntimeTestsEnabled() ? false : "enable disposable Postgres tests" };
 const stamp = "2026-10-16T08:00:00.000Z";
 const generateId = prefix => `${prefix}_${crypto.randomUUID()}`;
+
+test("Postgres single pending regeneration deletes only the selected budget row and preserves sources", gated, async () => {
+  await withStores(async store => {
+    for (const budgetId of ["firma_test", "other_test"]) {
+      await store.insertPlanningRows(budgetId, "one_off_transactions", [{
+        id: "source", name: "Synthetic source", type: "income", amount: 100,
+        currency: "PLN", date: "2026-11-30", created_at: stamp, updated_at: stamp
+      }]);
+      await store.insertPlanningRows(budgetId, "pending_transactions", ["selected", "other"].map(id => ({
+        id, name: id, type: "income", amount: 100, currency: "PLN", date: "2026-11-30",
+        source_one_off_id: "source", status: "pending", created_at: stamp, updated_at: stamp
+      })));
+    }
+    let regenerationCalls = 0;
+    const service = createCashflowPlanMutationService({
+      budgetStore: store,
+      openPlanningDb: () => { throw new Error("Postgres must not open SQLite"); },
+      withProjectionStatus: async (budgetId, result, options) => {
+        assert.equal(budgetId, "firma_test");
+        assert.deepEqual(options, { preservePending: true });
+        assert.deepEqual((await store.listPlanningRows(budgetId, "pending_transactions")).map(row => row.id), ["other"]);
+        regenerationCalls++;
+        return result;
+      }
+    });
+    await service.regeneratePendingTransaction("firma_test", "selected");
+    assert.equal(regenerationCalls, 1);
+    assert.equal((await store.listPlanningRows("other_test", "pending_transactions")).length, 2);
+    assert.equal((await store.listPlanningRows("firma_test", "one_off_transactions"))[0].amount, 100);
+    assert.equal((await store.listPlanningRows("firma_test", "event_log"))[0].action, "pending_regenerated");
+    await assert.rejects(service.regeneratePendingTransaction("firma_test", "missing"), /Pending transaction not found/);
+    assert.equal(regenerationCalls, 1);
+  });
+});
 
 async function withStores(work) {
   await withDisposablePostgresDb(async ({ databaseUrl, pool }) => {

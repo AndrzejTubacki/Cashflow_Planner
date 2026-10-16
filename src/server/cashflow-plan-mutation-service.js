@@ -2140,6 +2140,41 @@ export function createCashflowPlanMutationService({
     return plan;
   }
 
+  // Remove only this generated row, never its source/target or confirmed history.
+  // Normal regeneration may recreate it in pending, future, or not at all.
+  async function regeneratePendingTransaction(userId, id) {
+    if (budgetStore?.backend === "postgres") {
+      await budgetStore.transaction(async writer => {
+        await writer.lockBudgetLedger(userId);
+        const rows = await writer.listPlanningRows(userId, "pending_transactions");
+        if (!rows.some(row => row.id === id)) throw notFound("Pending transaction not found");
+        await writer.deletePlanningRowsById(userId, "pending_transactions", [id]);
+        await writer.insertPlanningRows(userId, "event_log", [{
+          id: generateId("evt"), action: "pending_regenerated", entity_type: "pending",
+          entity_id: id, details: "Single pending row removed for regeneration",
+          timestamp: new Date().toISOString()
+        }]);
+      });
+    } else {
+      const db = openPlanningDb(userId);
+      try {
+        db.transaction(() => {
+          if (!db.prepare("SELECT id FROM pending_transactions WHERE id = ?").get(id)) {
+            throw notFound("Pending transaction not found");
+          }
+          db.prepare("DELETE FROM pending_transactions WHERE id = ?").run(id);
+          db.prepare("INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp) VALUES (?, ?, ?, ?, ?, ?)")
+            .run(generateId("evt"), "pending_regenerated", "pending", id,
+              "Single pending row removed for regeneration", new Date().toISOString());
+        })();
+      } finally {
+        db.close();
+      }
+    }
+    // Do not invoke the coordinator's bulk negative-pending cleanup.
+    return await withProjectionStatus(userId, { ok: true, removedPendingId: id }, { preservePending: true });
+  }
+
   function dismissPendingOneOffRemainder(userId, id) {
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
       return dismissPendingOneOffRemainderWithBudgetStore(userId, id);
@@ -2379,6 +2414,7 @@ export function createCashflowPlanMutationService({
   }
 
   return {
+    regeneratePendingTransaction,
     createFlexTransaction,
     createGoal,
     createOneOffTransaction,

@@ -439,12 +439,21 @@ export function attachCashflowHandlers(root, props = {}) {
     });
   });
 
+  root.querySelectorAll("[data-cashflow-regenerate-pending]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const txId = btn.getAttribute("data-cashflow-regenerate-pending");
+      if (!txId || !window.confirm(t(locale, "Remove this pending transaction and regenerate? It may return to pending, appear in future, or disappear if no longer needed."))) return;
+      runCashflowAction(apiClient, btn, `/api/pending/${encodeURIComponent(txId)}/regenerate`, "cashflow-pending-regenerated");
+    });
+  });
+
   root.querySelectorAll("[data-cashflow-confirm-pending]").forEach(btn => {
     btn.addEventListener("click", () => {
       const txId = btn.getAttribute("data-cashflow-confirm-pending");
       const confirmedDate = btn.getAttribute("data-cashflow-confirm-pending-date") || "";
       const amount = Number(btn.getAttribute("data-cashflow-confirm-pending-amount") || 0);
       if (!txId) return;
+      if (!window.confirm(t(locale, "Confirm this transaction? This is irreversible and cannot be undone."))) return;
 
       runCashflowAction(
         apiClient,

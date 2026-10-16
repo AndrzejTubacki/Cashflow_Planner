@@ -2,6 +2,10 @@ export default {
   id: "en",
   label: "English",
   strings: {
+    "Regenerate": "Regenerate",
+    "Confirm this transaction? This is irreversible and cannot be undone.": "Confirm this transaction? This is irreversible and cannot be undone.",
+    "Remove this pending transaction and regenerate? It may return to pending, appear in future, or disappear if no longer needed.": "Remove this pending transaction and regenerate? It may return to pending, appear in future, or disappear if no longer needed.",
+    "Failed to regenerate pending transaction": "Failed to regenerate pending transaction",
     "12-month maximum": "12-month maximum",
     "12-month minimum": "12-month minimum",
     "Active": "Active",

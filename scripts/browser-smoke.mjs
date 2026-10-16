@@ -690,12 +690,115 @@ async function assertLedgerConfirmation(page, baseUrl, userId, sessionAuth) {
   await selectTab(page, "ledger", "[data-cashflow-ledger-tab]");
   const row = page.locator('tr[data-tx-type="pending"]', { hasText: name });
   await row.waitFor({ state: "visible" });
+  // Cancelling must not submit a confirmation or change the pending row.
+  page.once("dialog", dialog => {
+    assert.match(dialog.message(), /irreversible.*cannot be undone/i);
+    return dialog.dismiss();
+  });
+  await row.locator("[data-cashflow-confirm-pending]").click();
+  snapshot = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  assert.ok(snapshot.pendingTransactions.some(item => item.id === pending.id));
+  page.once("dialog", dialog => dialog.accept());
+  await waitForApiResponse(page, `/api/pending/${pending.id}/regenerate`, () =>
+    row.locator("[data-cashflow-regenerate-pending]").click()
+  );
+  snapshot = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  pending = snapshot.pendingTransactions.find(item => item.source_one_off_id === oneOff.id);
+  assert.ok(pending, "due income should regenerate in pending");
+  await row.locator(`[data-cashflow-confirm-pending="${pending.id}"]`).waitFor();
+  page.once("dialog", dialog => dialog.accept());
   await waitForApiResponse(page, `/api/pending/${pending.id}/confirm`, () =>
     row.locator("[data-cashflow-confirm-pending]").click()
   );
 
   snapshot = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
   assert.ok(snapshot.confirmedTransactions.some(item => item.name === name));
+}
+
+// Exercise real beta event handlers as well as the legacy smoke above.
+async function assertBetaPendingActions(page, baseUrl, userId, sessionAuth) {
+  const snapshot = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  const name = `Beta pending ${Date.now()}`;
+  const source = await apiJson(baseUrl, userId, "/api/one-off", { method: "POST", body: {
+    name, currency: snapshot.settings.ledger_currency, amount: 20, type: "income", date: snapshot.today
+  } }, sessionAuth);
+  await page.goto(`${baseUrl}/beta/#ledger`, { waitUntil: "domcontentloaded" });
+  const row = page.locator("tr", { hasText: name });
+  await row.getByRole("button", { name: "Confirm", exact: true }).waitFor();
+  page.once("dialog", dialog => {
+    assert.match(dialog.message(), /irreversible.*cannot be undone/i);
+    return dialog.dismiss();
+  });
+  await row.getByRole("button", { name: "Confirm", exact: true }).click();
+  let current = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  const oldPending = current.pendingTransactions.find(item => item.source_one_off_id === source.id);
+  assert.ok(oldPending);
+  page.once("dialog", dialog => dialog.accept());
+  await waitForApiResponse(page, `/api/pending/${oldPending.id}/regenerate`, () =>
+    row.getByRole("button", { name: "Regenerate", exact: true }).click()
+  );
+  current = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  const pending = current.pendingTransactions.find(item => item.source_one_off_id === source.id);
+  assert.ok(pending && pending.id !== oldPending.id);
+  // Reload to guarantee the click targets the regenerated row's new ID.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await row.getByRole("button", { name: "Confirm", exact: true }).waitFor();
+  page.once("dialog", dialog => dialog.accept());
+  await waitForApiResponse(page, `/api/pending/${pending.id}/confirm`, () =>
+    row.getByRole("button", { name: "Confirm", exact: true }).click()
+  );
+  current = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  assert.ok(current.confirmedTransactions.some(item => item.name === name));
+  await page.goto(`${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+  await waitForPage(page);
+}
+
+// Real generated/confirmed rows: test ordering as rendered in both UIs, not
+// merely the snapshot array (grouping could otherwise undo server ordering).
+async function assertIncomeFirstInBothInterfaces(page, baseUrl, userId, sessionAuth) {
+  const initial = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+  const later = new Date(`${initial.today}T12:00:00Z`);
+  later.setUTCDate(later.getUTCDate() + 10);
+  const futureDate = later.toISOString().slice(0, 10);
+  const marker = Date.now();
+  const pairs = [];
+  for (const bucket of ["confirmed", "pending", "future"]) {
+    const pair = {};
+    // Expense deliberately created first, so insertion/UUID order is unsafe.
+    for (const type of ["expense", "income"]) {
+      const name = `Order ${bucket} ${type} ${marker}`;
+      const source = await apiJson(baseUrl, userId, "/api/one-off", { method: "POST", body: {
+        name, currency: initial.settings.ledger_currency, amount: type === "income" ? 2 : 1,
+        type, date: bucket === "future" ? futureDate : initial.today
+      } }, sessionAuth);
+      pair[type] = { name, sourceId: source.id };
+    }
+    if (bucket === "confirmed") {
+      for (const type of ["income", "expense"]) {
+        const snapshot = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
+        const pending = snapshot.pendingTransactions.find(row => row.source_one_off_id === pair[type].sourceId);
+        assert.ok(pending, `missing ${type} confirmation fixture`);
+        await apiJson(baseUrl, userId, `/api/pending/${pending.id}/confirm`, { method: "POST", body: {} }, sessionAuth);
+      }
+    }
+    pairs.push(pair);
+  }
+  for (const ui of ["legacy", "beta"]) {
+    await page.goto(ui === "beta" ? `${baseUrl}/beta/#ledger` : `${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+    if (ui === "legacy") {
+      await waitForPage(page);
+      await selectTab(page, "ledger", "[data-cashflow-ledger-tab]");
+    }
+    for (const pair of pairs) {
+      await page.locator("tr", { hasText: pair.income.name }).waitFor({ state: "attached" });
+      await page.locator("tr", { hasText: pair.expense.name }).waitFor({ state: "attached" });
+      const names = await page.locator("tr").allTextContents();
+      assert.ok(names.findIndex(text => text.includes(pair.income.name))
+        < names.findIndex(text => text.includes(pair.expense.name)), `${ui}: income must appear first`);
+    }
+  }
+  await page.goto(`${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+  await waitForPage(page);
 }
 
 async function assertActionErrorsStayInApp(page) {
@@ -767,6 +870,8 @@ async function runBrowserSmoke(baseUrl, {
     if (!mutating) return;
 
     await assertLedgerConfirmation(page, baseUrl, userId, sessionAuth);
+    if (!deployed) await assertBetaPendingActions(page, baseUrl, userId, sessionAuth);
+    if (!deployed) await assertIncomeFirstInBothInterfaces(page, baseUrl, userId, sessionAuth);
     await assertModalCreateEdit(page, baseUrl, userId, sessionAuth);
     await assertSettingsSave(page, baseUrl, userId, sessionAuth);
     await assertDataPortability(page, baseUrl, userId, sessionAuth);
