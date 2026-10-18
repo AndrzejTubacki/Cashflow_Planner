@@ -78,6 +78,27 @@ paths. External mode is unsafe when clients can reach the backend port directly.
 - `data/`, `logs/`, `backups/`, and `local/` kept out of public access
 - SQLite backups before upgrades
 
+## Notification destinations (v1.1.3)
+
+Notification URLs must use HTTP(S). Cashflow checks private/non-public addresses
+when settings are saved and again for every delivery. Delivery connects only to
+the DNS addresses validated for that request, retaining the original hostname
+for HTTPS certificate verification. IPv4-mapped IPv6 is checked against IPv4
+restrictions too. Redirects are rejected: configure the final ntfy topic or
+Discord webhook URL rather than a redirecting URL.
+
+An administrator may explicitly approve an exact private ntfy hostname/IP under
+Settings > Admin > Global options. This exception is checked again at delivery,
+does not include subdomains, and never applies to Discord. Removed approvals
+take effect on subsequent deliveries, including already queued notifications.
+Blocked/failed delivery leaves the notification unsent for a later retry; failure
+logs identify the channel without exposing the destination or message contents.
+
+Private ntfy approval is a trust decision: the approved host may resolve to
+private addresses. Use only trusted hosts and restrict container egress as an
+additional boundary. Network-level controls remain important for unusual routing
+and translation arrangements that an application cannot fully infer.
+
 ## Reverse-Proxy Basic Auth
 
 This Caddy example protects the complete application. Generate the password

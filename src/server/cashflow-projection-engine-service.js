@@ -617,6 +617,18 @@ function toOriginalAmount(ledgerAmount, bufferedRate) {
  * already removed them, since later checks within the same run depend on
  * that in-progress state.
  */
+/**
+ * One-off incomes come before one-off expenses (stable, so date/created_at
+ * order is kept within each type). Recurring incomes already count for the
+ * whole period before any one-off expense is checked; without this, a
+ * one-off expense created before a same-period one-off income (e.g. a bill
+ * and a salary both dated the 29th) was checked before the income landed
+ * and wrongly marked unfundable.
+ */
+export function orderOneOffsIncomesFirst(oneOffs = []) {
+  return [...oneOffs].sort((a, b) => Number(a?.type !== "income") - Number(b?.type !== "income"));
+}
+
 export function computeProjectionPlan({
   confirmedRowsAfterToday = [],
   convert,
@@ -663,6 +675,7 @@ export function computeProjectionPlan({
   const fxRatesChanged = previousFxJson !== null && previousFxJson !== currentFxJson;
 
   const spendableBalance = period => Math.max(0, subtractMoneyAmounts(period.available, reserveFloor));
+  const oneOffsIncomesFirst = orderOneOffsIncomesFirst(oneOffs);
   const addPeriodAvailable = (period, amount) => { period.available = addMoneyAmounts(period.available, amount); };
   const subtractPeriodAvailable = (period, amount) => { period.available = subtractMoneyAmounts(period.available, amount); };
 
@@ -974,7 +987,7 @@ export function computeProjectionPlan({
     const nextPeriod = periods[periodIndex + 1];
 
     if (!currentPeriod || !nextPeriod) return;
-    if (currentPeriod.blocked || Number(currentPeriod.available || 0) <= 0) return;
+    if (Number(currentPeriod.available || 0) <= 0) return;
 
     addPeriodAvailable(nextPeriod, currentPeriod.available);
     currentPeriod.available = 0;
@@ -1050,7 +1063,7 @@ export function computeProjectionPlan({
       addPeriodAvailable(period, inserted.ledgerAmount);
     }
 
-    for (const oneOff of oneOffs) {
+    for (const oneOff of oneOffsIncomesFirst) {
       const progressKey = `${oneOff.id}:${oneOff.type}:${String(oneOff.currency || "").toUpperCase()}`;
       const progress = oneOffProgress.get(progressKey) || null;
       const confirmedAmount = roundMoneyAmount(progress?.confirmedAmount || 0);
@@ -1146,14 +1159,11 @@ export function computeProjectionPlan({
           `${oneOff.name} could not be fully funded in ${period.key}`
         );
 
-        // A blocked period skips necessary-recurring-expense funding below
-        // entirely (see the `if (period.blocked)` check after this loop), so
-        // any necessity shortfall those would have hit is invisible to this
-        // discovery run. Reserving just the one-off's shortfall unblocks the
-        // period on the real pass; if that then reveals a *further* necessity
-        // shortfall behind it, this run's discovery pass has no way to see
-        // that — it self-corrects on the next regeneration (which runs on
-        // almost every mutation already) rather than this same one.
+        // Record the one-off's own shortfall so an earlier period's surplus
+        // can be reserved for it on the real pass. The period still goes on
+        // to fund its necessary expenses (their shortfalls are recorded
+        // separately below); period.blocked only keeps goals and
+        // discretionary spending out of it.
         recordDiscoveryDeficit(period.key, subtractMoneyAmounts(requestedLedger, availableForExpense));
 
         period.blocked = true;
@@ -1176,10 +1186,11 @@ export function computeProjectionPlan({
       subtractPeriodAvailable(period, inserted.ledgerAmount);
     }
 
-    if (period.blocked) {
-      carryDebtToNextPeriod(periodIndex);
-      continue;
-    }
+    // An unfunded one-off used to `continue` here, skipping this period's
+    // necessary expenses, its reserve-transfer "out" rows and its surplus
+    // carry-over — which left a later "Reserved from" income with no
+    // matching expense (money from nowhere). period.blocked now only keeps
+    // goals and discretionary spending out of this period.
 
     for (const expense of recurringExpenses.filter(e => e.necessary)) {
       for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
@@ -1268,7 +1279,7 @@ export function computeProjectionPlan({
       subtractPeriodAvailable(period, inserted.ledgerAmount);
     }
 
-    if (!hasLocalLowerPriorityDemand(period)) {
+    if (period.blocked || !hasLocalLowerPriorityDemand(period)) {
       carrySurplusToNextPeriod(periodIndex);
     }
 
@@ -1847,6 +1858,7 @@ export function createCashflowProjectionEngineService({
         FROM one_off_transactions
         ORDER BY date ASC, created_at ASC, id ASC
       `).all();
+      const oneOffsIncomesFirst = orderOneOffsIncomesFirst(oneOffs);
 
       let predictionRows = null;
       const predictionRowsForRun = () => {
@@ -2242,7 +2254,7 @@ export function createCashflowProjectionEngineService({
         const nextPeriod = periods[periodIndex + 1];
 
         if (!currentPeriod || !nextPeriod) return;
-        if (currentPeriod.blocked || Number(currentPeriod.available || 0) <= 0) return;
+        if (Number(currentPeriod.available || 0) <= 0) return;
 
         addPeriodAvailable(nextPeriod, currentPeriod.available);
         currentPeriod.available = 0;
@@ -2329,7 +2341,7 @@ export function createCashflowProjectionEngineService({
             addPeriodAvailable(period, inserted.ledgerAmount);
           }
 
-          for (const oneOff of oneOffs) {
+          for (const oneOff of oneOffsIncomesFirst) {
             const progressKey = `${oneOff.id}:${oneOff.type}:${String(oneOff.currency || "").toUpperCase()}`;
             const progress = oneOffProgress.get(progressKey) || null;
             const confirmedAmount = roundMoneyAmount(progress?.confirmedAmount || 0);
@@ -2428,10 +2440,7 @@ export function createCashflowProjectionEngineService({
                 `${oneOff.name} could not be fully funded in ${period.key}`
               );
 
-              // See the identical comment in computeProjectionPlan() for why
-              // this only captures the one-off's own shortfall, not any
-              // necessary-recurring-expense shortfall hiding behind the
-              // block this period is about to take.
+              // See the identical comment in computeProjectionPlan().
               recordDiscoveryDeficit(period.key, subtractMoneyAmounts(requestedLedger, availableForExpense));
 
               period.blocked = true;
@@ -2454,10 +2463,11 @@ export function createCashflowProjectionEngineService({
             subtractPeriodAvailable(period, inserted.ledgerAmount);
           }
 
-          if (period.blocked) {
-            carryDebtToNextPeriod(periodIndex);
-            continue;
-          }
+          // An unfunded one-off used to `continue` here, skipping this period's
+          // necessary expenses, its reserve-transfer "out" rows and its surplus
+          // carry-over — which left a later "Reserved from" income with no
+          // matching expense (money from nowhere). period.blocked now only keeps
+          // goals and discretionary spending out of this period.
 
           for (const expense of recurringExpenses.filter(e => e.necessary)) {
             for (const date of recurringOccurrencesInPeriod(expense, period, today)) {
@@ -2552,7 +2562,7 @@ export function createCashflowProjectionEngineService({
             subtractPeriodAvailable(period, inserted.ledgerAmount);
           }
 
-          if (!hasLocalLowerPriorityDemand(period)) {
+          if (period.blocked || !hasLocalLowerPriorityDemand(period)) {
             carrySurplusToNextPeriod(periodIndex);
           }
 

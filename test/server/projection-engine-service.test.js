@@ -9,6 +9,7 @@ import {
   computeGoalAndFlexTargetLedgerAmounts,
   computeProjectionPlan,
   computeReserveClaims,
+  orderOneOffsIncomesFirst,
   findLockedReserveClaims,
   loadProjectionFundingStateFromBudgetStore,
   loadProjectionInputRowsFromBudgetStore,
@@ -510,7 +511,7 @@ test("computeProjectionPlan funds a one-off expense from the opening balance", (
   assert.equal(plan.deletePendingOccurrenceKeys.length, 0);
 });
 
-test("computeProjectionPlan marks an unaffordable one-off expense underfunded and blocks the rest of the period", () => {
+test("computeProjectionPlan marks an unaffordable one-off expense underfunded but still funds the period's necessary expenses", () => {
   const plan = computeProjectionPlan(basePlanArgs({
     openingBalance: 100,
     oneOffs: [{ id: "oneoff-1", name: "Big bill", type: "expense", currency: "PLN", amount: 300, date: "2026-06-10" }],
@@ -532,10 +533,74 @@ test("computeProjectionPlan marks an unaffordable one-off expense underfunded an
   assert.equal(oneOffRow.status, "underfunded");
   assert.equal(oneOffRow.funded_amount, 0);
 
-  // The period was blocked by the underfunded one-off before the necessary
-  // expense was reached, so it should not appear at all.
-  assert.equal(plan.futureRows.some(row => row.source_recurring_expense_id === "exp-1"), false);
+  // Regression: an underfunded one-off used to skip the period's necessary
+  // expenses entirely, so they silently vanished from the projection.
+  const rentRow = plan.futureRows.find(row => row.source_recurring_expense_id === "exp-1");
+  assert.equal(rentRow?.status, "funded");
+  assert.equal(rentRow?.ledger_amount, 50);
   assert.ok(plan.notificationRows.some(row => row.notification_type === "funding_shortfall"));
+});
+
+test("computeProjectionPlan counts a same-day one-off income before a one-off expense created earlier", () => {
+  // Regression: one-offs were processed in date/created_at order, so a bill
+  // created before the salary on the same date was checked before the
+  // salary landed and marked unfundable.
+  const plan = computeProjectionPlan(basePlanArgs({
+    oneOffs: [
+      { id: "bill", name: "Phone", type: "expense", currency: "PLN", amount: 1988.11, date: "2026-06-29", created_at: "2026-06-01T09:27:00Z" },
+      { id: "salary", name: "Salary", type: "income", currency: "PLN", amount: 14251, date: "2026-06-29", created_at: "2026-06-01T11:14:00Z" }
+    ]
+  }));
+
+  const bill = plan.futureRows.find(row => row.source_one_off_id === "bill");
+  assert.equal(bill.status, "funded");
+  assert.equal(bill.ledger_amount, 1988.11);
+});
+
+test("orderOneOffsIncomesFirst keeps date order within incomes and expenses", () => {
+  const ordered = orderOneOffsIncomesFirst([
+    { id: "e1", type: "expense", date: "2026-06-01" },
+    { id: "i1", type: "income", date: "2026-06-02" },
+    { id: "e2", type: "expense", date: "2026-06-03" },
+    { id: "i2", type: "income", date: "2026-06-04" }
+  ]);
+  assert.deepEqual(ordered.map(row => row.id), ["i1", "i2", "e1", "e2"]);
+});
+
+test("an underfunded one-off still carries its period's surplus forward and never creates an unmatched reserve transfer", () => {
+  // Regression: a period blocked by an unaffordable one-off kept its surplus
+  // (not carried forward) and skipped its "Reserved for" expense, while the
+  // next period still received the matching "Reserved from" income — money
+  // from nowhere. Mirrors the two-pass flow in regenerateProjectionsAsync.
+  const periods = () => [
+    { key: "2026-06", start: "2026-06-01", end: "2026-06-30", available: 0, blocked: false },
+    { key: "2026-07", start: "2026-07-01", end: "2026-07-31", available: 0, blocked: false }
+  ];
+  const args = {
+    openingBalance: 1000,
+    oneOffs: [
+      { id: "big", name: "Unaffordable", type: "expense", currency: "PLN", amount: 5000, date: "2026-06-20" },
+      { id: "july-bill", name: "July bill", type: "expense", currency: "PLN", amount: 800, date: "2026-07-10" }
+    ]
+  };
+  const discoveryPeriods = periods();
+  const discovery = computeProjectionPlan(basePlanArgs({ ...args, discoveryOnly: true, periods: discoveryPeriods }));
+  const reserveClaims = computeReserveClaims({
+    periods: discoveryPeriods,
+    periodsAvailable: discovery.periodsAvailable,
+    deficitsByPeriod: discovery.deficitsByPeriod
+  });
+  const plan = computeProjectionPlan(basePlanArgs({ ...args, periods: periods(), reserveClaims }));
+
+  assert.equal(plan.futureRows.find(row => row.source_one_off_id === "big").status, "underfunded");
+  // June's 1000 is carried into July, so the July bill needs no reserve.
+  assert.equal(plan.futureRows.find(row => row.source_one_off_id === "july-bill").status, "funded");
+  assert.equal(discovery.deficitsByPeriod.has("2026-07"), false);
+
+  const reserveTotal = side => plan.futureRows
+    .filter(row => String(row.occurrence_key || "").startsWith("reserve_transfer:") && row.occurrence_key.endsWith(`:${side}`))
+    .reduce((sum, row) => sum + row.ledger_amount, 0);
+  assert.equal(reserveTotal("in"), reserveTotal("out"));
 });
 
 test("computeProjectionPlan partially funds a necessary recurring expense and queues warnings", () => {

@@ -49,7 +49,11 @@ test("Postgres single pending regeneration deletes only the selected budget row 
     assert.equal(regenerationCalls, 1);
     assert.equal((await store.listPlanningRows("other_test", "pending_transactions")).length, 2);
     assert.equal((await store.listPlanningRows("firma_test", "one_off_transactions"))[0].amount, 100);
-    assert.equal((await store.listPlanningRows("firma_test", "event_log"))[0].action, "pending_regenerated");
+    const audit = (await store.listPlanningRows("firma_test", "event_log"))[0];
+    assert.equal(audit.action, "pending_regenerated");
+    assert.equal(audit.entity_id, "selected");
+    assert.deepEqual(typeof audit.details === "string" ? JSON.parse(audit.details) : audit.details,
+      { reason: "Single pending row removed for regeneration" });
     await assert.rejects(service.regeneratePendingTransaction("firma_test", "missing"), /Pending transaction not found/);
     assert.equal(regenerationCalls, 1);
   });

@@ -1,6 +1,7 @@
 ﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { fetchWithTimeout, notificationFetchTimeoutMs } from "./cashflow-fetch-utils.js";
+import { sendToNotificationDestination, pinnedNotificationRequest } from "./cashflow-notification-destination.js";
 
 export function notificationDedupeSuffix(settings, type) {
   if (type !== "necessary_underfunded") {
@@ -135,6 +136,9 @@ export function notificationPriority(settings, type) {
 export function createCashflowNotificationService({
   budgetStore = null,
   fetchImpl = fetch,
+  lookupHost,
+  getGlobalOptions = async () => ({}),
+  logError = () => {},
   generateId,
   listLedgerYears,
   openLedgerDb,
@@ -249,16 +253,33 @@ export function createCashflowNotificationService({
   }
 
   async function sendNotification(settings, notification) {
-    return notificationChannel(settings) === "discord"
-      ? sendDiscordNotification(settings, notification)
-      : sendNtfyNotification(settings, notification);
+    try {
+      return await (notificationChannel(settings) === "discord"
+        ? sendDiscordNotification(settings, notification)
+        : sendNtfyNotification(settings, notification));
+    } catch (error) {
+      // Never log the destination, credentials, or financial notification body.
+      logError("cashflow_notification_delivery_failed", { channel: notificationChannel(settings) });
+      throw error;
+    }
+  }
+
+  // Re-read admin approval on every delivery; revoked exceptions must not linger.
+  async function deliver(url, options, isNtfy) {
+    const globalOptions = isNtfy ? await getGlobalOptions() : {};
+    return fetchWithTimeout(url, options, notificationFetchTimeoutMs(), (destination, requestOptions) =>
+      sendToNotificationDestination(destination, requestOptions, {
+        lookupHost,
+        allowedPrivateHosts: isNtfy ? globalOptions?.ntfy_allowed_private_hosts || [] : [],
+        requestImpl: fetchImpl === fetch ? pinnedNotificationRequest : fetchImpl
+      }));
   }
 
   async function sendNtfyNotification(settings, notification) {
     const url = cleanNtfyUrl(settings.ntfy_url);
     const authorization = ntfyAuthorizationHeader(settings);
 
-    const response = await fetchWithTimeout(url, {
+    const response = await deliver(url, {
       method: "POST",
       headers: {
         "Title": notification.title,
@@ -267,7 +288,7 @@ export function createCashflowNotificationService({
         ...(authorization ? { "Authorization": authorization } : {})
       },
       body: notification.message
-    }, notificationFetchTimeoutMs(), fetchImpl);
+    }, true);
 
     if (!response.ok) {
       throw new Error(`ntfy failed: ${response.status} ${response.statusText}`);
@@ -278,7 +299,7 @@ export function createCashflowNotificationService({
     const title = String(notification.title || "Cashflow");
     const message = String(notification.message || "");
     const content = `${title}\n${message}`.slice(0, 2000);
-    const response = await fetchWithTimeout(settings.discord_webhook_url, {
+    const response = await deliver(settings.discord_webhook_url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -286,7 +307,7 @@ export function createCashflowNotificationService({
       body: JSON.stringify({
         content
       })
-    }, notificationFetchTimeoutMs(), fetchImpl);
+    }, false);
 
     if (!response.ok) {
       throw new Error(`discord webhook failed: ${response.status} ${response.statusText}`);

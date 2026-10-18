@@ -117,6 +117,11 @@ test("settings save rejects bracketed and complete link-local IPv6 ranges before
   assert.equal(isPrivateIp("fe9a::1"), true);
   assert.equal(isPrivateIp("febf::1"), true);
   assert.equal(isPrivateIp("fec0::1"), false);
+  // Mapped IPv6 must not bypass either save-time destination validation path.
+  await assert.rejects(
+    () => service.updateSettings("household", { ntfy_url: "http://[::ffff:7f00:1]/topic" }),
+    /administrator can allow this host/
+  );
 });
 
 test("Postgres settings save checks every resolved webhook address before opening a transaction", async () => {

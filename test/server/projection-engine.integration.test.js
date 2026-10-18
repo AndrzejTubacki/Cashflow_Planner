@@ -2080,3 +2080,27 @@ for (const incomeAnchored of [false, true]) {
     assertDates();
   }, { today: "2026-01-31" }));
 }
+
+test("SQLite engine: same-day one-off income funds an earlier-created bill and an unfunded one-off does not create unmatched reserve money", async () => withHarness(async harness => {
+  // Regression for a real budget: the bill (created first) was checked before
+  // the same-day salary, marked unfundable, and that blocked June — which
+  // then kept its surplus while July received a "Reserved from" income with
+  // no matching June expense.
+  const post = body => harness.api("/api/one-off", { method: "POST", body: { currency: "PLN", ...body } });
+  const bill = await post({ name: "Phone", amount: 1988.11, type: "expense", date: "2026-06-29" });
+  await post({ name: "Salary", amount: 14251, type: "income", date: "2026-06-29" });
+  const huge = await post({ name: "Unaffordable", amount: 100000, type: "expense", date: "2026-06-30" });
+  const july = await post({ name: "July bill", amount: 10000, type: "expense", date: "2026-07-10" });
+
+  const snapshot = await harness.api("/api");
+  const bySource = new Map(snapshot.futureTransactions.map(tx => [tx.source_one_off_id, tx]));
+
+  assert.equal(bySource.get(bill.id).status, "funded");
+  assert.equal(bySource.get(huge.id).status, "underfunded");
+  assert.equal(bySource.get(july.id).status, "funded");
+
+  const reserveTotal = side => snapshot.futureTransactions
+    .filter(tx => String(tx.occurrence_key || "").startsWith("reserve_transfer:") && tx.occurrence_key.endsWith(`:${side}`))
+    .reduce((sum, tx) => sum + Number(tx.ledger_amount), 0);
+  assert.equal(reserveTotal("in"), reserveTotal("out"));
+}));

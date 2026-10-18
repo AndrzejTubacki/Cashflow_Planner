@@ -19,6 +19,14 @@ test("single pending regeneration preserves other rows and source and can return
       const result = await harness.api(`/api/pending/${pending.id}/regenerate`, { method: "POST" });
       assert.equal(result.removedPendingId, pending.id);
       assert.equal(result._projection.projection_ok, true);
+      // Audit details must remain valid JSON on both TEXT and JSONB backends.
+      const auditDb = harness.openPlanningDb();
+      try {
+        const audit = auditDb.prepare("SELECT details FROM event_log WHERE action = 'pending_regenerated' AND entity_id = ?").get(pending.id);
+        assert.deepEqual(JSON.parse(audit.details), { reason: "Single pending row removed for regeneration" });
+      } finally {
+        auditDb.close();
+      }
       snapshot = await harness.api("/api");
       assert.ok(!snapshot.pendingTransactions.some(row => row.id === pending.id));
       for (const id of otherIds) assert.ok(snapshot.pendingTransactions.some(row => row.id === id));

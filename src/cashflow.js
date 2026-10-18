@@ -1081,6 +1081,10 @@ async function createCashflowModule({
   } = createCashflowNotificationService({
     budgetStore,
     fetchImpl,
+    getGlobalOptions: async () => typeof getGlobalOptionsAsync === "function"
+      ? await getGlobalOptionsAsync()
+      : getGlobalOptions(),
+    logError,
     generateId,
     listLedgerYears,
     openLedgerDb,

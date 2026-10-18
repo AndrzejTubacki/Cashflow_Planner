@@ -171,6 +171,7 @@ test("sendQueuedNotifications delivers to ntfy using a token embedded in the sto
     }
 
     const service = createCashflowNotificationService({
+      lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
       fetchImpl,
       generateId: prefix => `${prefix}-id`,
       listLedgerYears: dbService.listLedgerYears,
@@ -223,6 +224,7 @@ test("sendQueuedNotifications prefers an explicit ntfy_auth_token over any URL-e
     }
 
     const service = createCashflowNotificationService({
+      lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
       fetchImpl,
       generateId: prefix => `${prefix}-id`,
       listLedgerYears: dbService.listLedgerYears,
@@ -233,5 +235,45 @@ test("sendQueuedNotifications prefers an explicit ntfy_auth_token over any URL-e
     await service.sendQueuedNotifications(userId);
 
     assert.equal(calls[0].options.headers.Authorization, "Bearer tk_configured");
+  });
+});
+
+test("delivery rechecks private ntfy approval, logs safely, and retains blocked queue rows", async () => {
+  await withTempPlanningDbService(async dbService => {
+    const userId = "private-notif-user";
+    let allowed = ["notify.example.test"];
+    let requests = 0;
+    const errors = [];
+    const db = dbService.openPlanningDb(userId);
+    db.prepare("UPDATE settings SET ntfy_url = 'http://notify.example.test/topic', ntfy_auth_token = 'test-secret' WHERE id = 1").run();
+    db.prepare(`INSERT INTO notification_queue (id, notification_type, title, message, priority, queued_at, dedupe_key)
+      VALUES ('private-1', 'pending_summary', 'Private title', 'Private financial content', 'default', datetime('now'), 'private-1')`).run();
+    db.close();
+    const service = createCashflowNotificationService({
+      lookupHost: async () => [{ address: "127.0.0.1", family: 4 }],
+      getGlobalOptions: async () => ({ ntfy_allowed_private_hosts: allowed }),
+      logError: (...args) => errors.push(args),
+      fetchImpl: async () => { requests++; return { ok: true, status: 200 }; },
+      generateId: prefix => `${prefix}-id`,
+      listLedgerYears: dbService.listLedgerYears,
+      openLedgerDb: dbService.openLedgerDb,
+      openPlanningDb: dbService.openPlanningDb
+    });
+    allowed = [];
+    await assert.rejects(() => service.sendQueuedNotifications(userId), /non-public/);
+    assert.equal(requests, 0);
+    assert.deepEqual(errors, [["cashflow_notification_delivery_failed", { channel: "ntfy" }]]);
+    const check = dbService.openPlanningDb(userId);
+    assert.equal(check.prepare("SELECT sent_at FROM notification_queue WHERE id = 'private-1'").get().sent_at, null);
+    check.close();
+    allowed = ["notify.example.test"];
+    assert.equal(await service.sendQueuedNotifications(userId), 1);
+    assert.equal(requests, 1);
+    const discord = dbService.openPlanningDb(userId);
+    discord.prepare("UPDATE settings SET notification_channel = 'discord', discord_webhook_url = 'http://notify.example.test/webhook'").run();
+    discord.prepare("UPDATE notification_queue SET sent_at = NULL WHERE id = 'private-1'").run();
+    discord.close();
+    await assert.rejects(() => service.sendQueuedNotifications(userId), /non-public/);
+    assert.equal(requests, 1, "private ntfy approval never applies to Discord");
   });
 });

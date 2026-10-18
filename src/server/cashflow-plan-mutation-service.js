@@ -2142,7 +2142,10 @@ export function createCashflowPlanMutationService({
 
   // Remove only this generated row, never its source/target or confirmed history.
   // Normal regeneration may recreate it in pending, future, or not at all.
+  // Serialize audit details for PostgreSQL JSONB and SQLite TEXT alike; plain
+  // prose is not valid JSON and would roll back the PostgreSQL row deletion.
   async function regeneratePendingTransaction(userId, id) {
+    const details = JSON.stringify({ reason: "Single pending row removed for regeneration" });
     if (budgetStore?.backend === "postgres") {
       await budgetStore.transaction(async writer => {
         await writer.lockBudgetLedger(userId);
@@ -2151,7 +2154,7 @@ export function createCashflowPlanMutationService({
         await writer.deletePlanningRowsById(userId, "pending_transactions", [id]);
         await writer.insertPlanningRows(userId, "event_log", [{
           id: generateId("evt"), action: "pending_regenerated", entity_type: "pending",
-          entity_id: id, details: "Single pending row removed for regeneration",
+          entity_id: id, details,
           timestamp: new Date().toISOString()
         }]);
       });
@@ -2165,7 +2168,7 @@ export function createCashflowPlanMutationService({
           db.prepare("DELETE FROM pending_transactions WHERE id = ?").run(id);
           db.prepare("INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp) VALUES (?, ?, ?, ?, ?, ?)")
             .run(generateId("evt"), "pending_regenerated", "pending", id,
-              "Single pending row removed for regeneration", new Date().toISOString());
+              details, new Date().toISOString());
         })();
       } finally {
         db.close();

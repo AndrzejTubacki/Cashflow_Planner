@@ -314,6 +314,7 @@ test("settings updates strictly reject malformed supported fields", async () => 
 test("discord notification channel sends queued notifications through webhook JSON", async () => withHarness(async harness => {
   const calls = [];
   const notifications = createCashflowNotificationService({
+    lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return { ok: true, status: 204, statusText: "No Content" };
@@ -365,6 +366,7 @@ test("discord notification channel sends queued notifications through webhook JS
 test("ntfy notification channel sends using a token embedded in the stored URL", async () => withHarness(async harness => {
   const calls = [];
   const notifications = createCashflowNotificationService({
+    lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
       return { ok: true, status: 200, statusText: "OK" };
@@ -428,6 +430,7 @@ test("Postgres notification delivery claims one queued row per transaction", asy
     []
   ];
   const notifications = createCashflowNotificationService({
+    lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
     budgetStore: {
       backend: "postgres",
       async listPlanningRows(_budgetId, tableName) {
@@ -476,6 +479,7 @@ test("Postgres notification delivery claims one queued row per transaction", asy
 test("notification queue helper uses Postgres budget-store upsert path", async () => {
   const queued = [];
   const notifications = createCashflowNotificationService({
+    lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
     budgetStore: {
       backend: "postgres",
       async upsertNotifications(budgetId, rows) {
@@ -644,6 +648,7 @@ test("ntfy timeout leaves queued notifications unsent", async () => withHarness(
     });
   });
   const notifications = createCashflowNotificationService({
+    lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
     fetchImpl,
     generateId,
     listLedgerYears: () => [],

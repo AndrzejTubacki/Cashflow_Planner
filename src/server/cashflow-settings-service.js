@@ -12,26 +12,11 @@ import { normalizeNtfyAllowedPrivateHosts, normalizeNtfyHost, ntfyHostIsAllowed 
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 
 import dns from "node:dns";
+import { isIP } from "node:net";
 import { promisify } from "node:util";
+import { isPrivateIp } from "./cashflow-notification-destination.js";
+export { isPrivateIp } from "./cashflow-notification-destination.js";
 const lookupAsync = promisify(dns.lookup);
-
-export function isPrivateIp(ip) {
-  // block 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, 169.254.0.0/16, ::1, fc00::/7, fe80::/10
-  if (!ip) return false;
-  const normalizedIp = String(ip).trim().replace(/^\[|\]$/g, "").toLowerCase();
-  if (normalizedIp === "::1" || normalizedIp.startsWith("fc") || normalizedIp.startsWith("fd")) return true;
-  const firstIpv6Hextet = normalizedIp.includes(":")
-    ? Number.parseInt(normalizedIp.split(":", 1)[0], 16)
-    : Number.NaN;
-  if (firstIpv6Hextet >= 0xfe80 && firstIpv6Hextet <= 0xfebf) return true;
-  const parts = normalizedIp.split(".");
-  if (parts.length !== 4) return false;
-  const p0 = parseInt(parts[0], 10);
-  const p1 = parseInt(parts[1], 10);
-  if (p0 === 10 || p0 === 127 || p0 === 169 && p1 === 254 || p0 === 192 && p1 === 168) return true;
-  if (p0 === 172 && p1 >= 16 && p1 <= 31) return true;
-  return false;
-}
 
 export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAsync, {
   allowedPrivateHosts = []
@@ -45,7 +30,7 @@ export async function assertUrlIsExternalAsync(url, field, lookupHost = lookupAs
   }
   const host = normalizeNtfyHost(parsed.hostname);
   const allowed = field === "ntfy_url" && ntfyHostIsAllowed(host, allowedPrivateHosts);
-  if (!allowed && (host === "localhost" || isPrivateIp(host))) {
+  if (!allowed && (host === "localhost" || (isIP(host) && isPrivateIp(host)))) {
     throw badRequest(field === "ntfy_url"
       ? "ntfy_url resolves to a private IP address. An administrator can allow this host under Settings > Admin > Global options."
       : `${field} must point to a public external service`);
@@ -98,8 +83,7 @@ export function createCashflowSettingsService({
   recalculatePlanningRunningBalancesAsync = null
 }) {
   async function assertExternalNotificationUrls(safeUpdates) {
-    // This save-time DNS check blocks current private targets. DNS rebinding remains a
-    // residual TOCTOU risk because delivery happens later and may resolve the host again.
+    // Save-time feedback complements delivery-time DNS validation and pinning.
     const globalOptions = Object.prototype.hasOwnProperty.call(safeUpdates, "ntfy_url")
       ? await getGlobalOptions()
       : {};

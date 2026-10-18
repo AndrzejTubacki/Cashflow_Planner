@@ -388,6 +388,7 @@ test("SQLite snapshot migrates into disposable Postgres and verifies counts with
         const sentCalls = [];
         let generatedNotificationCount = 0;
         const notifications = createCashflowNotificationService({
+          lookupHost: async () => [{ address: "93.184.216.34", family: 4 }],
           budgetStore,
           fetchImpl: async (url, options) => {
             sentCalls.push({ url, options });
