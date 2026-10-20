@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS base
+FROM node:26-bookworm-slim AS base
 
 WORKDIR /app
 ENV PORT=3000
