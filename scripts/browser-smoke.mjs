@@ -477,14 +477,19 @@ async function assertBudgetManagerAndSharing(page, baseUrl, userId, sessionAuth)
   await page.locator("[data-cashflow-admin-auth]").waitFor({ state: "visible" });
   await page.locator("[data-cashflow-admin-auth-form] input[name='sessionIdleMinutes']").fill("721");
   await page.locator("[data-cashflow-admin-auth-form] input[name='sessionAbsoluteMinutes']").fill("10081");
-  await waitForApiMethodResponse(page, "PUT", "/api/admin/auth/draft", () =>
-    page.locator("[data-cashflow-admin-auth-form] button[type='submit']").click()
+  await waitForApiMethodResponse(page, "GET", "/api", () =>
+    waitForApiMethodResponse(page, "PUT", "/api/admin/auth/draft", () =>
+      page.locator("[data-cashflow-admin-auth-form] button[type='submit']").click()
+    )
   );
+  await waitForRefreshSettle(page);
   await page.locator("[data-cashflow-admin-auth]").waitFor({ state: "visible" });
-  await waitForApiMethodResponse(page, "POST", "/api/admin/auth/test", () =>
-    page.locator("[data-cashflow-admin-auth-test]").click()
+  await waitForApiMethodResponse(page, "GET", "/api", () =>
+    waitForApiMethodResponse(page, "POST", "/api/admin/auth/test", () =>
+      page.locator("[data-cashflow-admin-auth-test]").click()
+    )
   );
-  await page.waitForLoadState("networkidle").catch(() => {});
+  await waitForRefreshSettle(page);
 
   const providerId = `smoke-provider-${Date.now()}`;
   const providerForm = page.locator("[data-cashflow-admin-provider-form]").last();
