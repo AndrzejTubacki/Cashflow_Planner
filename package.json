@@ -37,16 +37,16 @@
     "beta:build": "npm --prefix frontend-beta run build"
   },
   "dependencies": {
-    "argon2": "^0.44.0",
-    "better-sqlite3": "^10.1.0",
-    "dotenv": "^17.4.2",
-    "express": "^5.1.0",
-    "express-rate-limit": "^8.5.2",
-    "helmet": "^8.2.0",
-    "openid-client": "^6.8.4",
-    "pg": "^8.23.0"
+    "argon2": "^0.45.1",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "openid-client": "^6.8.8",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
-    "playwright": "^1.60.0"
+    "playwright": "^1.64.1"
   }
 }
