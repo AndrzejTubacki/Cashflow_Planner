@@ -78,7 +78,9 @@ test("a previous Postgres schema is migrated to current", gated, async () => {
     assert.equal((await pool.query("SELECT version FROM cashflow_global_schema_version WHERE id = 1")).rows[0].version, 7);
     assert.deepEqual(
       (await pool.query("SELECT name FROM cashflow_schema_migrations ORDER BY name")).rows.map(row => row.name),
-      ["postgres-v1.0.1.sql", "postgres-v1.1.0-r2.sql", "postgres-v1.1.0.sql"]
+      // v1.0.1 and v1.1.5 are already satisfied by this schema, so they are
+      // recorded as reconciled rather than applied.
+      ["postgres-v1.0.1.sql", "postgres-v1.1.0-r2.sql", "postgres-v1.1.0.sql", "postgres-v1.1.5.sql"]
     );
   });
 });
@@ -110,6 +112,38 @@ test("a version 6 Postgres schema with v1.1.0 recorded applies only its r2 revis
     assert.equal((await pool.query(`SELECT data_type FROM information_schema.columns
       WHERE table_schema = current_schema() AND table_name = 'global_options'
         AND column_name = 'ntfy_allowed_private_hosts'`)).rows[0].data_type, "jsonb");
+  });
+});
+
+test("a planning version 20 Postgres schema applies postgres-v1.1.5.sql and gains recurring end months", gated, async () => {
+  await withDisposablePostgresDb(async ({ databaseUrl, pool }) => {
+    const global = await createPostgresGlobalStore({ databaseUrl });
+    const budget = await createPostgresBudgetStore({ databaseUrl });
+    try {
+      await global.initialize();
+      await budget.initialize();
+    } finally {
+      await Promise.all([global.close(), budget.close()]);
+    }
+    await pool.query("ALTER TABLE recurring_expenses DROP COLUMN end_month_year");
+    await pool.query("ALTER TABLE recurring_incomes DROP COLUMN end_month_year");
+    await pool.query("UPDATE cashflow_budget_schema_version SET planning_version = 20 WHERE id = 1");
+
+    const manual = await runPostgresMigrations({ databaseUrl, migrationsDir, autoMigrate: false });
+    assert.equal(manual.current, false);
+    assert.deepEqual(manual.pending, ["postgres-v1.1.5.sql"]);
+
+    const result = await runPostgresMigrations({ databaseUrl, migrationsDir });
+    assert.equal(result.current, true);
+    assert.deepEqual(result.applied, ["postgres-v1.1.5.sql"]);
+    assert.equal((await pool.query("SELECT planning_version FROM cashflow_budget_schema_version WHERE id = 1")).rows[0].planning_version, 21);
+    assert.deepEqual(
+      (await pool.query(`SELECT table_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND column_name = 'end_month_year'
+          AND table_name IN ('recurring_expenses', 'recurring_incomes')
+        ORDER BY table_name`)).rows.map(row => row.table_name),
+      ["recurring_expenses", "recurring_incomes"]
+    );
   });
 });
 

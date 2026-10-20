@@ -24,6 +24,14 @@ export function createCashflowProjectionStateService({
     return status === "partial" || status === "underfunded" ? status : "pending";
   }
 
+  // end_month_year is inclusive and must not fall before the start month.
+  function assertEndDateNotBeforeStart(item) {
+    if (item.end_month_year) item.end_month_year = requireIsoMonth(item.end_month_year, "end_month_year");
+    if (item.end_month_year && item.start_month_year && String(item.end_month_year) < String(item.start_month_year)) {
+      throw badRequest("end_month_year must not be before start_month_year");
+    }
+  }
+
   function requireStartMonthYearIfNeeded(input) {
     const repeatEveryMonths = input.repeat_every_months === undefined
       ? 1
@@ -36,6 +44,7 @@ export function createCashflowProjectionStateService({
     if (input.start_month_year) {
       input.start_month_year = requireIsoMonth(input.start_month_year);
     }
+    assertEndDateNotBeforeStart(input);
 
     return repeatEveryMonths;
   }
@@ -59,6 +68,7 @@ export function createCashflowProjectionStateService({
     if (merged.start_month_year) {
       merged.start_month_year = requireIsoMonth(merged.start_month_year);
     }
+    assertEndDateNotBeforeStart(merged);
 
     return merged;
   }

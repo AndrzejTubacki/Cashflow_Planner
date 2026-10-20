@@ -76,6 +76,13 @@ async function migrationAlreadyApplied(client, migration) {
     return Number(version.rows?.[0]?.version) >= 7
       && await columnExists(client, "global_options", "ntfy_allowed_private_hosts");
   }
+  if (migration.name === "postgres-v1.1.5.sql") {
+    if (!await tableExists(client, "cashflow_budget_schema_version")) return false;
+    const version = await client.query("SELECT planning_version FROM cashflow_budget_schema_version WHERE id = 1");
+    return Number(version.rows?.[0]?.planning_version) >= 21
+      && await columnExists(client, "recurring_expenses", "end_month_year")
+      && await columnExists(client, "recurring_incomes", "end_month_year");
+  }
   return false;
 }
 

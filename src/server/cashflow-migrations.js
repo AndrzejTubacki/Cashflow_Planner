@@ -819,6 +819,16 @@ export function applyPlanningMigrations(db, {
       addColumnIfMissing("recurring_expenses", "anchor_income_id", "anchor_income_id TEXT");
       db.pragma("user_version = 20");
     }
+
+    if (currentVersion < 21) {
+      beforeStep(21, db);
+      // Optional inclusive last month (YYYY-MM) for recurring items (e.g. a
+      // loan's final instalment); the day still comes from the anchor
+      // fields. NULL keeps repeating indefinitely.
+      if (tableExists("recurring_expenses")) addColumnIfMissing("recurring_expenses", "end_month_year", "end_month_year TEXT");
+      if (tableExists("recurring_incomes")) addColumnIfMissing("recurring_incomes", "end_month_year", "end_month_year TEXT");
+      db.pragma("user_version = 21");
+    }
   })();
 
   if (tableExists("future_transactions")) {

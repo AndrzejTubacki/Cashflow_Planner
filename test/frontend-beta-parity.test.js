@@ -170,8 +170,15 @@ test("beta recurring expense defaults and conditional fields match the legacy ru
   assert.match(modal, /usesPredictionHistory/);
   assert.match(modal, /usesMinimumHistory/);
   assert.match(modal, /usesHolidayCalendar/);
-  assert.match(modal, /repeatNeedsStart \? \(/);
-  assert.match(modal, /onChange=\{e => set\("start_month_year", e\.target\.value\)\}\s*required/);
+  // Start month is always editable (bounds every schedule) and only
+  // required for multi-month repeats; end month is optional and clearable.
+  assert.match(modal, /onChange=\{e => set\("start_month_year", e\.target\.value\)\}\s*required=\{repeatNeedsStart\}/);
+  assert.match(modal, /body\.start_month_year = form\.start_month_year \|\| null/);
+  assert.match(modal, /body\.end_month_year = form\.end_month_year \|\| null/);
+  assert.match(modal, /set\("end_month_year", e\.target\.value\)/);
+  assert.match(modal, /start_month_year: source\.start_month_year \?\? \(isCreate \? String\(today \?\? todayIso\(\)\)\.slice\(0, 7\) : ""\)/);
+  assert.doesNotMatch(modal, /"2026-05"/);
+  assert.match(recurring, /formatMessage\("Until \{month\}"/);
   assert.match(recurring, /settings=\{snapshot\?\.settings \|\| \{\}\}/);
 });
 

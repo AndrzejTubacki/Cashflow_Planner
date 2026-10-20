@@ -1062,3 +1062,14 @@ test("funding overview hides fully confirmed items and prioritizes missing proje
   assert.match(html, /Show all/);
   assert.match(html, /Show less/);
 });
+
+test("legacy recurring form pre-fills a new item's start month with the budget's current month", () => {
+  // Regression: the start month showed a hard-coded "2026-05" placeholder.
+  const createHtml = renderCashflowModalFields("en", "recurring-expense", {}, { today: "2026-10-20" });
+  assert.match(createHtml, /name="start_month_year" placeholder="2026-10"[^>]*value="2026-10"/);
+  assert.match(createHtml, /name="end_month_year" placeholder="2026-10"[^>]*value=""/);
+  assert.doesNotMatch(createHtml, /2026-05/);
+
+  const editHtml = renderCashflowModalFields("en", "recurring-income", { id: "inc-1", start_month_year: null }, { today: "2026-10-20" });
+  assert.match(editHtml, /name="start_month_year"[^>]*value=""/);
+});

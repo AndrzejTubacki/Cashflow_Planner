@@ -4,7 +4,7 @@ import {
   NOTIFICATION_DELIVERY_TIME
 } from "./cashflow-constants.js";
 
-export const PLANNING_SCHEMA_VERSION = 20;
+export const PLANNING_SCHEMA_VERSION = 21;
 export const LEDGER_SCHEMA_VERSION = 5;
 export const PLANNING_TABLE_NAMES = [
   "settings",
@@ -141,6 +141,7 @@ export function initializePlanningSchema(db) {
       active INTEGER NOT NULL DEFAULT 1,
       repeat_every_months INTEGER NOT NULL CHECK (repeat_every_months BETWEEN 1 AND 12),
       start_month_year TEXT,
+      end_month_year TEXT,
       anchor_type TEXT NOT NULL CHECK (anchor_type IN ('day_of_month', 'month_end')),
       anchor_day_of_month INTEGER CHECK (
         (anchor_type = 'day_of_month' AND anchor_day_of_month BETWEEN 1 AND 31)
@@ -181,6 +182,7 @@ export function initializePlanningSchema(db) {
       active INTEGER NOT NULL DEFAULT 1,
       repeat_every_months INTEGER NOT NULL CHECK (repeat_every_months BETWEEN 1 AND 12),
       start_month_year TEXT,
+      end_month_year TEXT,
       anchor_type TEXT NOT NULL CHECK (anchor_type IN ('day_of_month', 'month_end')),
       anchor_day_of_month INTEGER CHECK (
         (anchor_type = 'day_of_month' AND anchor_day_of_month BETWEEN 1 AND 31)

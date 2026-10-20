@@ -71,12 +71,15 @@ function syncCashflowAnchorFields(modal) {
     const repeatEveryMonths = Number(repeatInput.value || 1);
     const needsStartMonth = repeatEveryMonths > 1;
 
-    setHidden("[data-start-month-year-field]", !needsStartMonth);
-
+    // The start month now bounds every schedule, so it stays visible;
+    // it is only required (and anchors the cycle) when repeating every
+    // few months.
     const startInput = modal.querySelector('input[name="start_month_year"]');
     if (startInput) {
       startInput.required = needsStartMonth;
     }
+    modal.querySelectorAll("[data-start-month-year-hint-optional]").forEach(el => { el.hidden = needsStartMonth; });
+    modal.querySelectorAll("[data-start-month-year-hint-required]").forEach(el => { el.hidden = !needsStartMonth; });
   };
 
   const applyFlexVisibility = () => {

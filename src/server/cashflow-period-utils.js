@@ -149,7 +149,9 @@ export function buildBudgetPeriods(settings, recurringIncomes, today, futurePeri
 
     const year = d.getUTCFullYear();
     const month = d.getUTCMonth() + 1;
-    const scheduledAnchorDate = calculateNextDate(selectedIncome, year, month);
+    // Period boundaries ignore the income's start/end month so the
+    // current period always exists.
+    const scheduledAnchorDate = calculateNextDate(selectedIncome, year, month, { ignoreActiveWindow: true });
     const anchorDate = anchorOverrides.get(scheduledAnchorDate) || scheduledAnchorDate;
 
     if (anchorDate && !anchors.includes(anchorDate)) {

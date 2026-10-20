@@ -53,6 +53,10 @@ function validateRecurring(next, kind) {
   normalizeIfPresent(next, "start_month_year", (value, field) => value === null || value === ""
     ? null
     : requireIsoMonth(value, field));
+  // Optional inclusive last month (YYYY-MM); null/"" clears it.
+  normalizeIfPresent(next, "end_month_year", (value, field) => value === null || value === ""
+    ? null
+    : requireIsoMonth(value, field));
   normalizeIfPresent(next, "anchor_type", (value, field) => requireEnum(value, field, ["day_of_month", "month_end"]));
   normalizeIfPresent(next, "anchor_day_of_month", (value, field) => requireNullableNumber(value, field, {
     min: 1,

@@ -324,10 +324,10 @@ export function createCashflowPlanMutationService({
           INSERT INTO recurring_expenses (
             id, name, currency, amount, prediction_strategy, prediction_substitute_missing,
             prediction_min_recorded_months, necessary, active,
-            repeat_every_months, start_month_year, anchor_type, anchor_day_of_month,
+            repeat_every_months, start_month_year, end_month_year, anchor_type, anchor_day_of_month,
             anchor_offset_days, anchor_business_day_adjustment, anchor_holiday_country,
             anchor_income_id, planned_transaction_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         `).run(
           id,
           input.name || "Unnamed",
@@ -340,6 +340,7 @@ export function createCashflowPlanMutationService({
           input.active ?? 1,
           repeatEveryMonths,
           input.start_month_year || null,
+          input.end_month_year || null,
           ["day_of_month", "month_end"].includes(input.anchor_type) ? input.anchor_type : "month_end",
           input.anchor_day_of_month ?? null,
           input.anchor_offset_days ?? 0,
@@ -399,6 +400,7 @@ export function createCashflowPlanMutationService({
         prediction_strategy: ["fixed", "12month_max"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
         prediction_substitute_missing: normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
         repeat_every_months: repeatEveryMonths,
+        end_month_year: input.end_month_year || null,
         start_month_year: input.start_month_year || null,
         updated_at: timestamp
       }]);
@@ -450,6 +452,7 @@ export function createCashflowPlanMutationService({
             active = ?,
             repeat_every_months = ?,
             start_month_year = ?,
+            end_month_year = ?,
             anchor_type = ?,
             anchor_day_of_month = ?,
             anchor_offset_days = ?,
@@ -469,6 +472,7 @@ export function createCashflowPlanMutationService({
           merged.active,
           merged.repeat_every_months,
           merged.start_month_year || null,
+          merged.end_month_year || null,
           ["day_of_month", "month_end"].includes(merged.anchor_type) ? merged.anchor_type : "month_end",
           merged.anchor_day_of_month ?? null,
           merged.anchor_offset_days,
@@ -537,6 +541,7 @@ export function createCashflowPlanMutationService({
         prediction_strategy: ["fixed", "12month_max"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
         prediction_substitute_missing: normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
         repeat_every_months: merged.repeat_every_months,
+        end_month_year: merged.end_month_year || null,
         start_month_year: merged.start_month_year || null,
         updated_at: new Date().toISOString()
       }]);
@@ -600,10 +605,10 @@ export function createCashflowPlanMutationService({
           INSERT INTO recurring_incomes (
             id, name, currency, amount, prediction_strategy, prediction_substitute_missing,
             prediction_min_recorded_months, active,
-            repeat_every_months, start_month_year, anchor_type, anchor_day_of_month,
+            repeat_every_months, start_month_year, end_month_year, anchor_type, anchor_day_of_month,
             anchor_offset_days, anchor_business_day_adjustment, anchor_holiday_country,
             period_setting, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
         `).run(
           id,
           input.name || "Unnamed",
@@ -615,6 +620,7 @@ export function createCashflowPlanMutationService({
           active,
           repeatEveryMonths,
           input.start_month_year || null,
+          input.end_month_year || null,
           ["day_of_month", "month_end"].includes(input.anchor_type) ? input.anchor_type : "month_end",
           input.anchor_day_of_month ?? null,
           input.anchor_offset_days ?? 0,
@@ -685,6 +691,7 @@ export function createCashflowPlanMutationService({
         prediction_strategy: ["fixed", "12month_min"].includes(input.prediction_strategy) ? input.prediction_strategy : "fixed",
         prediction_substitute_missing: normalizePredictionSubstituteMissing(input.prediction_strategy, input.prediction_substitute_missing),
         repeat_every_months: repeatEveryMonths,
+        end_month_year: input.end_month_year || null,
         start_month_year: input.start_month_year || null,
         updated_at: timestamp
       }]);
@@ -740,6 +747,7 @@ export function createCashflowPlanMutationService({
             active = ?,
             repeat_every_months = ?,
             start_month_year = ?,
+            end_month_year = ?,
             anchor_type = ?,
             anchor_day_of_month = ?,
             anchor_offset_days = ?,
@@ -758,6 +766,7 @@ export function createCashflowPlanMutationService({
           nextActive,
           merged.repeat_every_months,
           merged.start_month_year || null,
+          merged.end_month_year || null,
           ["day_of_month", "month_end"].includes(merged.anchor_type) ? merged.anchor_type : "month_end",
           merged.anchor_day_of_month ?? null,
           merged.anchor_offset_days,
@@ -827,6 +836,7 @@ export function createCashflowPlanMutationService({
         prediction_strategy: ["fixed", "12month_min"].includes(merged.prediction_strategy) ? merged.prediction_strategy : "fixed",
         prediction_substitute_missing: normalizePredictionSubstituteMissing(merged.prediction_strategy, merged.prediction_substitute_missing),
         repeat_every_months: merged.repeat_every_months,
+        end_month_year: merged.end_month_year || null,
         start_month_year: merged.start_month_year || null,
         updated_at: new Date().toISOString()
       }]);

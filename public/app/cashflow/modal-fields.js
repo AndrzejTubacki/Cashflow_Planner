@@ -100,6 +100,9 @@ function renderPredictionMinRecordedMonthsField(locale, item = {}) {
 
 export function renderCashflowModalFields(locale, entityType, item = {}, cashflow = null) {
   const today = todayForCashflow(cashflow);
+  // New recurring items start in the budget's current month by default.
+  const currentMonth = String(today || "").slice(0, 7);
+  const isCreate = !item?.id;
 
   const defaultPriority = fieldValue(
     item,
@@ -162,7 +165,15 @@ export function renderCashflowModalFields(locale, entityType, item = {}, cashflo
 
     <label data-start-month-year-field>
       <span>${escapeHtml(t(locale, "Start YYYY-MM"))}</span>
-      <input name="start_month_year" placeholder="2026-05" value="${escapeHtml(fieldValue(item, "start_month_year"))}">
+      <input name="start_month_year" placeholder="${escapeHtml(currentMonth)}" pattern="[0-9]{4}-(0[1-9]|1[0-2])" value="${escapeHtml(fieldValue(item, "start_month_year", isCreate ? currentMonth : ""))}">
+      <small data-start-month-year-hint-optional>${escapeHtml(t(locale, "Optional. Nothing is planned before this month."))}</small>
+      <small data-start-month-year-hint-required>${escapeHtml(t(locale, "Required when repeating every few months: the first month it occurs."))}</small>
+    </label>
+
+    <label>
+      <span>${escapeHtml(t(locale, "End YYYY-MM"))}</span>
+      <input name="end_month_year" placeholder="${escapeHtml(currentMonth)}" pattern="[0-9]{4}-(0[1-9]|1[0-2])" value="${escapeHtml(fieldValue(item, "end_month_year"))}">
+      <small>${escapeHtml(t(locale, "Optional. The last month it occurs; leave empty to repeat indefinitely."))}</small>
     </label>
   `;
 

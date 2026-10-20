@@ -44,7 +44,9 @@ export default function EditModal({ entityType, item = null, onClose, onSaved, r
     prediction_substitute_missing: source.prediction_substitute_missing ?? "none",
     prediction_min_recorded_months: source.prediction_min_recorded_months ?? 6,
     repeat_every_months: source.repeat_every_months ?? 1,
-    start_month_year: source.start_month_year ?? "",
+    // New items start in the budget's current month by default.
+    start_month_year: source.start_month_year ?? (isCreate ? String(today ?? todayIso()).slice(0, 7) : ""),
+    end_month_year: source.end_month_year ?? "",
     anchor_type: source.anchor_type ?? "month_end",
     anchor_day_of_month: source.anchor_day_of_month ?? 1,
     anchor_offset_days: source.anchor_offset_days ?? 0,
@@ -123,7 +125,10 @@ export default function EditModal({ entityType, item = null, onClose, onSaved, r
       if (usesPredictionHistory) body.prediction_substitute_missing = form.prediction_substitute_missing;
       if (usesMinimumHistory) body.prediction_min_recorded_months = Number(form.prediction_min_recorded_months) || 6;
       body.repeat_every_months = Number(form.repeat_every_months) || 1;
-      if (repeatNeedsStart) body.start_month_year = form.start_month_year;
+      // Start month bounds every schedule (and anchors multi-month ones);
+      // end month is the optional inclusive last month. Empty clears.
+      body.start_month_year = form.start_month_year || null;
+      body.end_month_year = form.end_month_year || null;
       body.anchor_type = form.anchor_type;
       if (!form.anchor_income_id && form.anchor_type === "day_of_month") {
         body.anchor_day_of_month = Number(form.anchor_day_of_month) || 1;
@@ -353,19 +358,31 @@ export default function EditModal({ entityType, item = null, onClose, onSaved, r
                     <span>{t("Repeat every X months")}</span>
                     <input type="number" min="1" max="12" value={form.repeat_every_months} onChange={e => set("repeat_every_months", e.target.value)} />
                   </label>
-                  {repeatNeedsStart ? (
-                    <label className="beta-field">
-                      <span>{t("Start YYYY-MM")}</span>
-                      <input
-                        type="text"
-                        placeholder={t("2026-05")}
-                        pattern="[0-9]{4}-(0[1-9]|1[0-2])"
-                        value={form.start_month_year}
-                        onChange={e => set("start_month_year", e.target.value)}
-                        required
-                      />
-                    </label>
-                  ) : null}
+                  <label className="beta-field">
+                    <span>{t("Start YYYY-MM")}</span>
+                    <input
+                      type="text"
+                      placeholder={String(today ?? todayIso()).slice(0, 7)}
+                      pattern="[0-9]{4}-(0[1-9]|1[0-2])"
+                      value={form.start_month_year}
+                      onChange={e => set("start_month_year", e.target.value)}
+                      required={repeatNeedsStart}
+                    />
+                    <small className="beta-hint">{repeatNeedsStart
+                      ? t("Required when repeating every few months: the first month it occurs.")
+                      : t("Optional. Nothing is planned before this month.")}</small>
+                  </label>
+                  <label className="beta-field">
+                    <span>{t("End YYYY-MM")}</span>
+                    <input
+                      type="text"
+                      placeholder={String(today ?? todayIso()).slice(0, 7)}
+                      pattern="[0-9]{4}-(0[1-9]|1[0-2])"
+                      value={form.end_month_year}
+                      onChange={e => set("end_month_year", e.target.value)}
+                    />
+                    <small className="beta-hint">{t("Optional. The last month it occurs; leave empty to repeat indefinitely.")}</small>
+                  </label>
 
                   {entityType === "recurring-expense" ? (
                     <>

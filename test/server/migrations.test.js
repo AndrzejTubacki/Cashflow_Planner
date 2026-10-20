@@ -503,3 +503,22 @@ test("planning migration adds ntfy_auth_token even when settings has no ntfy_url
   assert.equal(version, PLANNING_SCHEMA_VERSION);
   assert.equal(columns.includes("ntfy_auth_token"), true);
 }));
+
+test("planning migration from version 20 adds nullable recurring end months and keeps rows", () => withTempDb(db => {
+  db.exec(`
+    PRAGMA user_version = 20;
+    CREATE TABLE recurring_expenses (id TEXT PRIMARY KEY, name TEXT, start_month_year TEXT);
+    CREATE TABLE recurring_incomes (id TEXT PRIMARY KEY, name TEXT, start_month_year TEXT);
+    INSERT INTO recurring_expenses (id, name, start_month_year) VALUES ('exp-1', 'Rent', '2026-01');
+    INSERT INTO recurring_incomes (id, name, start_month_year) VALUES ('inc-1', 'Salary', NULL);
+  `);
+
+  applyPlanningMigrations(db);
+
+  assert.equal(db.pragma("user_version", { simple: true }), PLANNING_SCHEMA_VERSION);
+  assert.deepEqual(
+    { ...db.prepare("SELECT id, name, start_month_year, end_month_year FROM recurring_expenses").get() },
+    { id: "exp-1", name: "Rent", start_month_year: "2026-01", end_month_year: null }
+  );
+  assert.equal(db.prepare("SELECT end_month_year FROM recurring_incomes WHERE id = 'inc-1'").get().end_month_year, null);
+}));

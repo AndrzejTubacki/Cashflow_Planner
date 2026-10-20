@@ -288,3 +288,64 @@ test("recurrence period lookup includes shifted source months and preserves thei
     start: "2026-11-01", end: "2026-11-30"
   }, "2026-11-03"), ["2026-11-30"]);
 });
+
+test("monthly schedules honour start_month_year as a lower bound", () => {
+  const rent = { repeat_every_months: 1, start_month_year: "2027-01", anchor_type: "day_of_month", anchor_day_of_month: 10 };
+
+  assert.equal(calculateNextDate(rent, 2026, 12), null);
+  assert.equal(calculateNextDate(rent, 2027, 1), "2027-01-10");
+  assert.equal(calculateNextDate(rent, 2027, 2), "2027-02-10");
+});
+
+test("end_month_year is an inclusive upper bound on the month; the day comes from the anchor", () => {
+  const loan = { repeat_every_months: 1, anchor_type: "day_of_month", anchor_day_of_month: 15, end_month_year: "2027-03" };
+
+  assert.equal(calculateNextDate(loan, 2027, 3), "2027-03-15");
+  assert.equal(calculateNextDate(loan, 2027, 4), null);
+  assert.equal(calculateNextDate({ ...loan, anchor_type: "month_end" }, 2027, 3), "2027-03-31");
+});
+
+test("the end month bounds the source month even when an offset moves the date past it", () => {
+  const bill = { repeat_every_months: 1, anchor_type: "month_end", anchor_offset_days: 2, end_month_year: "2027-03" };
+
+  assert.equal(calculateNextDate(bill, 2027, 3), "2027-04-02");
+  assert.equal(calculateNextDate(bill, 2027, 4), null);
+});
+
+test("an expense that follows an income stops when the income ends", () => {
+  const salary = { id: "inc", repeat_every_months: 1, anchor_type: "day_of_month", anchor_day_of_month: 28, end_month_year: "2027-01" };
+  const rent = { repeat_every_months: 1, anchor_type: "month_end", anchor_income_id: "inc", anchor_income: salary, anchor_offset_days: 1 };
+
+  assert.equal(calculateNextDate(rent, 2027, 1), "2027-01-29");
+  assert.equal(calculateNextDate(rent, 2027, 2), null);
+});
+
+test("ignoreActiveWindow keeps the start and end months out of the calculation", () => {
+  const income = { repeat_every_months: 1, anchor_type: "day_of_month", anchor_day_of_month: 10, start_month_year: "2027-06", end_month_year: "2027-01" };
+
+  assert.equal(calculateNextDate(income, 2026, 11, { ignoreActiveWindow: true }), "2026-11-10");
+  assert.equal(calculateNextDate(income, 2026, 11), null);
+});
+
+test("recurringOccurrencesInPeriod skips occurrences outside the active window", () => {
+  const item = { repeat_every_months: 1, anchor_type: "day_of_month", anchor_day_of_month: 5, start_month_year: "2026-12", end_month_year: "2027-01" };
+  const occurrences = period => recurringOccurrencesInPeriod(item, period, "2026-10-19");
+
+  assert.deepEqual(occurrences({ start: "2026-11-01", end: "2026-11-30" }), []);
+  assert.deepEqual(occurrences({ start: "2026-12-01", end: "2026-12-31" }), ["2026-12-05"]);
+  assert.deepEqual(occurrences({ start: "2027-01-01", end: "2027-01-31" }), ["2027-01-05"]);
+  assert.deepEqual(occurrences({ start: "2027-02-01", end: "2027-02-28" }), []);
+});
+
+test("a period-defining income with a future start or past end still defines today's period", async () => {
+  const { buildBudgetPeriods } = await import("../../src/server/cashflow-period-utils.js");
+  const income = {
+    id: "salary", active: 1, period_setting: 1, repeat_every_months: 1,
+    anchor_type: "day_of_month", anchor_day_of_month: 10,
+    start_month_year: "2027-06", end_month_year: "2026-01"
+  };
+  const periods = buildBudgetPeriods({ budget_period_income_id: "salary" }, [income], "2026-10-19", 2);
+
+  assert.equal(periods[0].start, "2026-10-10");
+  assert.equal(periods[0].end, "2026-11-09");
+});

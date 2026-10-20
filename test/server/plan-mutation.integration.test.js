@@ -895,3 +895,57 @@ test("sync snapshot keeps orphaned planning rows without throwing", async () => 
   const snapshotGoal = snapshot.goals.find(g => g.id === goal.id);
   assert.ok(snapshotGoal, "Orphaned goal should not be filtered out by sync snapshot");
 }));
+
+test("recurring start and end months bound projected occurrences and can be cleared", async () => withHarness(async harness => {
+  await configure(harness);
+  await harness.api("/api/settings", { method: "PUT", body: { future_periods: 6 } });
+  await seedConfirmedIncome(harness);
+
+  const expense = await harness.api("/api/recurring-expenses", {
+    method: "POST",
+    body: {
+      name: "Loan instalment",
+      currency: "PLN",
+      amount: 50,
+      prediction_strategy: "fixed",
+      necessary: 1,
+      active: 1,
+      priority: 1,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 10,
+      anchor_business_day_adjustment: "none",
+      repeat_every_months: 1,
+      start_month_year: "2026-07",
+      end_month_year: "2026-08"
+    }
+  });
+  assert.equal(expense.end_month_year, "2026-08");
+
+  const datesFor = async () => (await harness.api("/api")).futureTransactions
+    .filter(tx => tx.source_recurring_expense_id === expense.id)
+    .map(tx => tx.date)
+    .sort();
+  assert.deepEqual(await datesFor(), ["2026-07-10", "2026-08-10"]);
+
+  const tooEarly = await harness.request(`/api/recurring-expenses/${encodeURIComponent(expense.id)}`, {
+    method: "PUT",
+    body: { end_month_year: "2026-06" }
+  });
+  assert.equal(tooEarly.response.status, 400);
+  assert.match(tooEarly.body.error, /end_month_year/);
+
+  const invalid = await harness.request(`/api/recurring-expenses/${encodeURIComponent(expense.id)}`, {
+    method: "PUT",
+    body: { end_month_year: "2026-13" }
+  });
+  assert.equal(invalid.response.status, 400);
+
+  const cleared = await harness.api(`/api/recurring-expenses/${encodeURIComponent(expense.id)}`, {
+    method: "PUT",
+    body: { end_month_year: "" }
+  });
+  assert.equal(cleared.end_month_year, null);
+  const datesAfterClearing = await datesFor();
+  assert.equal(datesAfterClearing[0], "2026-07-10");
+  assert.ok(datesAfterClearing.some(date => date > "2026-08-31"));
+}));

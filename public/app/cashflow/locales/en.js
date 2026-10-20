@@ -1024,6 +1024,12 @@ export default {
     "Manage your account, this budget, and instance-wide options in one place.": "Manage your account, this budget, and instance-wide options in one place.",
     "Settings sections": "Settings sections",
     "Version {version}": "Version {version}",
-    "Update available: {version}": "Update available: {version}"
+    "Update available: {version}": "Update available: {version}",
+    "End YYYY-MM": "End YYYY-MM",
+    "From {month}": "From {month}",
+    "Until {month}": "Until {month}",
+    "Optional. Nothing is planned before this month.": "Optional. Nothing is planned before this month.",
+    "Required when repeating every few months: the first month it occurs.": "Required when repeating every few months: the first month it occurs.",
+    "Optional. The last month it occurs; leave empty to repeat indefinitely.": "Optional. The last month it occurs; leave empty to repeat indefinitely."
   }
 };

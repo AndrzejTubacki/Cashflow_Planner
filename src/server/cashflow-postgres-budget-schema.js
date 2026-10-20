@@ -81,6 +81,7 @@ export const POSTGRES_BUDGET_COLUMNS = {
     "active",
     "repeat_every_months",
     "start_month_year",
+    "end_month_year",
     "anchor_type",
     "anchor_day_of_month",
     "anchor_offset_days",
@@ -103,6 +104,7 @@ export const POSTGRES_BUDGET_COLUMNS = {
     "active",
     "repeat_every_months",
     "start_month_year",
+    "end_month_year",
     "anchor_type",
     "anchor_day_of_month",
     "anchor_offset_days",
@@ -390,6 +392,7 @@ CREATE TABLE IF NOT EXISTS recurring_expenses (
   active BOOLEAN NOT NULL DEFAULT true,
   repeat_every_months INTEGER NOT NULL CHECK (repeat_every_months BETWEEN 1 AND 12),
   start_month_year TEXT CHECK (start_month_year IS NULL OR start_month_year ~ '^\\d{4}-\\d{2}$'),
+  end_month_year TEXT CHECK (end_month_year IS NULL OR end_month_year ~ '^\\d{4}-\\d{2}$'),
   anchor_type TEXT NOT NULL CHECK (anchor_type IN ('day_of_month', 'month_end')),
   anchor_day_of_month INTEGER CHECK (
     (anchor_type = 'day_of_month' AND anchor_day_of_month BETWEEN 1 AND 31)
@@ -434,6 +437,7 @@ CREATE TABLE IF NOT EXISTS recurring_incomes (
   active BOOLEAN NOT NULL DEFAULT true,
   repeat_every_months INTEGER NOT NULL CHECK (repeat_every_months BETWEEN 1 AND 12),
   start_month_year TEXT CHECK (start_month_year IS NULL OR start_month_year ~ '^\\d{4}-\\d{2}$'),
+  end_month_year TEXT CHECK (end_month_year IS NULL OR end_month_year ~ '^\\d{4}-\\d{2}$'),
   anchor_type TEXT NOT NULL CHECK (anchor_type IN ('day_of_month', 'month_end')),
   anchor_day_of_month INTEGER CHECK (
     (anchor_type = 'day_of_month' AND anchor_day_of_month BETWEEN 1 AND 31)

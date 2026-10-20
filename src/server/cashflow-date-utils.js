@@ -217,7 +217,34 @@ export function addMonths(dateString, months) {
   return d.toISOString().slice(0, 10);
 }
 
-export function calculateNextDate(anchor, year, month) {
+function monthIndex(value) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ""));
+  return match ? Number(match[1]) * 12 + (Number(match[2]) - 1) : null;
+}
+
+/**
+ * Whether a recurring item's optional active window allows the occurrence
+ * belonging to source month (year, month). start_month_year and
+ * end_month_year (both YYYY-MM, inclusive) bound the month; the day within
+ * it is still decided by the anchor fields. repeat_every_months > 1 also
+ * uses start_month_year as its cycle anchor (see shouldGenerateInMonth).
+ */
+export function isWithinActiveWindow(item, year, month) {
+  const current = year * 12 + (month - 1);
+  const start = monthIndex(item?.start_month_year);
+  const end = monthIndex(item?.end_month_year);
+  if (start !== null && current < start) return false;
+  if (end !== null && current > end) return false;
+  return true;
+}
+
+/**
+ * Occurrence date of a recurring item for the given source month, or null.
+ * `ignoreActiveWindow` skips the start/end-month bounds; budget period
+ * boundaries use it so an income that starts later or has ended still
+ * defines the period containing today.
+ */
+export function calculateNextDate(anchor, year, month, { ignoreActiveWindow = false } = {}) {
   if (!shouldGenerateInMonth(anchor, year, month)) {
     return null;
   }
@@ -230,7 +257,9 @@ export function calculateNextDate(anchor, year, month) {
     // to the normal anchor_type branches below when anchor_income wasn't
     // resolved by the caller (e.g. a dangling reference), so a missing
     // income never silently drops the expense.
-    const incomeDate = calculateNextDate(anchor.anchor_income, year, month);
+    // The income's own active window applies too: an expense that follows
+    // an income stops when that income ends.
+    const incomeDate = calculateNextDate(anchor.anchor_income, year, month, { ignoreActiveWindow });
     if (!incomeDate) return null;
 
     date = new Date(`${incomeDate}T00:00:00Z`);
@@ -262,7 +291,9 @@ export function calculateNextDate(anchor, year, month) {
     }
   }
 
-  return dateStringFromUTC(date);
+  const result = dateStringFromUTC(date);
+  if (!ignoreActiveWindow && !isWithinActiveWindow(anchor, year, month)) return null;
+  return result;
 }
 
 export function monthsOverlappingPeriod(period) {

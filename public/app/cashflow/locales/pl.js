@@ -1024,6 +1024,12 @@ export default {
     "Manage your account, this budget, and instance-wide options in one place.": "Zarządzaj kontem, bieżącym budżetem i ustawieniami całej aplikacji w jednym miejscu.",
     "Settings sections": "Sekcje ustawień",
     "Version {version}": "Wersja {version}",
-    "Update available: {version}": "Dostępna aktualizacja: {version}"
+    "Update available: {version}": "Dostępna aktualizacja: {version}",
+    "End YYYY-MM": "Koniec RRRR-MM",
+    "From {month}": "Od {month}",
+    "Until {month}": "Do {month}",
+    "Optional. Nothing is planned before this month.": "Opcjonalne. Przed tym miesiącem nic nie jest planowane.",
+    "Required when repeating every few months: the first month it occurs.": "Wymagane przy powtarzaniu co kilka miesięcy: pierwszy miesiąc, w którym występuje.",
+    "Optional. The last month it occurs; leave empty to repeat indefinitely.": "Opcjonalne. Ostatni miesiąc, w którym występuje; zostaw puste, aby powtarzać bez końca."
   }
 };

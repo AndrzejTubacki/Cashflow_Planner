@@ -43,6 +43,14 @@ test("the already-applied postgres-v1.1.0 migration checksum stays immutable", (
   );
 });
 
+test("the already-applied postgres-v1.1.0-r2 migration checksum stays immutable", () => {
+  const sql = fs.readFileSync(path.resolve("scripts/migrations/postgres-v1.1.0-r2.sql"));
+  assert.equal(
+    crypto.createHash("sha256").update(sql).digest("hex"),
+    "5d2f65710b6579b0f5e9bf7992cbf254e1ad5e858dbe758bf2214a817df47528"
+  );
+});
+
 test("recorded and schema-detected migrations are not pending", () => {
   const scripts = [
     { name: "postgres-v1.0.1.sql", checksum: "a" },

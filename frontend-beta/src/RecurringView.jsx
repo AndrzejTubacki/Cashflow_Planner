@@ -5,9 +5,20 @@ import { apiFetch } from "./api.js";
 import EditModal from "./EditModal.jsx";
 import { recurringExpensePredictionDisplay } from "./moneyDisplay.js";
 
-function describeAnchor(r, incomeById) {
+// Start month is shown only while it's still ahead (setup stamps the
+// creation month on first-run items); end month is always shown.
+function describeActiveWindow(r, today) {
+  const parts = [];
+  if (r.start_month_year && (!today || r.start_month_year > String(today).slice(0, 7))) {
+    parts.push(formatMessage("From {month}", { month: r.start_month_year }));
+  }
+  if (r.end_month_year) parts.push(formatMessage("Until {month}", { month: r.end_month_year }));
+  return parts.map(part => ` · ${part}`).join("");
+}
+
+function describeAnchor(r, incomeById, today) {
   const repeat = Number(r.repeat_every_months) || 1;
-  const repeatLabel = repeat > 1 ? ` · ${formatMessage("Repeats every {count} months", { count: repeat })}` : "";
+  const repeatLabel = `${repeat > 1 ? ` · ${formatMessage("Repeats every {count} months", { count: repeat })}` : ""}${describeActiveWindow(r, today)}`;
 
   if (r.anchor_income_id) {
     const offset = Number(r.anchor_offset_days) || 0;
@@ -203,7 +214,7 @@ function RecurringTable({ rows, kind, adding, onStopAdding, onChanged, incomes =
                 {formatMoney(row.amount, row.currency)}
                 {isExpense ? <PredictionDetails row={row} ledgerCurrency={settings.ledger_currency || "PLN"} /> : null}
               </td>
-              <td>{describeAnchor(row, incomeById)}</td>
+              <td>{describeAnchor(row, incomeById, today)}</td>
               <td>{isExpense ? occurrenceSummary(row) : (row.period_setting ? t("Defines budget period") : "")}</td>
               <td>
                 <span className={`beta-pill ${row.active ? "beta-pill-confirmed" : "beta-pill-pending"}`}>

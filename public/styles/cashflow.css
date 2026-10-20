@@ -1689,6 +1689,17 @@ fieldset legend {
   gap: 0.35rem;
 }
 
+/* `label { display: grid }` above outranks the UA `[hidden]` rule, which
+   left fields that don't apply visible but greyed out. */
+.cashflow-modal__form [hidden] {
+  display: none;
+}
+
+.cashflow-modal__form label small {
+  color: rgba(162, 168, 182, 0.75);
+  font-size: 0.74rem;
+}
+
 .cashflow-modal__form label span {
   color: rgba(162, 168, 182, 0.88);
   font-size: 0.78rem;

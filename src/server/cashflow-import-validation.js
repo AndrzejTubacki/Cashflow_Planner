@@ -41,13 +41,13 @@ const TABLE_COLUMNS = {
   recurring_expenses: [
     "id", "name", "currency", "amount", "prediction_strategy", "prediction_substitute_missing",
     "prediction_min_recorded_months", "necessary", "active", "repeat_every_months",
-    "start_month_year", "anchor_type", "anchor_day_of_month", "anchor_offset_days",
+    "start_month_year", "end_month_year", "anchor_type", "anchor_day_of_month", "anchor_offset_days",
     "anchor_business_day_adjustment", "anchor_holiday_country", "anchor_income_id", "planned_transaction_id",
     "created_at", "updated_at"
   ],
   recurring_incomes: [
     "id", "name", "currency", "amount", "prediction_strategy", "prediction_substitute_missing",
-    "prediction_min_recorded_months", "active", "repeat_every_months", "start_month_year",
+    "prediction_min_recorded_months", "active", "repeat_every_months", "start_month_year", "end_month_year",
     "anchor_type", "anchor_day_of_month", "anchor_offset_days",
     "anchor_business_day_adjustment", "anchor_holiday_country", "period_setting",
     "created_at", "updated_at"
@@ -324,6 +324,11 @@ function validateRecurring(details, table, index, row, kind) {
   booleanField(details, table, index, row, "active", { optional: true });
   requireNumber(details, table, index, row, "repeat_every_months", { min: 1, max: 12, integer: true });
   monthField(details, table, index, row, "start_month_year");
+  if (isPresent(row, "end_month_year") && row.end_month_year === "") row.end_month_year = null;
+  monthField(details, table, index, row, "end_month_year");
+  if (row.end_month_year && row.start_month_year && String(row.end_month_year) < String(row.start_month_year)) {
+    details.push(detail(table, index, row, "end_month_year", "before_start_month"));
+  }
   enumField(details, table, index, row, "anchor_type", ["day_of_month", "month_end"]);
   optionalNumber(details, table, index, row, "anchor_day_of_month", { min: 1, max: 31, integer: true });
   optionalNumber(details, table, index, row, "anchor_offset_days", { integer: true });
