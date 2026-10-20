@@ -20,16 +20,20 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
 
-      - name: Install root dependencies
-        run: npm ci
+      - name: Install root and frontend-beta dependencies
+        run: |
+          npm ci
+          npm --prefix frontend-beta ci
 
       - name: Run unit, integration & contract tests (includes license check)
         run: npm run test:node
@@ -38,9 +42,7 @@ jobs:
         run: npm run smoke
 
       - name: Verify frontend-beta build
-        run: |
-          npm --prefix frontend-beta ci
-          npm run beta:build
+        run: npm run beta:build
 
       - name: Audit runtime dependencies for high/critical vulnerabilities
         run: |
@@ -67,10 +69,12 @@ jobs:
           --health-retries=10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -90,10 +94,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -113,10 +119,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"

@@ -9,9 +9,15 @@ updates:
       timezone: "Europe/Warsaw"
     open-pull-requests-limit: 5
     groups:
-      runtime-and-dev:
+      runtime-and-dev-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/frontend-beta"
@@ -22,9 +28,15 @@ updates:
       timezone: "Europe/Warsaw"
     open-pull-requests-limit: 5
     groups:
-      frontend-beta:
+      frontend-beta-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directory: "/"
@@ -34,6 +46,9 @@ updates:
       time: "05:00"
       timezone: "Europe/Warsaw"
     open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -47,4 +62,3 @@ updates:
       actions:
         patterns:
           - "*"
-
