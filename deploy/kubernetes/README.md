@@ -1,8 +1,8 @@
-# Kubernetes Deployment Examples
+# Kubernetes / k3s Deployment Examples
 
-These manifests are initial examples for running Cashflow on Kubernetes. They
-are not a guarantee of production readiness. Each cluster still needs a review
-of ingress, storage, security, and backup choices.
+These manifests are initial examples for running Cashflow on Kubernetes or k3s.
+They are not a guarantee of production readiness. Each cluster still needs a
+review of ingress, storage, security, and backup choices.
 
 Cashflow remains portable: Kubernetes is optional. Bare-metal Node.js, Docker,
 Docker Compose, and other process-manager deployments continue to use the same
@@ -19,7 +19,8 @@ traffic is moved.
 - `secret.example.yaml`: secret shape with no real values; not included in
   `kustomization.yaml`
 - `pvc.yaml`: 1Gi RWO data PVC
-- `deployment.yaml`: single-replica `Recreate` Deployment
+- `deployment.yaml`: single-replica `Recreate` Deployment using the published
+  GHCR image
 - `service.yaml`: ClusterIP service on port 3000
 - `ingress.yaml`: placeholder host-based Ingress
 - `kustomization.yaml`: optional convenience wrapper for `kubectl apply -k`
@@ -49,23 +50,64 @@ multiple replicas can still write safely but will duplicate some scheduled
 work. SQLite remains the default and the simpler choice for a single-replica
 deployment with no external database to manage.
 
-## Build And Push An Image
+## Container Image Options
 
-Build and push an image to a registry your cluster can pull from:
+### 1. Published GHCR Image (Default)
 
-```sh
-docker build -t registry.example.com/cashflow:1.0.0 .
-docker push registry.example.com/cashflow:1.0.0
-```
-
-A retained, immutable image tag is recommended for every deployment. The image
-in `deployment.yaml` is the value to change:
+`deployment.yaml` defaults to the public GitHub Container Registry image with
+`imagePullPolicy: Always`:
 
 ```yaml
-image: registry.example.com/cashflow:1.0.0
+image: ghcr.io/andrzejtubacki/cashflow_planner:latest
+imagePullPolicy: Always
 ```
 
-The `latest` tag is a poor fit for upgrades that may need rollback.
+For stricter change control and easier rollbacks, pin an immutable release tag
+instead of `latest`:
+
+```yaml
+image: ghcr.io/andrzejtubacki/cashflow_planner:1.1.6
+imagePullPolicy: IfNotPresent
+```
+
+### 2. Custom Build (Registry or Local k3s Import)
+
+If you build from source, either push to a registry your cluster can pull from:
+
+```sh
+docker build -t registry.example.com/cashflow:1.1.6 .
+docker push registry.example.com/cashflow:1.1.6
+```
+
+Or, on a single-node or air-gapped k3s host without a registry, import the
+locally built image directly into k3s's containerd store and set
+`imagePullPolicy: IfNotPresent`:
+
+```sh
+docker build -t cashflow:local .
+docker save cashflow:local | sudo k3s ctr images import -
+```
+
+## Updating A Deployment
+
+Back up `/app/data` (or your external database) before upgrading.
+
+- **When tracking `:latest` (`imagePullPolicy: Always`)**: Kubernetes only
+  re-pulls `:latest` when a new pod starts. Trigger a rollout restart after a
+  new release image is published:
+
+  ```sh
+  kubectl -n cashflow-staging rollout restart deployment/cashflow
+  kubectl -n cashflow-staging rollout status deployment/cashflow
+  ```
+
+- **When using pinned version tags**: Update `image:` in `deployment.yaml` to
+  the new version tag and re-apply:
+
+  ```sh
+  kubectl apply -f deploy/kubernetes/deployment.yaml
+  kubectl -n cashflow-staging rollout status deployment/cashflow
+  ```
 
 ## Configure Staging
 
@@ -294,9 +336,9 @@ spec:
 
 ## Backups And Rollback
 
-A complete `DATA_DIR` backup is recommended before every upgrade. Longhorn
-replication or any other storage replication is not a backup; off-cluster
-backups are still needed for real recovery.
+A complete `DATA_DIR` backup is recommended before every upgrade. Storage-layer
+volume replication is not a backup; off-cluster backups are still needed for
+real recovery.
 
 If database migrations ran, the safest rollback is restoring the matching
 `DATA_DIR` backup and then starting the previous application image tag. An older

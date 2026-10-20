@@ -17,8 +17,10 @@ spending, and confirm real transactions against the plan as they happen.
 
 ## Quick Start
 
-Directly with Node.js. Stores runtime data in local `data/` and `logs/`
-folders next to the app:
+### Node.js (Direct)
+
+Directly with Node.js (requires Node.js 22 and npm). Stores runtime data in
+local `data/` and `logs/` folders next to the app:
 
 ```sh
 npm ci
@@ -27,8 +29,24 @@ npm start
 
 Open `http://localhost:3000`.
 
-With Docker Compose, the easier path if you want the app isolated from the
-rest of the host:
+### Docker
+
+Run the published image from GitHub Container Registry (`latest` or a pinned
+release tag such as `1.1.6`):
+
+```sh
+docker pull ghcr.io/andrzejtubacki/cashflow_planner:latest
+docker run -d \
+  --name cashflow \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -v cashflow-data:/app/data \
+  -v cashflow-logs:/app/logs \
+  ghcr.io/andrzejtubacki/cashflow_planner:latest
+```
+
+### Docker Compose 
+(builds from the local checkout and mounts persistent volumes):
 
 ```sh
 docker compose -f docker-compose.example.yml up -d --build
@@ -36,7 +54,7 @@ docker compose -f docker-compose.example.yml ps
 curl http://localhost:3000/healthz
 ```
 
-Direct Docker, without Compose:
+### Build the image locally with plain Docker:
 
 ```sh
 docker build -t cashflow .
@@ -47,13 +65,28 @@ docker run --rm \
   cashflow
 ```
 
-Requirements for a direct Node install: Node.js 22 and npm. For containers:
-Docker, with Docker Compose recommended.
+### Kubernetes / k3s
 
-Starter Kubernetes manifests are available under
-[`deploy/kubernetes/`](deploy/kubernetes/README.md) if you want to run
-Cashflow in a cluster. Review and adapt them before use; they're a starting
-point, not a guarantee of production readiness.
+Starter manifests for Kubernetes and k3s are in
+[`deploy/kubernetes/`](deploy/kubernetes/README.md). They default to the
+published `ghcr.io/andrzejtubacki/cashflow_planner:latest` image with persistent
+volume storage:
+
+```sh
+kubectl apply -k deploy/kubernetes
+kubectl -n cashflow-staging rollout status deployment/cashflow
+```
+
+To pull and roll out a newer `:latest` build on an existing deployment:
+
+```sh
+kubectl -n cashflow-staging rollout restart deployment/cashflow
+kubectl -n cashflow-staging rollout status deployment/cashflow
+```
+
+Review and adapt the namespace, storage class, ingress host, and authentication
+settings before use; see [`deploy/kubernetes/README.md`](deploy/kubernetes/README.md)
+for details.
 
 ## Configuring It
 

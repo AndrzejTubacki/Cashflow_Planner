@@ -19,8 +19,8 @@ spec:
     spec:
       containers:
         - name: cashflow
-          image: ghcr.io/your-org/cashflow:replace-me
-          imagePullPolicy: IfNotPresent
+          image: ghcr.io/andrzejtubacki/cashflow_planner:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 3000
