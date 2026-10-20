@@ -133,7 +133,7 @@ export function bumpProjectVersion(rootDir, targetSpec, { createGitTag = true, c
     }
 
     if (createGitTag) {
-      execFileSync("git", ["tag", "-f", tag], {
+      execFileSync("git", ["tag", "-a", "-f", tag, "-m", `Release ${tag}`], {
         cwd: rootDir,
         stdio: ["ignore", "pipe", "pipe"]
       });
