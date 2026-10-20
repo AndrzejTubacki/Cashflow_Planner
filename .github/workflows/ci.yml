@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  node-sqlite:
+    name: Node & SQLite Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Run unit, integration & contract tests (includes license check)
+        run: npm run test:node
+
+      - name: Run server smoke check
+        run: npm run smoke
+
+      - name: Verify frontend-beta build
+        run: |
+          npm --prefix frontend-beta ci
+          npm run beta:build
+
+      - name: Audit runtime dependencies for high/critical vulnerabilities
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm --prefix frontend-beta audit --omit=dev --audit-level=high
+
+  postgres:
+    name: PostgreSQL Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cashflow_test
+          POSTGRES_PASSWORD: cashflow_test_password
+          POSTGRES_DB: cashflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U cashflow_test -d cashflow_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run disposable Postgres integration suite
+        env:
+          CASHFLOW_ENABLE_POSTGRES_TESTS: "1"
+          CASHFLOW_DATABASE_URL: postgres://cashflow_test:cashflow_test_password@127.0.0.1:5432/cashflow_test
+        run: npm run test:postgres
+
+  browser:
+    name: Playwright Browser Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser smoke tests (legacy + beta UI)
+        run: npm run test:browser
+
+  container:
+    name: Container Runtime Hardening
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run container runtime & read-only rootfs integration tests
+        run: npm run test:container
+

@@ -274,7 +274,9 @@ doesn't replace an external backup of the whole data volume before upgrades.
 ## License
 
 This project is licensed under the PolyForm Noncommercial License 1.0.0. See
-[LICENSE](LICENSE) for the full text.
+[LICENSE](LICENSE) for the full text and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party dependency
+notices.
 
 Individuals may self-host this software for personal, private, educational,
 research, charitable, or other non-commercial purposes. Commercial use

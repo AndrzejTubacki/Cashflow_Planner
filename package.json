@@ -1,6 +1,7 @@
 {
   "name": "cashflow",
   "version": "1.1.5",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "private": true,
   "scripts": {
@@ -28,6 +29,8 @@
     "db:postgres:schema": "node scripts/print-postgres-schema.mjs",
     "db:migrate": "node scripts/migrate-postgres-schema.mjs",
     "docs:screenshots": "node scripts/generate-readme-screenshots.mjs",
+    "version:bump": "node scripts/bump-version.mjs",
+    "release:notes": "node scripts/generate-release-notes.mjs",
     "operator:grant-admin": "node scripts/operator-admin.mjs",
     "beta:install": "npm --prefix frontend-beta install",
     "beta:dev": "npm --prefix frontend-beta run dev",
