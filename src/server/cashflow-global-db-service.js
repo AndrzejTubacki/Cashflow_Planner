@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 
 import { createCashflowGlobalMigrationService } from "./cashflow-global-migration-recovery.js";
+import { STANDALONE_TRANSFER_FILE_MARKER } from './cashflow-standalone-transfer-schema.js';
 
 function initGlobalPragmas(db) {
   db.pragma("foreign_keys = ON");
@@ -35,7 +36,11 @@ export function createCashflowGlobalDbService({
       if (!migrationRan) {
         globalMigration.initializeOrMigrate(db, {
           beforeStep: beforeGlobalMigrationStep,
-          storageProfileIds: listCashflowUserIds()
+          // Sealed transfers have explicit account/device ownership in global
+          // metadata. Missing metadata must not turn an unpublished orphan (or
+          // a previously published transfer) into a newly enrolled legacy user.
+          storageProfileIds: listCashflowUserIds().filter(id =>
+            !fs.existsSync(path.join(dataDir, id, STANDALONE_TRANSFER_FILE_MARKER)))
         });
         db.prepare(`
           UPDATE global_options

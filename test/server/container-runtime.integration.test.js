@@ -122,7 +122,7 @@ test('runtime image initializes as non-root with only data/log volumes writable'
     }
     throw error;
   } finally {
-    if (containerCreated) await docker('rm', '-f', name);
+    if (containerCreated) await docker('rm', '-f', '-v', name); // -v: also remove the anonymous data volume
     await docker('volume', 'rm', dataVolume, logVolume).catch(() => {});
     await docker('image', 'rm', name).catch(() => {});
   }
@@ -171,7 +171,7 @@ test('runtime image fixes ownership of a fresh root-owned bind mount instead of 
     }
     throw error;
   } finally {
-    if (containerCreated) await docker('rm', '-f', name);
+    if (containerCreated) await docker('rm', '-f', '-v', name); // -v: also remove the anonymous data volume
     await docker('image', 'rm', name).catch(() => {});
     await fs.promises.rm(hostRoot, { recursive: true, force: true }).catch(() => {});
   }

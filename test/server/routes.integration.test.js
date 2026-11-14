@@ -198,11 +198,11 @@ test("system administrators cannot access budget data without membership", async
       UPDATE budget_memberships
       SET account_id = 'local_owner_replacement',
           updated_at = datetime('now')
-      WHERE budget_id = 'local' AND account_id = 'legacy-admin' AND role = 'owner'
+      WHERE budget_id = 'local' AND account_id = 'local' AND role = 'owner'
     `).run();
     assert.ok(globalDb.prepare(`
       SELECT 1 FROM account_global_roles
-      WHERE account_id = 'legacy-admin' AND role = 'system_admin'
+      WHERE account_id = 'local' AND role = 'system_admin'
     `).get());
   } finally {
     globalDb.close();

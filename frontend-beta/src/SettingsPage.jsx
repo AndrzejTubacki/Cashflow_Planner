@@ -1,9 +1,13 @@
+import { useState } from "react";
 import AccountView from "./AccountView.jsx";
 import AdminView from "./AdminView.jsx";
 import SettingsView from "./SettingsView.jsx";
 import { t } from "./i18n.js";
 
 export default function SettingsPage({ activeTab, canAdmin, snapshot, onRefresh, notice, onDismissNotice, validationResult, onValidation, onDismissValidation, onSelectTab }) {
+  // A restore replaces the saved settings; remount so the form shows them.
+  // Other refreshes keep the form, so unsaved edits survive them.
+  const [restoreGeneration, setRestoreGeneration] = useState(0);
   const tabs = [
     { id: "account", label: "Account" },
     { id: "budget", label: "Budget" },
@@ -32,7 +36,8 @@ export default function SettingsPage({ activeTab, canAdmin, snapshot, onRefresh,
       ) : tab === "admin" && canAdmin ? (
         <AdminView embedded snapshot={snapshot} onRefresh={onRefresh} />
       ) : (
-        <SettingsView embedded snapshot={snapshot} onRefresh={onRefresh} validationResult={validationResult}
+        <SettingsView key={`${snapshot?.session?.budgetId || ""}:${restoreGeneration}`} embedded snapshot={snapshot} onRefresh={onRefresh}
+          onRestored={() => setRestoreGeneration(generation => generation + 1)} validationResult={validationResult}
           onValidation={onValidation} onDismissValidation={onDismissValidation} />
       )}
     </section>

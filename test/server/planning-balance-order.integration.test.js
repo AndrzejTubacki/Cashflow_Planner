@@ -4,8 +4,7 @@ import test from "node:test";
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 import { createSqliteBudgetStore } from "../../src/server/cashflow-budget-store.js";
 import { createPlanningRunningBalancePlan, applyPlanningRunningBalancePlan } from "../../src/server/cashflow-planning-balance-plan.js";
-import { initializeLedgerSchema } from "../../src/server/cashflow-schema.js";
-import { renderLedgerTab } from "../../public/app/cashflow/ledger-tab.js";
+import { renderLedgerTab } from "../../public-legacy/app/cashflow/ledger-tab.js";
 
 test("all snapshot buckets put same-day income first and show matching balances without rewriting history", async () => {
   const harness = await createCashflowTestHarness({ userId: "all_bucket_order", today: "2026-10-16" });
@@ -25,7 +24,7 @@ test("all snapshot buckets put same-day income first and show matching balances 
     ].map(({ updated_at, ...tx }) => ({ ...tx, status: "funded", generation_timestamp: stamp })));
     const ledger = harness.openLedgerDb("2026");
     try {
-      initializeLedgerSchema(ledger);
+      // The planning database already holds the ledger (schema 22+).
       const insert = ledger.prepare(`INSERT INTO confirmed_transactions
         (id, name, currency, amount, type, date, confirmed_date, ledger_currency, ledger_amount,
          running_balance_pln, fx_rate, buffered_fx_rate, created_at, updated_at)

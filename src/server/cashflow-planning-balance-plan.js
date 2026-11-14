@@ -20,11 +20,13 @@ function rowLedgerCurrency(row = {}) {
   return row?.ledger_currency || "PLN";
 }
 
-function confirmedBalanceAsOfRows(rows = [], cutoffDate = null) {
+/** Empty/cutoff histories still include the verified opening supplied by the
+ * owning host. Cached totals, when present, already include it exactly once. */
+function confirmedBalanceAsOfRows(rows = [], cutoffDate = null, openingBalance = 0) {
   const eligible = sortConfirmedRowsForBalance(rows)
     .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
 
-  if (!eligible.length) return 0;
+  if (!eligible.length) return roundMoneyAmount(openingBalance);
 
   const latest = eligible.at(-1);
   if (latest.running_balance_pln !== null && latest.running_balance_pln !== undefined) {
@@ -36,7 +38,7 @@ function confirmedBalanceAsOfRows(rows = [], cutoffDate = null) {
     return row.type === "income"
       ? addMoneyAmounts(balance, amount)
       : subtractMoneyAmounts(balance, amount);
-  }, 0));
+  }, openingBalance));
 }
 
 function comparePlanningBalanceRows(a = {}, b = {}) {
@@ -57,8 +59,11 @@ function comparePlanningBalanceRows(a = {}, b = {}) {
   return compareLedgerRowsForDisplay(a, b);
 }
 
+/** Plan display balances using a host-verified opening in the active currency.
+ * No request setting supplies or changes this historical offset. */
 export function createPlanningRunningBalancePlan({
   confirmedRows = [],
+  openingBalance = 0,
   futureRows = [],
   pendingRows = [],
   settings = {},
@@ -124,7 +129,7 @@ export function createPlanningRunningBalancePlan({
       }))
   ].sort(comparePlanningBalanceRows);
 
-  let balance = confirmedBalanceAsOfRows(activeConfirmedRows, currentDate);
+  let balance = confirmedBalanceAsOfRows(activeConfirmedRows, currentDate, openingBalance);
 
   for (const row of planningRows) {
     const ledgerAmount = roundMoneyAmount(row.ledger_amount);

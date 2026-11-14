@@ -24,11 +24,16 @@ function writableSqliteSettingsDb() {
   const settings = { id: 1, ledger_currency: "PLN", timezone: "UTC", ntfy_url: null };
   return {
     settings,
+    inTransaction: false,
     close() {},
     transaction(work) {
-      return () => work();
+      return () => {
+        this.inTransaction = true;
+        try { return work(); } finally { this.inTransaction = false; }
+      };
     },
     prepare(sql) {
+      if (/SELECT \* FROM cashflow_sync_heads WHERE budget_id = \?/.test(sql)) return { get: () => undefined };
       if (/SELECT \* FROM settings WHERE id = 1/.test(sql)) return { get: () => ({ ...settings }) };
       if (/UPDATE settings/.test(sql)) {
         return {

@@ -6,7 +6,7 @@ import test from "node:test";
 import {
   CashflowApiError,
   createCashflowApiClient
-} from "../public/app/cashflow/api-client.js";
+} from "../public-legacy/app/cashflow/api-client.js";
 
 test("API client scopes selected-user requests and serializes JSON bodies", async () => {
   const calls = [];
@@ -98,10 +98,10 @@ test("API client raw responses and typed errors preserve response details", asyn
 test("frontend modules do not use the legacy global API client or browser alerts", () => {
   const repoRoot = path.resolve(import.meta.dirname, "..");
   const files = [
-    "public/app.js",
-    "public/app/cashflow/actions.js",
-    "public/app/cashflow/handlers.js",
-    "public/app/cashflow/modal.js"
+    "public-legacy/app.js",
+    "public-legacy/app/cashflow/actions.js",
+    "public-legacy/app/cashflow/handlers.js",
+    "public-legacy/app/cashflow/modal.js"
   ];
 
   for (const file of files) {
@@ -136,7 +136,7 @@ test("beta app only installs the CSRF token from its current load", () => {
 
 test("legacy cashflow load guards budget-manager assignment against stale requests", () => {
   const repoRoot = path.resolve(import.meta.dirname, "..");
-  const legacyApp = fs.readFileSync(path.join(repoRoot, "public/app.js"), "utf8");
+  const legacyApp = fs.readFileSync(path.join(repoRoot, "public-legacy/app.js"), "utf8");
   assert.match(legacyApp, /expectedCashflowSeq !== cashflowLoadSeq\) return false;\s*state\.budgetManager = manager;/);
   assert.match(legacyApp, /expectedCashflowSeq: seq[\s\S]*seq !== cashflowLoadSeq \|\| !managerLoaded/);
 });

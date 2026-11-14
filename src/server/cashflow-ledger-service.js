@@ -12,9 +12,14 @@ import {
 } from "./cashflow-ledger-balance-utils.js";
 import { addMoneyAmounts, multiplyMoney, roundMoneyAmount, subtractMoneyAmounts } from "./cashflow-money-utils.js";
 import { badRequest } from "./cashflow-user-utils.js";
+import { budgetLedgerOpeningBalance, sqliteLedgerOpeningBalance } from "./cashflow-ledger-opening.js";
+import { buildLedgerHistorySummary } from "./cashflow-ledger-history-summary.js";
 
+/** Ledger readers and mutation plans retain the verified currency-scoped
+ * standalone opening; ordinary budgets keep the historical zero opening. */
 export function createCashflowLedgerService({
   budgetStore = null,
+  allowStandaloneOrigins = false,
   generateId = prefix => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   listLedgerYears,
   openLedgerDb,
@@ -43,9 +48,11 @@ export function createCashflowLedgerService({
 
     try {
       const settings = db.prepare("SELECT ledger_currency FROM settings WHERE id = 1").get() || {};
+      const ledgerCurrency = settings.ledger_currency || "PLN";
 
       return {
-        ledgerCurrency: settings.ledger_currency || "PLN"
+        ledgerCurrency,
+        openingBalance: sqliteLedgerOpeningBalance(db, userId, ledgerCurrency, { allowStandaloneOrigins })
       };
     } finally {
       db.close();
@@ -64,13 +71,13 @@ export function createCashflowLedgerService({
   }
 
   function rowsForCurrentLedger(userId) {
-    const { ledgerCurrency } = currentLedgerSettings(userId);
+    const { ledgerCurrency, openingBalance } = currentLedgerSettings(userId);
     const rows = loadAllConfirmedTransactions(userId)
       .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
 
     return {
       ledgerCurrency,
-      openingBalance: 0,
+      openingBalance,
       rows
     };
   }
@@ -112,306 +119,79 @@ export function createCashflowLedgerService({
     return sortConfirmedRowsForBalance(rows);
   }
 
-  function isLedgerHistoryCompactionRow(row) {
-    return String(row.occurrence_key || "").startsWith("ledger_history_compaction:");
-  }
-
-  function historicalLedgerCompactionPlanFromRows(settings = {}, rows = [], options = {}) {
-    const hasMonthsOverride = options.months !== undefined && options.months !== null && options.months !== "";
-    const months = hasMonthsOverride
-      ? Number(options.months)
-      : Number(settings.ledger_history_compaction_months || 0);
-
+  /** Summaries are derived metadata; accepted facts remain available indefinitely. */
+  function historicalLedgerCompactionPlanFromRows(settings = {}, rows = [], options = {}, cachedJson = null) {
+    const months = options.months !== undefined && options.months !== null && options.months !== ""
+      ? Number(options.months) : Number(settings.ledger_history_compaction_months || 0);
     if (!Number.isInteger(months) || months < 0 || months > 600) {
       throw badRequest("ledger_history_compaction_months must be an integer between 0 and 600", [{
-        field: "ledger_history_compaction_months",
-        reason: "invalid_compaction_age"
+        field: "ledger_history_compaction_months", reason: "invalid_compaction_age"
       }]);
     }
-
-    if (months === 0) {
-      return {
-        ok: true,
-        enabled: false,
-        months,
-        cutoffDate: null,
-        eligibleRows: 0,
-        ledgerCurrencies: []
-      };
-    }
-
-    const today = options.today || todayInTimezone(settings.timezone);
-    const cutoffDate = addMonths(today, -months);
-    const eligibleRows = rows
-      .filter(row => dateKey(row.confirmed_date || row.date) < cutoffDate);
-    const detailRows = eligibleRows.filter(row => !isLedgerHistoryCompactionRow(row));
-    const ledgerCurrencies = [...new Set(eligibleRows.map(row => String(row.ledger_currency || "PLN").toUpperCase()))].sort();
-
-    return {
-      ok: true,
-      enabled: true,
-      months,
-      today,
-      cutoffDate,
-      eligibleRows: eligibleRows.length,
-      eligibleDetailRows: detailRows.length,
-      needsCompaction: detailRows.length > 0,
-      ledgerCurrencies
-    };
+    const today = options.today || options.plan?.today || todayInTimezone(settings.timezone);
+    const cutoffDate = months ? addMonths(today, -months) : null;
+    const eligible = months ? rows.filter(row => dateKey(row.confirmed_date || row.date) < cutoffDate) : [];
+    const summary = buildLedgerHistorySummary(eligible, cachedJson);
+    return { ok: true, enabled: months > 0, months, today, cutoffDate,
+      eligibleRows: eligible.length, eligibleDetailRows: eligible.length,
+      detailsRetained: true, retainedRows: rows.length,
+      ledgerCurrencies: summary.summaries.map(row => row.ledgerCurrency),
+      ...summary };
   }
 
+  /** Merge legacy ledger files first, then inspect unified facts and derived cache. */
   function historicalLedgerCompactionPlan(userId, options = {}) {
+    const rows = loadAllConfirmedTransactions(userId);
     const db = openPlanningDb(userId);
-    let settings = {};
-
     try {
-      settings = db.prepare(`
-        SELECT timezone, ledger_history_compaction_months
-        FROM settings
-        WHERE id = 1
-      `).get() || {};
-    } finally {
-      db.close();
-    }
-
-    return historicalLedgerCompactionPlanFromRows(
-      settings,
-      loadAllConfirmedTransactions(userId),
-      options
-    );
+      return historicalLedgerCompactionPlanFromRows(
+        db.prepare("SELECT * FROM settings WHERE id = 1").get() || {}, rows, options,
+        db.prepare("SELECT cache_json FROM cashflow_ledger_summary_cache WHERE budget_id = ?").get(userId)?.cache_json);
+    } finally { db.close(); }
   }
 
   async function historicalLedgerCompactionPlanAsync(userId, options = {}) {
-    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
-      return historicalLedgerCompactionPlan(userId, options);
-    }
-
-    const settings = (await budgetStore.listPlanningRows(userId, "settings"))?.[0] || {};
-    return historicalLedgerCompactionPlanFromRows(
-      settings,
-      await loadAllConfirmedTransactionsAsync(userId),
-      options
-    );
+    if (!budgetStore || typeof budgetStore.transaction !== "function") return historicalLedgerCompactionPlan(userId, options);
+    return budgetStore.transaction(async (writer, client) => historicalLedgerCompactionPlanFromRows(
+      (await writer.listPlanningRows(userId, "settings"))[0] || {},
+      await writer.listConfirmedTransactions(userId), options,
+      (await client.query("SELECT cache_json FROM cashflow_ledger_summary_cache WHERE budget_id = $1", [userId])).rows[0]?.cache_json));
   }
 
+  /** Re-read under the write transaction: a stale preview cannot summarize deleted
+   * or changed facts. No financial writes, synthetic payments or epoch rotation. */
   function compactHistoricalLedger(userId, options = {}) {
-    const plan = options.plan || historicalLedgerCompactionPlan(userId, options);
-    if (!plan.enabled || !plan.cutoffDate || !plan.eligibleRows || !plan.needsCompaction) {
-      return {
-        ...plan,
-        compactedRows: 0,
-        createdRows: 0
-      };
-    }
-
-    const cutoffDate = plan.cutoffDate;
-    const rows = loadAllConfirmedTransactions(userId)
-      .filter(row => dateKey(row.confirmed_date || row.date) < cutoffDate);
-    if (!rows.length || rows.every(isLedgerHistoryCompactionRow)) {
-      return {
-        ...plan,
-        eligibleRows: 0,
-        eligibleDetailRows: 0,
-        needsCompaction: false,
-        ledgerCurrencies: [],
-        compactedRows: 0,
-        createdRows: 0
-      };
-    }
-
-    const totalsByLedgerCurrency = new Map();
-    for (const row of rows) {
-      const ledgerCurrency = String(row.ledger_currency || "PLN").toUpperCase();
-      const amount = storedOrComputedConfirmedLedgerAmount(row);
-      const current = totalsByLedgerCurrency.get(ledgerCurrency) || 0;
-      totalsByLedgerCurrency.set(
-        ledgerCurrency,
-        row.type === "income"
-          ? addMoneyAmounts(current, amount)
-          : subtractMoneyAmounts(current, amount)
-      );
-    }
-
-    const rowsByYear = new Map();
-    for (const row of rows) {
-      const ledgerYear = String(row.ledger_year);
-      const ids = rowsByYear.get(ledgerYear) || [];
-      ids.push(row.id);
-      rowsByYear.set(ledgerYear, ids);
-    }
-
-    for (const [year, ids] of rowsByYear.entries()) {
-      const ledgerDb = openLedgerDb(userId, year);
-      try {
-        ledgerDb.transaction(() => {
-          for (const id of ids) {
-            ledgerDb.prepare(`
-              DELETE FROM confirmed_transactions
-              WHERE id = ?
-            `).run(id);
-          }
-        })();
-      } finally {
-        ledgerDb.close();
-      }
-    }
-
-    const now = options.now || new Date().toISOString();
-    const targetYear = cutoffDate.slice(0, 4);
-    const targetDb = openLedgerDb(userId, targetYear);
-    let createdRows = 0;
-
+    loadAllConfirmedTransactions(userId);
+    const db = openPlanningDb(userId);
     try {
-      targetDb.transaction(() => {
-        for (const [ledgerCurrency, netAmount] of [...totalsByLedgerCurrency.entries()].sort()) {
-          const amount = roundMoneyAmount(Math.abs(netAmount));
-          targetDb.prepare(`
-            INSERT INTO confirmed_transactions (
-              id, name, currency, amount, type, date, confirmed_date,
-              fx_rate, buffered_fx_rate, ledger_currency, running_balance_pln,
-              ledger_amount, occurrence_key, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, 0, ?, ?, ?, ?)
-          `).run(
-            generateId("ledger-compact"),
-            `Historical ledger balance before ${cutoffDate} (${ledgerCurrency})`,
-            ledgerCurrency,
-            amount,
-            netAmount >= 0 ? "income" : "expense",
-            cutoffDate,
-            cutoffDate,
-            ledgerCurrency,
-            amount,
-            `ledger_history_compaction:${ledgerCurrency}:${cutoffDate}`,
-            now,
-            now
-          );
-          createdRows += 1;
-        }
+      return db.transaction(() => {
+        const plan = historicalLedgerCompactionPlanFromRows(
+          db.prepare("SELECT * FROM settings WHERE id = 1").get() || {},
+          db.prepare("SELECT * FROM ledger_transactions").all(), options,
+          db.prepare("SELECT cache_json FROM cashflow_ledger_summary_cache WHERE budget_id = ?").get(userId)?.cache_json);
+        if (plan.needsCompaction) db.prepare(`INSERT INTO cashflow_ledger_summary_cache (budget_id, cache_json, updated_at)
+          VALUES (?, ?, ?) ON CONFLICT (budget_id) DO UPDATE SET cache_json = excluded.cache_json, updated_at = excluded.updated_at`)
+          .run(userId, JSON.stringify(plan.cache), options.now || new Date().toISOString());
+        return { ...plan, compactedRows: plan.needsCompaction ? plan.eligibleRows : 0,
+          createdRows: plan.needsCompaction ? plan.summaries.length : 0 };
       })();
-    } finally {
-      targetDb.close();
-    }
-
-    recalculateLedgerRunningBalance(userId);
-
-    return {
-      ...plan,
-      eligibleRows: rows.length,
-      ledgerCurrencies: [...totalsByLedgerCurrency.keys()].sort(),
-      compactedRows: rows.length,
-      createdRows
-    };
+    } finally { db.close(); }
   }
 
+  /** Serialize derived metadata with ledger writers across PostgreSQL replicas. */
   async function compactHistoricalLedgerAsync(userId, options = {}) {
-    if (
-      !budgetStore
-      || typeof budgetStore.transaction !== "function"
-      || typeof budgetStore.listPlanningRows !== "function"
-    ) {
-      return compactHistoricalLedger(userId, options);
-    }
-
-    const plan = options.plan || await historicalLedgerCompactionPlanAsync(userId, options);
-    if (!plan.enabled || !plan.cutoffDate || !plan.eligibleRows || !plan.needsCompaction) {
-      return {
-        ...plan,
-        compactedRows: 0,
-        createdRows: 0
-      };
-    }
-
-    return await budgetStore.transaction(async writer => {
-      if (typeof writer.lockBudgetLedger === "function") {
-        await writer.lockBudgetLedger(userId);
-      }
-
-      const cutoffDate = plan.cutoffDate;
-      const rows = (await writer.listConfirmedTransactions(userId))
-        .filter(row => dateKey(row.confirmed_date || row.date) < cutoffDate);
-      if (!rows.length || rows.every(isLedgerHistoryCompactionRow)) {
-        return {
-          ...plan,
-          eligibleRows: 0,
-          eligibleDetailRows: 0,
-          needsCompaction: false,
-          ledgerCurrencies: [],
-          compactedRows: 0,
-          createdRows: 0
-        };
-      }
-
-      const totalsByLedgerCurrency = new Map();
-      for (const row of rows) {
-        const ledgerCurrency = String(row.ledger_currency || "PLN").toUpperCase();
-        const amount = storedOrComputedConfirmedLedgerAmount(row);
-        const current = totalsByLedgerCurrency.get(ledgerCurrency) || 0;
-        totalsByLedgerCurrency.set(
-          ledgerCurrency,
-          row.type === "income"
-            ? addMoneyAmounts(current, amount)
-            : subtractMoneyAmounts(current, amount)
-        );
-      }
-
-      const rowsByYear = new Map();
-      for (const row of rows) {
-        const ledgerYear = Number(row.ledger_year);
-        const ids = rowsByYear.get(ledgerYear) || [];
-        ids.push(row.id);
-        rowsByYear.set(ledgerYear, ids);
-      }
-
-      for (const [ledgerYear, ids] of rowsByYear.entries()) {
-        await writer.deleteConfirmedTransactionsById(userId, ledgerYear, ids);
-      }
-
-      const now = options.now || new Date().toISOString();
-      const targetYear = Number(cutoffDate.slice(0, 4));
-      const compactRows = [...totalsByLedgerCurrency.entries()].sort()
-        .map(([ledgerCurrency, netAmount]) => {
-          const amount = roundMoneyAmount(Math.abs(netAmount));
-          return {
-            amount,
-            buffered_fx_rate: 1,
-            confirmed_date: cutoffDate,
-            created_at: now,
-            currency: ledgerCurrency,
-            date: cutoffDate,
-            fx_rate: 1,
-            id: generateId("ledger-compact"),
-            ledger_amount: amount,
-            ledger_currency: ledgerCurrency,
-            ledger_year: targetYear,
-            name: `Historical ledger balance before ${cutoffDate} (${ledgerCurrency})`,
-            occurrence_key: `ledger_history_compaction:${ledgerCurrency}:${cutoffDate}`,
-            running_balance_pln: 0,
-            type: netAmount >= 0 ? "income" : "expense",
-            updated_at: now
-          };
-        });
-
-      if (compactRows.length) {
-        await writer.insertConfirmedTransactions(userId, compactRows);
-      }
-
-      const balancePlan = await createLedgerRunningBalancePlan({
-        budgetId: userId,
-        budgetStore: writer,
-        openingBalance: 0
-      });
-      await applyLedgerRunningBalancePlan({
-        budgetStore: writer,
-        plan: balancePlan
-      });
-
-      return {
-        ...plan,
-        eligibleRows: rows.length,
-        ledgerCurrencies: [...totalsByLedgerCurrency.keys()].sort(),
-        compactedRows: rows.length,
-        createdRows: compactRows.length
-      };
+    if (!budgetStore || typeof budgetStore.transaction !== "function") return compactHistoricalLedger(userId, options);
+    return budgetStore.transaction(async (writer, client) => {
+      await writer.lockBudgetLedger(userId);
+      const plan = historicalLedgerCompactionPlanFromRows(
+        (await writer.listPlanningRows(userId, "settings"))[0] || {},
+        await writer.listConfirmedTransactions(userId), options,
+        (await client.query("SELECT cache_json FROM cashflow_ledger_summary_cache WHERE budget_id = $1", [userId])).rows[0]?.cache_json);
+      if (plan.needsCompaction) await client.query(`INSERT INTO cashflow_ledger_summary_cache (budget_id, cache_json, updated_at)
+        VALUES ($1, $2, $3) ON CONFLICT (budget_id) DO UPDATE SET cache_json = excluded.cache_json, updated_at = excluded.updated_at`,
+        [userId, JSON.stringify(plan.cache), options.now || new Date().toISOString()]);
+      return { ...plan, compactedRows: plan.needsCompaction ? plan.eligibleRows : 0,
+        createdRows: plan.needsCompaction ? plan.summaries.length : 0 };
     });
   }
 
@@ -849,7 +629,17 @@ export function createCashflowLedgerService({
     return newest;
   }
 
-  function recalculateLedgerRunningBalance(userId) {
+  function recalculateLedgerRunningBalance(userId, { db = null } = {}) {
+    // Synchronous restore owns this connection through projection and commit.
+    // Reading or writing through another handle would escape its snapshot.
+    if (db) {
+      const currency = db.prepare('SELECT ledger_currency FROM settings WHERE id = 1').get()?.ledger_currency || 'PLN';
+      const rows = db.prepare('SELECT * FROM ledger_transactions WHERE ledger_currency = ?').all(currency);
+      const openingBalance = sqliteLedgerOpeningBalance(db, userId, currency, { allowStandaloneOrigins });
+      const update = db.prepare('UPDATE ledger_transactions SET running_balance_pln = ?, ledger_amount = ? WHERE id = ?');
+      for (const row of confirmedRowsWithRunningBalances(rows, { openingBalance })) update.run(row.running_balance_pln, row.ledger_amount, row.id);
+      return;
+    }
     const { rows, openingBalance } = rowsForCurrentLedger(userId);
 
     const dbByYear = new Map();
@@ -879,15 +669,18 @@ export function createCashflowLedgerService({
       return { ok: true, updated: null, fallback: "sqlite" };
     }
 
+    // Composing hosts may pass their owning writer. Never reopen the root pool
+    // while a confirmation/currency/import transaction is still uncommitted.
+    const store = options.store || budgetStore;
+    const ledgerCurrency = options.ledgerCurrency || options.settings?.ledger_currency
+      || (await store.listPlanningRows(userId, "settings"))?.[0]?.ledger_currency || "PLN";
     const plan = await createLedgerRunningBalancePlan({
-      budgetId: userId,
-      budgetStore,
-      ledgerCurrency: options.ledgerCurrency || options.settings?.ledger_currency || null,
-      openingBalance: 0
+      budgetId: userId, budgetStore: store, ledgerCurrency,
+      openingBalance: await budgetLedgerOpeningBalance(store, userId, ledgerCurrency)
     });
 
     return await applyLedgerRunningBalancePlan({
-      budgetStore,
+      budgetStore: store,
       plan
     });
   }
@@ -909,15 +702,17 @@ export function createCashflowLedgerService({
     return wouldConfirmedRowsGoNegative(rows, { openingBalance });
   }
 
-  async function wouldLedgerGoNegativeAfterInsertAsync(userId, candidate, options = {}) {
-    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+  // Locked confirmation checks must observe their writer's uncommitted ledger,
+  // not acquire another pool connection or validate an earlier snapshot.
+  async function wouldLedgerGoNegativeAfterInsertAsync(userId, candidate, options = {}, store = budgetStore) {
+    if (!store || typeof store.listConfirmedTransactions !== "function") {
       return wouldLedgerGoNegativeAfterInsert(userId, candidate);
     }
 
     const ledgerCurrency = options.ledgerCurrency
       || options.settings?.ledger_currency
-      || (await currentLedgerSettingsAsync(userId)).ledgerCurrency;
-    const rows = (await loadAllConfirmedTransactionsAsync(userId))
+      || (await store.listPlanningRows(userId, "settings"))?.[0]?.ledger_currency || "PLN";
+    const rows = (await store.listConfirmedTransactions(userId))
       .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
     rows.push({
       id: candidate.id,
@@ -930,7 +725,7 @@ export function createCashflowLedgerService({
       ledger_currency: candidate.ledger_currency || ledgerCurrency
     });
 
-    return wouldConfirmedRowsGoNegative(rows, { openingBalance: 0 });
+    return wouldConfirmedRowsGoNegative(rows, { openingBalance: await budgetLedgerOpeningBalance(store, userId, ledgerCurrency) });
   }
 
   function latestConfirmedBalance(userId) {
@@ -948,7 +743,7 @@ export function createCashflowLedgerService({
       || (await currentLedgerSettingsAsync(userId)).ledgerCurrency;
     const rows = (await loadAllConfirmedTransactionsAsync(userId))
       .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
-    return latestBalanceFromConfirmedRows(rows, { openingBalance: 0 });
+    return latestBalanceFromConfirmedRows(rows, { openingBalance: await budgetLedgerOpeningBalance(budgetStore, userId, ledgerCurrency) });
   }
   return {
     hasAnyConfirmedTransactions,

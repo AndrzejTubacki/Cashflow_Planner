@@ -2,6 +2,7 @@ import {
   POSTGRES_GLOBAL_COLUMNS,
   POSTGRES_GLOBAL_TABLES
 } from "./cashflow-postgres-global-schema.js";
+import { validateStandaloneTransferRecord } from './cashflow-standalone-transfer-record.js';
 
 export function quoteGlobalIdentifier(identifier) {
   const value = String(identifier || "");
@@ -46,7 +47,7 @@ export function normalizeGlobalRowsForInsert(tableName, rows = []) {
           throw new Error(`Invalid global metadata row for ${safeTable} at index ${index}: unsupported column ${column}`);
         }
       }
-      return { ...row };
+      return safeTable === 'cashflow_standalone_transfers' ? validateStandaloneTransferRecord(row) : { ...row };
     }),
     tableName: safeTable
   };

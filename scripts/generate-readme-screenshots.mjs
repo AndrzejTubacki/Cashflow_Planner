@@ -127,14 +127,10 @@ async function waitForApiResponse(page, method, pathname, action) {
   return response;
 }
 
-async function selectTab(page, tabId, selector) {
-  await page.locator(`[data-cashflow-tab="${tabId}"]`).click();
-  await page.locator(selector).waitFor({ state: "visible" });
-  await page.waitForLoadState("networkidle").catch(() => {});
-}
-
+// Demo data is created through the legacy pages, whose form hooks are stable;
+// the session cookie then carries the selected budget into the main UI.
 async function createDemoBudget(page, baseUrl) {
-  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/legacy/?ui=legacy`, { waitUntil: "domcontentloaded" });
   await page.locator("[data-cashflow-user-selection]").waitFor({ state: "visible" });
   await page.locator('input[name="userId"]').fill("readme-demo");
   await page.locator('input[name="displayName"]').fill("README Demo");
@@ -156,43 +152,23 @@ async function createDemoBudget(page, baseUrl) {
   );
   await page.locator("[data-cashflow-page]").waitFor({ state: "visible" });
 
-  await selectTab(page, "settings", "[data-cashflow-settings-tab]");
-  await page.locator("[data-cashflow-settings-tab] details").evaluateAll(detailsList => {
-    detailsList.forEach(details => {
-      details.open = true;
-    });
-  });
+  await page.goto(`${baseUrl}/?ui=beta#settings/budget`, { waitUntil: "domcontentloaded" });
+  const loadSample = page.getByRole("button", { name: "Load sample dataset", exact: true });
+  await loadSample.waitFor({ state: "visible" });
   page.once("dialog", dialog => dialog.accept());
-  await waitForApiResponse(page, "POST", "/api/import/sample", () =>
-    page.locator("[data-cashflow-load-sample]").click()
-  );
-  await page.locator("[data-cashflow-page]").waitFor({ state: "visible" });
+  await waitForApiResponse(page, "POST", "/api/import/sample", () => loadSample.click());
   await page.waitForLoadState("networkidle").catch(() => {});
 }
 
-async function installScreenshotBackdrop(page) {
-  await page.addStyleTag({
-    content: `
-      html,
-      body,
-      #app {
-        background: #0f172a !important;
-      }
-
-      [data-cashflow-page] {
-        background:
-          linear-gradient(180deg, #172638 0%, #101827 45%, #0b1120 100%) !important;
-        padding-bottom: 16px !important;
-      }
-    `
-  });
-}
-
-async function screenshotPage(page, filename) {
-  const target = page.locator("[data-cashflow-page]");
-  await target.waitFor({ state: "visible" });
-  await target.screenshot({
+async function screenshotView(page, baseUrl, hash, filename) {
+  await page.goto(`${baseUrl}/?ui=beta${hash}`, { waitUntil: "domcontentloaded" });
+  await page.locator(".beta-main").waitFor({ state: "visible" });
+  await page.waitForLoadState("networkidle").catch(() => {});
+  // Panels fetch their own lists after the page settles; wait them out.
+  await page.waitForFunction(() => !document.querySelector(".beta-main")?.innerText.includes("Loading..."), null, { timeout: 15000 });
+  await page.screenshot({
     animations: "disabled",
+    fullPage: true,
     path: path.join(SCREENSHOT_DIR, filename)
   });
 }
@@ -212,21 +188,10 @@ async function main() {
 
   try {
     await createDemoBudget(page, baseUrl);
-    await installScreenshotBackdrop(page);
 
-    await selectTab(page, "ledger", "[data-cashflow-ledger-tab]");
-    await screenshotPage(page, "ledger-overview.png");
-
-    await selectTab(page, "budgets", "[data-cashflow-budget-manager]");
-    await screenshotPage(page, "budget-manager.png");
-
-    await selectTab(page, "settings", "[data-cashflow-settings-tab]");
-    await page.locator("[data-cashflow-settings-tab] details").evaluateAll(detailsList => {
-      detailsList.forEach(details => {
-        details.open = true;
-      });
-    });
-    await screenshotPage(page, "settings-portability.png");
+    await screenshotView(page, baseUrl, "#ledger", "ledger-overview.png");
+    await screenshotView(page, baseUrl, "#budget", "budget-manager.png");
+    await screenshotView(page, baseUrl, "#settings/budget", "settings-portability.png");
 
     assert.equal(existsSync(path.join(SCREENSHOT_DIR, "ledger-overview.png")), true);
     assert.equal(existsSync(path.join(SCREENSHOT_DIR, "budget-manager.png")), true);

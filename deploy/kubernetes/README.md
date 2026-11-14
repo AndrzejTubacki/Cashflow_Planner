@@ -66,7 +66,7 @@ For stricter change control and easier rollbacks, pin an immutable release tag
 instead of `latest`:
 
 ```yaml
-image: ghcr.io/andrzejtubacki/cashflow_planner:1.1.6
+image: ghcr.io/andrzejtubacki/cashflow_planner:1.2.0
 imagePullPolicy: IfNotPresent
 ```
 
@@ -75,8 +75,8 @@ imagePullPolicy: IfNotPresent
 If you build from source, either push to a registry your cluster can pull from:
 
 ```sh
-docker build -t registry.example.com/cashflow:1.1.6 .
-docker push registry.example.com/cashflow:1.1.6
+docker build -t registry.example.com/cashflow:1.2.0 .
+docker push registry.example.com/cashflow:1.2.0
 ```
 
 Or, on a single-node or air-gapped k3s host without a registry, import the
@@ -272,8 +272,8 @@ Before switching production traffic, validate staging with copied data:
 
 1. Open the staging hostname.
 2. Confirm existing budgets are visible.
-3. If legacy profile directories were imported, confirm `legacy-admin` exists
-   and is the only automatic `system_admin`.
+3. Confirm existing accounts, `system_admin` roles and budget owners carried
+   over unchanged.
 4. Create a staging-only account and confirm it does not accidentally receive
    `system_admin`.
 5. Open representative budgets and verify settings, pending rows, confirmed

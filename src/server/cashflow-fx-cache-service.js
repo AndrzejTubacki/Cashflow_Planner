@@ -1,3 +1,5 @@
+import { assertFxRateFresh as assertCachedRateFresh } from "../engine/cashflow-fx-freshness.js";
+import { recordSqliteFinancialChange } from "./cashflow-financial-journal.js";
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { fetchWithTimeout, fxFetchTimeoutMs } from "./cashflow-fetch-utils.js";
@@ -36,20 +38,6 @@ export function createCashflowFxCacheService({
     return String(date || todayInTimezone(timezone)).slice(0, 10);
   }
 
-  function assertCachedRateFresh(rateDate, cachedRateDate, baseCurrency, quoteCurrency) {
-    // Snapshot and single-rate consumers must enforce the same bounded-cache policy.
-    const cachedDate = String(cachedRateDate || "").slice(0, 10);
-    const rateAgeDays = (
-      new Date(`${rateDate}T00:00:00Z`) - new Date(`${cachedDate}T00:00:00Z`)
-    ) / (1000 * 60 * 60 * 24);
-    if (rateAgeDays > 14) {
-      const err = new Error(`FX rate cache is stale for ${baseCurrency}/${quoteCurrency}`);
-      err.status = 409;
-      err.details = { code: "stale_fx_rate", ageDays: rateAgeDays };
-      throw err;
-    }
-  }
-
   function fxSettingsFromRow(settings = {}) {
     const ledgerCurrency = normalizeSupportedCurrency(settings.ledger_currency || "PLN");
 
@@ -63,8 +51,9 @@ export function createCashflowFxCacheService({
     };
   }
 
-  function getFxSettings(userId) {
-    const db = openPlanningDb(userId);
+  // Atomic SQLite mutations borrow provider policy from their own connection.
+  function getFxSettings(userId, transactionDb = null) {
+    const db = transactionDb || openPlanningDb(userId);
 
     try {
       const settings = db.prepare(`
@@ -74,13 +63,14 @@ export function createCashflowFxCacheService({
       `).get() || {};
       return fxSettingsFromRow(settings);
     } finally {
-      db.close();
+      if (!transactionDb) db.close();
     }
   }
 
-  async function getFxSettingsAsync(userId) {
-    if (budgetStore && typeof budgetStore.listPlanningRows === "function") {
-      const rows = await budgetStore.listPlanningRows(userId, "settings");
+  // Provider policy may be edited inside the same transaction as financial sources.
+  async function getFxSettingsAsync(userId, store = budgetStore) {
+    if (store && typeof store.listPlanningRows === "function") {
+      const rows = await store.listPlanningRows(userId, "settings");
       return fxSettingsFromRow(rows.find(row => Number(row.id) === 1) || rows[0] || {});
     }
 
@@ -139,30 +129,35 @@ export function createCashflowFxCacheService({
     const db = openPlanningDb(userId);
 
     try {
-      const { timezone } = getFxSettings(userId);
+      const { timezone } = getFxSettings(userId, db);
       const row = fxCacheRowFromRateInfo(rateInfo, requestedDate, timezone);
 
-      db.prepare(`
-        INSERT INTO fx_rates_cache (
-          base_currency, quote_currency, currency, rate_date, rate, effective_date, source, raw_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(base_currency, quote_currency, rate_date) DO UPDATE SET
-          currency = excluded.currency,
-          rate = excluded.rate,
-          effective_date = excluded.effective_date,
-          source = excluded.source,
-          raw_json = excluded.raw_json,
-          updated_at = datetime('now')
-      `).run(
-        row.base_currency,
-        row.quote_currency,
-        row.currency,
-        row.rate_date,
-        row.rate,
-        row.effective_date,
-        row.source,
-        row.raw_json
-      );
+      // FX can affect the next projection even if its later refresh fails.
+      // Commit cache state and cursor invalidation together, never afterward.
+      db.transaction(() => {
+        db.prepare(`
+          INSERT INTO fx_rates_cache (
+            base_currency, quote_currency, currency, rate_date, rate, effective_date, source, raw_json, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(base_currency, quote_currency, rate_date) DO UPDATE SET
+            currency = excluded.currency,
+            rate = excluded.rate,
+            effective_date = excluded.effective_date,
+            source = excluded.source,
+            raw_json = excluded.raw_json,
+            updated_at = datetime('now')
+        `).run(
+          row.base_currency,
+          row.quote_currency,
+          row.currency,
+          row.rate_date,
+          row.rate,
+          row.effective_date,
+          row.source,
+          row.raw_json
+        );
+        recordSqliteFinancialChange(db, userId, "fx");
+      }).immediate();
     } finally {
       db.close();
     }
@@ -171,18 +166,20 @@ export function createCashflowFxCacheService({
   async function upsertFxCacheRateAsync(userId, rateInfo, requestedDate = null, settingsOverride = null) {
     if (budgetStore?.backend === "postgres" && typeof budgetStore.upsertFxRates === "function") {
       const { timezone } = settingsOverride || await getFxSettingsAsync(userId);
-      await budgetStore.upsertFxRates(userId, [
-        fxCacheRowFromRateInfo(rateInfo, requestedDate, timezone)
-      ]);
+      await budgetStore.transaction(async writer => {
+        await writer.lockBudgetLedger(userId);
+        await writer.upsertFxRates(userId, [fxCacheRowFromRateInfo(rateInfo, requestedDate, timezone)]);
+        await writer.recordFinancialChange(userId, "fx");
+      });
       return;
     }
 
     upsertFxCacheRate(userId, rateInfo, requestedDate);
   }
 
-  function safeGetCurrentFxSnapshot(userId = null) {
+  function safeGetCurrentFxSnapshot(userId = null, transactionDb = null) {
     if (userId) {
-      const { provider } = getFxSettings(userId);
+      const { provider } = getFxSettings(userId, transactionDb);
 
       if (provider === FX_PROVIDER_DISABLED || provider === FX_PROVIDER_MANUAL) {
         return null;
@@ -213,9 +210,10 @@ export function createCashflowFxCacheService({
     }
   }
 
-  async function safeGetCurrentFxSnapshotAsync(userId = null) {
+  // Read provider policy through the caller's transaction when composing a mutation.
+  async function safeGetCurrentFxSnapshotAsync(userId = null, store = budgetStore) {
     if (userId) {
-      const { provider } = await getFxSettingsAsync(userId);
+      const { provider } = await getFxSettingsAsync(userId, store);
 
       if (provider === FX_PROVIDER_DISABLED || provider === FX_PROVIDER_MANUAL) {
         return null;
@@ -247,7 +245,7 @@ export function createCashflowFxCacheService({
     }
   }
 
-  function getCachedFxRate(userId, currency, date = null, quoteCurrency = null) {
+  function getCachedFxRate(userId, currency, date = null, quoteCurrency = null, { allowStale = false } = {}) {
     const normalized = normalizeCurrency(currency);
     const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
     const quote = normalizeCurrency(quoteCurrency || ledgerCurrency || "PLN");
@@ -279,7 +277,7 @@ export function createCashflowFxCacheService({
       if (exact?.rate) return Number(exact.rate);
 
       const latestBefore = db.prepare(`
-        SELECT rate, rate_date
+        SELECT rate, rate_date, source
         FROM fx_rates_cache
         WHERE base_currency = ?
           AND quote_currency = ?
@@ -289,19 +287,13 @@ export function createCashflowFxCacheService({
       `).get(normalized, quote, rateDate);
 
       if (latestBefore?.rate) {
-        const rateAgeDays = (new Date(`${rateDate}T00:00:00Z`) - new Date(`${latestBefore.rate_date}T00:00:00Z`)) / (1000 * 60 * 60 * 24);
-        if (rateAgeDays > 14) {
-          const err = new Error(`FX rate cache is stale for ${normalized}/${quote}`);
-          err.status = 409;
-          err.details = { code: "stale_fx_rate", ageDays: rateAgeDays };
-          throw err;
-        }
+        if (!allowStale) assertCachedRateFresh(rateDate, latestBefore.rate_date, normalized, quote, latestBefore.source);
         return Number(latestBefore.rate);
       }
 
       if (quote !== "PLN") {
-        const baseToPln = normalized === "PLN" ? 1 : getCachedFxRate(userId, normalized, date, "PLN");
-        const quoteToPln = quote === "PLN" ? 1 : getCachedFxRate(userId, quote, date, "PLN");
+        const baseToPln = normalized === "PLN" ? 1 : getCachedFxRate(userId, normalized, date, "PLN", { allowStale });
+        const quoteToPln = quote === "PLN" ? 1 : getCachedFxRate(userId, quote, date, "PLN", { allowStale });
 
         if (
           Number.isFinite(baseToPln) &&
@@ -319,8 +311,8 @@ export function createCashflowFxCacheService({
     }
   }
 
-  function getCachedFxSnapshot(userId, date = null) {
-    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId);
+  function getCachedFxSnapshot(userId, date = null, transactionDb = null) {
+    const { provider, manualRates, manualPairs, ledgerCurrency, timezone } = getFxSettings(userId, transactionDb);
     const rateDate = fxCacheDateKey(date, timezone);
     const snapshot = {
       pln: {
@@ -368,7 +360,7 @@ export function createCashflowFxCacheService({
       return snapshot;
     }
 
-    const db = openPlanningDb(userId);
+    const db = transactionDb || openPlanningDb(userId);
 
     try {
       const rows = db.prepare(`
@@ -386,13 +378,14 @@ export function createCashflowFxCacheService({
         const pair = `${currency}/${quote}`;
         if (seen.has(pair)) continue;
 
-        assertCachedRateFresh(rateDate, row.rate_date, currency, quote);
+        // Planning snapshots retain stale rates; financial single-rate readers refuse them.
         seen.add(pair);
         const entry = {
           currency,
           baseCurrency: currency,
           quoteCurrency: quote,
           rate: Number(row.rate),
+          rateDate: row.rate_date,
           effectiveDate: row.effective_date || rateDate,
           source: row.source || "cache"
         };
@@ -404,11 +397,11 @@ export function createCashflowFxCacheService({
 
       return snapshot;
     } finally {
-      db.close();
+      if (!transactionDb) db.close();
     }
   }
 
-  function cachedFxRateFromRows(settings, rows, currency, date = null, quoteCurrency = null) {
+  function cachedFxRateFromRows(settings, rows, currency, date = null, quoteCurrency = null, { allowStale = false } = {}) {
     const normalized = normalizeCurrency(currency);
     const quote = normalizeCurrency(quoteCurrency || settings.ledgerCurrency || "PLN");
     if (normalized === quote) return 1;
@@ -430,20 +423,14 @@ export function createCashflowFxCacheService({
 
     if (pairRows.length > 0) {
       const bestRow = pairRows[0];
-      const rateAgeDays = (new Date(`${rateDate}T00:00:00Z`) - new Date(`${String(bestRow.rate_date || "").slice(0, 10)}T00:00:00Z`)) / (1000 * 60 * 60 * 24);
-      if (rateAgeDays > 14) {
-        const err = new Error(`FX rate cache is stale for ${normalized}/${quote}`);
-        err.status = 409;
-        err.details = { code: "stale_fx_rate", ageDays: rateAgeDays };
-        throw err;
-      }
+      if (!allowStale) assertCachedRateFresh(rateDate, bestRow.rate_date, normalized, quote, bestRow.source);
       const direct = Number(bestRow.rate);
       if (Number.isFinite(direct) && direct > 0) return direct;
     }
 
     if (quote !== "PLN") {
-      const baseToPln = normalized === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, normalized, date, "PLN");
-      const quoteToPln = quote === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, quote, date, "PLN");
+      const baseToPln = normalized === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, normalized, date, "PLN", { allowStale });
+      const quoteToPln = quote === "PLN" ? 1 : cachedFxRateFromRows(settings, rows, quote, date, "PLN", { allowStale });
 
       if (
         Number.isFinite(baseToPln) &&
@@ -544,13 +531,14 @@ export function createCashflowFxCacheService({
       const pair = `${currency}/${quote}`;
       if (seen.has(pair)) continue;
 
-      assertCachedRateFresh(rateDate, row.rate_date, currency, quote);
+      // Planning snapshots retain stale rates; financial single-rate readers refuse them.
       seen.add(pair);
       const entry = {
         currency,
         baseCurrency: currency,
         quoteCurrency: quote,
         rate: Number(row.rate),
+        rateDate: row.rate_date,
         effectiveDate: row.effective_date || rateDate,
         source: row.source || "cache"
       };
@@ -563,15 +551,16 @@ export function createCashflowFxCacheService({
     return snapshot;
   }
 
-  async function getCachedFxSnapshotAsync(userId, date = null) {
-    if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
+  // Cache rows and provider settings must come from the same injected reader.
+  async function getCachedFxSnapshotAsync(userId, date = null, store = budgetStore) {
+    if (!store || typeof store.listPlanningRows !== "function") {
       return getCachedFxSnapshot(userId, date);
     }
 
-    const settings = await getFxSettingsAsync(userId);
+    const settings = await getFxSettingsAsync(userId, store);
     const rows = settings.provider === FX_PROVIDER_DISABLED || settings.provider === FX_PROVIDER_MANUAL
       ? []
-      : await budgetStore.listPlanningRows(userId, "fx_rates_cache");
+      : await store.listPlanningRows(userId, "fx_rates_cache");
 
     return buildCachedFxSnapshotFromRows({
       date,
@@ -643,11 +632,59 @@ export function createCashflowFxCacheService({
       updated.push(rateInfo);
     }
 
+    // Pending rows are confirmed at their own date, so today's rate alone
+    // cannot unblock a row dated while refreshes were not running.
+    const today = date || todayInTimezone(timezone);
+    for (const needed of await pendingDatesNeedingFxRates(userId, { provider, ledgerCurrency, timezone }, today)) {
+      try {
+        const rateInfo = await fetchProviderRate(provider, needed.currency, needed.date, ledgerCurrency, timezone);
+        await upsertFxCacheRateAsync(userId, rateInfo, needed.date, { timezone });
+        updated.push(rateInfo);
+      } catch (error) {
+        logError("cashflow_fx_pending_backfill_failed", { userId, currency: needed.currency, date: needed.date, error: error.message });
+      }
+    }
+
     return {
       provider,
       updated_count: updated.length,
       updated
     };
+  }
+
+  /** Foreign-currency pending rows dated up to today whose cached rate for that
+   * date is missing or stale. Bounded so one refresh cannot flood the provider. */
+  async function pendingDatesNeedingFxRates(userId, { provider, ledgerCurrency, timezone }, today) {
+    let pendingRows;
+    let cacheRows;
+    if (budgetStore && typeof budgetStore.listPlanningRows === "function") {
+      [pendingRows, cacheRows] = await Promise.all([
+        budgetStore.listPlanningRows(userId, "pending_transactions"),
+        budgetStore.listPlanningRows(userId, "fx_rates_cache")
+      ]);
+    } else {
+      const db = openPlanningDb(userId);
+      try {
+        pendingRows = db.prepare("SELECT currency, date FROM pending_transactions").all();
+        cacheRows = db.prepare("SELECT * FROM fx_rates_cache").all();
+      } finally {
+        db.close();
+      }
+    }
+    const settings = { provider, manualRates: {}, manualPairs: {}, ledgerCurrency, timezone };
+    const needed = new Map();
+    for (const row of pendingRows) {
+      const currency = normalizeCurrency(row.currency);
+      const rowDate = String(row.date || "").slice(0, 10);
+      if (!currency || currency === ledgerCurrency || !/^\d{4}-\d{2}-\d{2}$/.test(rowDate) || rowDate > today) continue;
+      try {
+        if (cachedFxRateFromRows(settings, cacheRows, currency, rowDate, ledgerCurrency)) continue;
+      } catch (error) {
+        if (error?.details?.code !== "stale_fx_rate") throw error;
+      }
+      needed.set(`${currency}|${rowDate}`, { currency, date: rowDate });
+    }
+    return [...needed.values()].slice(0, 60);
   }
 
   async function refreshNbpFxCacheForAllUsers(date = null) {
@@ -1041,15 +1078,17 @@ export function createCashflowFxCacheService({
       };
     }
 
+    // This preflight creates/edits planning sources, never actual ledger money.
     const cached = useBudgetStoreFxWrites
       ? cachedFxRateFromRows(
           { provider, manualRates, manualPairs, ledgerCurrency, timezone },
           await budgetStore.listPlanningRows(userId, "fx_rates_cache"),
           currency,
           null,
-          ledgerCurrency
+          ledgerCurrency,
+          { allowStale: true }
         )
-      : getCachedFxRate(userId, currency, null, ledgerCurrency);
+      : getCachedFxRate(userId, currency, null, ledgerCurrency, { allowStale: true });
 
     if (cached) {
       return {

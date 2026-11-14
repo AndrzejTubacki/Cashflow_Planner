@@ -1,11 +1,17 @@
+import { requireMoneyAmount } from "./cashflow-input-validation.js";
+import { createNodeLedgerAuditReplay } from "./cashflow-ledger-audit-store.js";
+import { readSqliteFinancialExportAudit, validateFinancialExportAudit } from "./cashflow-ledger-audit-export.js";
 import { createHash } from "crypto";
+import { rotateSqliteFinancialEpoch } from "./cashflow-financial-journal.js";
 import { requireIsoDate } from "./cashflow-date-utils.js";
 import {
   applyBudgetStoreImportPlan,
-  createBudgetStoreImportPlanFromFullExport
+  createBudgetStoreImportPlanFromFullExport,
+  createBudgetStorePayloadFromFullExport
 } from "./cashflow-budget-store-import-plan.js";
 import {
   createBudgetStoreSnapshot,
+  normalizeBudgetStoreSnapshot,
   restoreBudgetStoreSnapshot
 } from "./cashflow-budget-store-snapshot.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
@@ -291,7 +297,8 @@ function normalizeCsvOneOff({ rowNumber, row }, generateId) {
     } else if (amount < 0) {
       details.push({ row: rowNumber, field: "amount", reason: "must_be_non_negative" });
     } else {
-      amount = roundMoneyAmount(amount);
+      try { amount = requireMoneyAmount(amountText, 'amount', { min: 0 }); }
+      catch { details.push({ row: rowNumber, field: 'amount', reason: 'unsafe_money' }); }
     }
   }
 
@@ -360,15 +367,20 @@ function canonicalizeForChecksum(value) {
   return value;
 }
 
-function computeExportChecksum({ planning, ledgers }) {
-  const canonical = canonicalizeForChecksum({ planning, ledgers });
+function computeExportChecksum({ planning, ledgers, ledgerAudit }) {
+  const canonical = canonicalizeForChecksum({ planning, ledgers, ...(ledgerAudit === undefined ? {} : { ledgerAudit }) });
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
 }
 
-function buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId }) {
+/** Audited exports use v2 so older readers cannot silently discard history.
+ * Ordinary v1 exports retain their exact checksum and compatibility contract.
+ * Origin export requires an explicitly upgraded owning host. */
+function buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId, ledgerAudit = null, allowStandaloneOrigins = false }) {
+  if (ledgerAudit !== null) validateFinancialExportAudit(userId, ledgerAudit, ledgers, { allowStandaloneOrigins });
   return {
     format: EXPORT_FORMAT,
-    version: EXPORT_VERSION,
+    version: ledgerAudit === null ? EXPORT_VERSION : 2,
+    ...(ledgerAudit === null ? {} : { ledgerAudit }),
     schemaVersions: {
       planning: PLANNING_SCHEMA_VERSION,
       ledger: LEDGER_SCHEMA_VERSION
@@ -379,7 +391,7 @@ function buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, 
     operationalSettingsIncluded: includeOperationalSettings,
     planning,
     ledgers,
-    checksum: computeExportChecksum({ planning, ledgers })
+    checksum: computeExportChecksum({ planning, ledgers, ...(ledgerAudit === null ? {} : { ledgerAudit }) })
   };
 }
 
@@ -462,6 +474,22 @@ function buildFullImportPreview({
   };
 }
 
+// Fence notification associations across asynchronous import preparation. Hashes
+// stay internal and errors never contain destinations or stored credentials.
+function notificationAssociationFingerprint(settings = {}) {
+  return createHash("sha256").update(JSON.stringify([
+    settings.ntfy_url || null, settings.ntfy_auth_token || null
+  ])).digest("hex");
+}
+
+function assertImportNotificationState(settings, expected) {
+  if (expected && notificationAssociationFingerprint(settings) !== expected) {
+    throw conflict(String(settings.locale || "en").startsWith("pl")
+      ? "Ustawienia powiadomień uległy zmianie; przygotuj import ponownie."
+      : "Notification settings changed; prepare the import again.");
+  }
+}
+
 function prepareExportDataForImport(exportData, options = {}) {
   const {
     currentSettings = {},
@@ -470,8 +498,10 @@ function prepareExportDataForImport(exportData, options = {}) {
     normalizeLocale = value => String(value || "en").trim().toLowerCase(),
     validateSettings = true
   } = options;
+  if (merge && exportData.ledgerAudit) throw badRequest('Correction history cannot be merged; replace explicitly or create an independent copy');
   const prepared = cloneExportData(exportData);
   const settings = { ...(prepared.planning.settings[0] || {}) };
+  const notificationTokenProvided = Object.hasOwn(settings, "ntfy_auth_token") && settings.ntfy_auth_token !== undefined;
   const hasData = hasFunctionalRows(prepared);
   const setupTimestamp = prepared.exportedAt || new Date().toISOString();
 
@@ -504,7 +534,11 @@ function prepareExportDataForImport(exportData, options = {}) {
   if (merge) {
     importSettings = { ...currentSettings };
   } else if (includeOperationalSettings) {
+    // Preserve an omitted token; a default null is not an explicit clear.
+    if (!notificationTokenProvided) settings.ntfy_auth_token = currentSettings.ntfy_auth_token ?? null;
     importSettings = validateAndNormalizeSettings(settings, {
+      currentSettings,
+      notificationTokenProvided,
       includeOperationalSettings: true,
       normalizeLocale
     });
@@ -568,7 +602,9 @@ function importedOccurrenceKeys(exportData) {
   ].map(row => row.occurrence_key).filter(Boolean));
 }
 
-function normalizeExportPayload(payload) {
+/** Verify file structure/checksum and the host's supported financial semantics
+ * before import planning. An input field cannot opt the host into origins. */
+function normalizeExportPayload(payload, { allowStandaloneOrigins = false } = {}) {
   const exportData = payload?.export || payload;
 
   if (!exportData || typeof exportData !== "object") {
@@ -579,8 +615,15 @@ function normalizeExportPayload(payload) {
     throw badRequest("Unsupported export format");
   }
 
-  if (Number(exportData.version) !== EXPORT_VERSION) {
+  if (![EXPORT_VERSION, 2].includes(Number(exportData.version))) {
     throw badRequest("Unsupported export version");
+  }
+
+  if (Number(exportData.version) === 1 && Object.hasOwn(exportData, 'ledgerAudit')) {
+    throw badRequest('Version-1 export cannot contain correction history');
+  }
+  if (Number(exportData.version) === 2 && (!exportData.ledgerAudit || exportData.ledgerAudit.budgetId !== exportData.userId)) {
+    throw badRequest('Audited export requires its complete original budget scope');
   }
 
   if (!exportData.planning || typeof exportData.planning !== "object") {
@@ -594,7 +637,8 @@ function normalizeExportPayload(payload) {
   if (exportData.checksum) {
     const expectedChecksum = computeExportChecksum({
       planning: exportData.planning,
-      ledgers: exportData.ledgers
+      ledgers: exportData.ledgers,
+      ...(Number(exportData.version) === 2 ? { ledgerAudit: exportData.ledgerAudit } : {})
     });
     if (exportData.checksum !== expectedChecksum) {
       throw badRequest("Export checksum does not match its contents; the file may be corrupted or was edited after export");
@@ -631,6 +675,7 @@ function normalizeExportPayload(payload) {
     }
   }
 
+  if (Number(exportData.version) === 2) validateFinancialExportAudit(exportData.userId, exportData.ledgerAudit, exportData.ledgers, { allowStandaloneOrigins });
   return exportData;
 }
 
@@ -853,10 +898,16 @@ function sampleExport() {
 }
 
 
+/** Financial JSON/CSV primitives. Origin-aware hosts must configure matching
+ * stores and balance/projection callbacks; default runtime readers stay closed.
+ * Retained audited history permits explicit replacement/copy, never merging. */
 export function createCashflowDataPortabilityService({
   budgetStore = null,
+  allowStandaloneOrigins = false,
   cleanupOperationalData = () => null,
+  protectBackup = () => () => {},
   createBackup,
+  createBackupAsync = null,
   generateId,
   logError = () => {},
   logServerEvent = () => {},
@@ -873,6 +924,9 @@ export function createCashflowDataPortabilityService({
   regenerateProjectionsAfterMutationAsync = null,
   restoreBackupFromPath
 }) {
+  // The host must also supply origin-aware balance/projection callbacks before
+  // enabling complete runtime imports. No file or request field sets policy.
+  const { copyLedgerAuditSnapshot } = createNodeLedgerAuditReplay({ allowStandaloneOrigins });
 
 async function withAsyncRollback({ userId, mode, safetySnapshot, operationName = "Import", onRollbackBatch }, fn) {
   try {
@@ -976,12 +1030,16 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     if (typeof mutationHook === "function") mutationHook({ phase, ...details });
   }
 
+  /** Synchronous SQLite compatibility path also exports any retained audit;
+   * requesting an export never captures or invents historical source evidence. */
   function exportFullData(userId, appVersion = "0.0.0", options = {}) {
     const includeOperationalSettings = Boolean(options.includeOperationalSettings);
     const db = openPlanningDb(userId);
     const planning = {};
+    let ledgerAudit = null;
 
     try {
+      ledgerAudit = readSqliteFinancialExportAudit(db, userId, { allowStandaloneOrigins });
       for (const tableName of PLANNING_EXPORT_TABLES) {
         planning[tableName] = selectRows(db, tableName);
       }
@@ -1003,7 +1061,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       }
     }
 
-    return buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId });
+    return buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId, ledgerAudit, allowStandaloneOrigins });
   }
 
   function stripBudgetStoreColumns(row, columns = ["budget_id"]) {
@@ -1014,6 +1072,8 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     return result;
   }
 
+  /** Runtime exporters retain full immutable/correction evidence, including
+   * voids, and fail closed if concurrent reads disagree with the audit. */
   async function exportFullDataAsync(userId, appVersion = "0.0.0", options = {}) {
     if (!budgetStore || typeof budgetStore.listPlanningRows !== "function") {
       return exportFullData(userId, appVersion, options);
@@ -1041,14 +1101,18 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       ledgers[yearKey] = rows.map(row => stripBudgetStoreColumns(row, ["budget_id", "ledger_year"]));
     }
 
-    return buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId });
+    const ledgerAudit = typeof budgetStore.exportLedgerAuditSnapshot === 'function'
+      ? await budgetStore.exportLedgerAuditSnapshot(userId) : null;
+    return buildExportEnvelope({ appVersion, includeOperationalSettings, ledgers, planning, userId, ledgerAudit, allowStandaloneOrigins });
   }
 
-  function replacePlanningData(userId, exportData) {
+  function replacePlanningData(userId, exportData, expectedNotificationState) {
     const db = openPlanningDb(userId);
 
     try {
       db.transaction(() => {
+        assertImportNotificationState(db.prepare("SELECT * FROM settings WHERE id = 1").get(), expectedNotificationState);
+        rotateSqliteFinancialEpoch(db, userId);
         db.pragma("foreign_keys = OFF");
 
         for (const tableName of PLANNING_DELETE_ORDER) {
@@ -1359,6 +1423,10 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     }
 
     const normalizedMode = mode === "merge" ? "merge" : "replace";
+    if (normalizedMode === 'merge' && typeof budgetStore.exportLedgerAuditSnapshot === 'function'
+      && await budgetStore.exportLedgerAuditSnapshot(userId) !== null) {
+      throw badRequest('A budget with correction history cannot receive merged financial data');
+    }
     const currentRowsByTable = {};
     const currentRowCounts = {};
     const liveColumnsByTable = {};
@@ -1373,7 +1441,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     const currentSettings = stripBudgetStoreColumns(currentRowsByTable.settings[0] || {});
 
     const exportData = prepareExportDataForImport(
-      normalizeExportPayload(payload),
+      normalizeExportPayload(payload, { allowStandaloneOrigins }),
       {
         currentSettings,
         includeOperationalSettings: normalizedMode === "replace" && Boolean(options.includeOperationalSettings),
@@ -1418,7 +1486,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     }
 
     const exportData = prepareExportDataForImport(
-      normalizeExportPayload(payload),
+      normalizeExportPayload(payload, { allowStandaloneOrigins }),
       {
         currentSettings,
         includeOperationalSettings,
@@ -1428,6 +1496,13 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       }
     );
 
+    // Audit semantics take precedence over ordinary row conflicts: even a
+    // disjoint merge can change the context of retained correction decisions.
+    const currentAudit = typeof budgetStore?.exportLedgerAuditSnapshot === 'function'
+      ? await budgetStore.exportLedgerAuditSnapshot(userId) : null;
+    if (normalizedMode === 'merge' && currentAudit !== null) {
+      throw badRequest('A budget with correction history cannot receive merged financial data');
+    }
     if (normalizedMode === "merge") {
       const conflicts = await collectMergeConflictsAsync(userId, exportData);
       if (conflicts.length) {
@@ -1445,10 +1520,17 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       includeSettings: normalizedMode !== "merge"
     });
 
+    if (exportData.ledgerAudit || currentAudit !== null) {
+      importPlan.auditedSnapshot = normalizeBudgetStoreSnapshot({ format: 'cashflow-budget-store-snapshot', version: 2,
+        payload: createBudgetStorePayloadFromFullExport({ budgetId: userId, exportData }),
+        ledgerAudits: exportData.ledgerAudit ? [copyLedgerAuditSnapshot(exportData.ledgerAudit, userId)] : [] }, { allowStandaloneOrigins });
+    }
     return {
       ok: true,
       exportData,
       importPlan,
+      notificationPrecondition: normalizedMode === "replace"
+        ? { budgetId: userId, fingerprint: notificationAssociationFingerprint(currentSettings) } : null,
       mode: normalizedMode
     };
   }
@@ -1461,12 +1543,24 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       throw new Error("A prepared full import plan is required");
     }
 
+    const beforeApply = async writer => {
+      const expected = preflight.notificationPrecondition;
+      if (!expected) return;
+      const rows = await writer.listPlanningRows(expected.budgetId, "settings");
+      assertImportNotificationState(rows[0] || {}, expected.fingerprint);
+    };
+    if (preflight.importPlan.auditedSnapshot) {
+      return restoreBudgetStoreSnapshot({ budgetStore, snapshot: preflight.importPlan.auditedSnapshot,
+        preserveBackupMetadata: true, beforeApply, onBatch: options.onBatch, allowStandaloneOrigins });
+    }
     const mode = preflight.mode === "merge" ? "append" : "replace";
     return await applyBudgetStoreImportPlan({
       budgetStore,
       mode,
       onBatch: options.onBatch,
-      preserveBackupMetadata: budgetStore.backend === "postgres",
+      // Recovery discovery must survive replacement on both storage backends.
+      preserveBackupMetadata: true,
+      beforeApply,
       plan: preflight.importPlan
     });
   }
@@ -1497,53 +1591,68 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
   }
 
   /**
-   * Postgres-path full import: composes the already-built prepare/apply/
+   * PostgreSQL and audited SQLite full import: composes prepare/apply/
    * rollback primitives with running-balance recalculation and projection
    * regeneration so the async path reaches the same end state as the sync
    * `importFullData` (data written, balances correct, projections rebuilt),
    * treating a post-apply projection failure as a reason to roll back the
-   * whole import, exactly like the sync version does. Retention cleanup
-   * (`cleanupOperationalData`) is intentionally skipped here: it is SQLite-only
-   * (see `cashflow-backup-service.js`) and purely best-effort, so skipping it
-   * cannot corrupt data — it only means Postgres imports don't yet trigger
-   * retention pruning, to be revisited once the backup service gets a
-   * Postgres path.
+   * whole import, exactly like the sync version does. The safety backup
+   * enforces backup retention while joining this import's portability lock.
    */
   async function importFullDataAsync(userId, payload, mode = "replace", options = {}) {
-    if (!usesPostgresBudgetStoreForFullImport()) {
+    const incoming = payload?.export || payload;
+    const currentAudit = typeof budgetStore?.exportLedgerAuditSnapshot === 'function'
+      ? await budgetStore.exportLedgerAuditSnapshot(userId) : null;
+    const audited = Number(incoming?.version) === 2 || currentAudit !== null;
+    if (!usesPostgresBudgetStoreForFullImport() && !audited) {
       return importFullData(userId, payload, mode, options);
+    }
+    if (audited && (!budgetStore || typeof recalculateLedgerRunningBalanceAsync !== 'function'
+      || typeof regenerateProjectionsAfterMutationAsync !== 'function')) {
+      throw badRequest('Audited import requires the complete asynchronous financial runtime');
     }
 
     const runImport = async () => {
       const preflight = await prepareFullImportPlanAsync(userId, payload, mode, options);
-    const safetySnapshot = await createBudgetSafetySnapshotAsync(userId, `full_import_${preflight.mode}`);
+      // Runtime imports keep a discoverable durable backup as well as the
+      // transaction rollback snapshot. A successful import must not discard the
+      // user's only recovery copy of the replaced budget.
+      const persistentSafetyBackup = typeof createBackupAsync === 'function'
+        ? await createBackupAsync(userId, { deferCleanup: true, dataPortabilityLockHeld: true })
+        : budgetStore.backend === 'sqlite' && typeof createBackup === 'function'
+          ? createBackup(userId, { deferCleanup: true }) : null;
+      const releaseSafety = protectBackup(persistentSafetyBackup);
+      try {
+        const safetySnapshot = await createBudgetSafetySnapshotAsync(userId, `full_import_${preflight.mode}`);
 
-    return await withAsyncRollback({
-      userId,
-      mode: preflight.mode,
-      safetySnapshot,
-      operationName: "Import",
-      onRollbackBatch: options.onRollbackBatch
-    }, async () => {
-      const applyResult = await applyPreparedFullImportPlanAsync(preflight, { onBatch: options.onBatch });
-      await recalculateLedgerRunningBalanceAsync(userId);
-      const projection = await regenerateProjectionsAfterMutationAsync(userId);
-      if (projection?.projection_ok === false) {
-        throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
-      }
+        return await withAsyncRollback({
+          userId,
+          mode: preflight.mode,
+          safetySnapshot,
+          operationName: "Import",
+          onRollbackBatch: options.onRollbackBatch
+        }, async () => {
+          const applyResult = await applyPreparedFullImportPlanAsync(preflight, { onBatch: options.onBatch });
+          await recalculateLedgerRunningBalanceAsync(userId);
+          const projection = await regenerateProjectionsAfterMutationAsync(userId);
+          if (projection?.projection_ok === false) {
+            throw new Error(`Projection regeneration failed after import: ${projection.projection_error || "unknown error"}`);
+          }
 
-      return {
-        ok: true,
-        mode: preflight.mode,
-        safetyBackup: safeSnapshotSummary(safetySnapshot),
-        ...(preflight.mode === "merge"
-          ? { importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings") }
-          : {}),
-        importedLedgerYears: Object.keys(preflight.exportData.ledgers),
-        _projection: projection,
-        apply: applyResult
-      };
-    });
+          return {
+            ok: true,
+            mode: preflight.mode,
+            safetyBackup: persistentSafetyBackup ?? safeSnapshotSummary(safetySnapshot),
+            safetySnapshot: safeSnapshotSummary(safetySnapshot),
+            ...(preflight.mode === "merge"
+              ? { importedPlanningTables: PLANNING_INSERT_ORDER.filter(name => name !== "settings") }
+              : {}),
+            importedLedgerYears: Object.keys(preflight.exportData.ledgers),
+            _projection: projection,
+            apply: applyResult
+          };
+        });
+      } finally { releaseSafety(); }
     };
 
     if (lockService && typeof lockService.withLock === "function") {
@@ -1565,6 +1674,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
 
     try {
       db.transaction(() => {
+        rotateSqliteFinancialEpoch(db, userId);
         db.pragma("foreign_keys = OFF");
 
         for (const tableName of PLANNING_INSERT_ORDER.filter(name => name !== "settings")) {
@@ -1597,6 +1707,8 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     }
   }
 
+  /** Synchronous legacy previews enforce the same audited-merge refusal as
+   * runtime previews; a preview must never advertise an unsafe merge as valid. */
   function previewFullImport(userId, payload, mode = "replace", options = {}) {
     const normalizedMode = mode === "merge" ? "merge" : "replace";
     const db = openPlanningDb(userId);
@@ -1605,6 +1717,9 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     const liveColumnsByTable = {};
 
     try {
+      if (normalizedMode === 'merge' && readSqliteFinancialExportAudit(db, userId, { allowStandaloneOrigins }) !== null) {
+        throw badRequest('A budget with correction history cannot receive merged financial data');
+      }
       currentSettings = db.prepare("SELECT * FROM settings WHERE id = 1").get() || {};
       for (const tableName of PLANNING_EXPORT_TABLES) {
         currentRowCounts[tableName] = db.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get().count;
@@ -1615,7 +1730,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     }
 
     const exportData = prepareExportDataForImport(
-      normalizeExportPayload(payload),
+      normalizeExportPayload(payload, { allowStandaloneOrigins }),
       {
         currentSettings,
         includeOperationalSettings: normalizedMode === "replace" && Boolean(options.includeOperationalSettings),
@@ -1638,7 +1753,17 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     });
   }
 
+  /** Legacy SQLite-only writer cannot replay audit records. Fail closed and
+   * direct audited callers to the complete asynchronous transactional runtime. */
   function importFullData(userId, payload, mode = "replace", options = {}) {
+    const incoming = payload?.export || payload;
+    const auditDb = openPlanningDb(userId);
+    let currentAudit;
+    try { currentAudit = readSqliteFinancialExportAudit(auditDb, userId, { allowStandaloneOrigins }); } finally { auditDb.close(); }
+    if (Number(incoming?.version) === 2 || currentAudit !== null) {
+      throw badRequest('Use the asynchronous runtime to import retained correction history');
+    }
+
     const normalizedMode = mode === "merge" ? "merge" : "replace";
     const includeOperationalSettings = normalizedMode === "replace"
       && Boolean(options.includeOperationalSettings);
@@ -1650,7 +1775,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       currentDb.close();
     }
     const exportData = prepareExportDataForImport(
-      normalizeExportPayload(payload),
+      normalizeExportPayload(payload, { allowStandaloneOrigins }),
       {
         currentSettings,
         includeOperationalSettings,
@@ -1715,7 +1840,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
         operationName: "Import"
       }, () => {
         replaceLedgerData(userId, exportData);
-        replacePlanningData(userId, exportData);
+        replacePlanningData(userId, exportData, notificationAssociationFingerprint(currentSettings));
         runMutationHook("after_replace_planning", { userId, safetyBackup });
         recalculateLedgerRunningBalance(userId);
         const projection = regenerateProjectionsAfterMutation(userId);
@@ -1805,6 +1930,8 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
       if (typeof writer.insertPlanningRows !== "function") {
         throw new Error("Budget-store writer must implement insertPlanningRows");
       }
+      if (typeof writer.lockBudgetLedger === "function") await writer.lockBudgetLedger(userId);
+      if (typeof writer.rotateSyncEpoch === "function") await writer.rotateSyncEpoch(userId);
 
       let deletedOneOffs = 0;
       let deletedPendingRows = 0;
@@ -1841,8 +1968,12 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
         }
       }
 
+      // SQLite's explicit-column store needs timestamps as well as PostgreSQL.
+      const timestamp = new Date().toISOString();
       const inserted = plan.rows.length
-        ? Number((await writer.insertPlanningRows(userId, "one_off_transactions", plan.rows))?.inserted || 0)
+        ? Number((await writer.insertPlanningRows(userId, "one_off_transactions", plan.rows.map(row => ({
+          ...row, created_at: timestamp, updated_at: timestamp
+        }))))?.inserted || 0)
         : 0;
 
       return {
@@ -1871,7 +2002,8 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     return await createBudgetStoreSnapshot({
       budgetIds: [userId],
       budgetStore,
-      reason
+      reason,
+      allowStandaloneOrigins
     });
   }
 
@@ -1882,8 +2014,9 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
     return await restoreBudgetStoreSnapshot({
       budgetStore,
       onBatch: options.onBatch,
-      preserveBackupMetadata: budgetStore.backend === "postgres",
-      snapshot
+      preserveBackupMetadata: true,
+      snapshot,
+      allowStandaloneOrigins
     });
   }
 
@@ -1895,6 +2028,7 @@ function withSyncRollback({ userId, mode, safetyBackup, hookName, operationName 
 
     try {
       db.transaction(() => {
+        rotateSqliteFinancialEpoch(db, userId);
         if (normalizedMode === "replace") {
           const confirmedIds = confirmedOneOffSourceIds(userId);
           const existing = db.prepare("SELECT id FROM one_off_transactions").all();

@@ -1,4 +1,5 @@
 import path from "path";
+import { conflict } from "./cashflow-user-utils.js";
 
 import { requireHolidayCountry } from "./cashflow-date-utils.js";
 import {
@@ -22,6 +23,7 @@ export const OPERATIONAL_SETTINGS_COLUMNS = new Set([
   "backup_interval_minutes",
   "backup_retention_count",
   "notification_channel",
+  "notification_channels",
   "ntfy_url",
   "ntfy_auth_token",
   "discord_webhook_url",
@@ -59,6 +61,17 @@ export const USER_SETTINGS_UPDATE_KEYS = new Set([
   "manual_fx_rates",
   ...OPERATIONAL_SETTINGS_COLUMNS
 ]);
+
+/** Any combination of ntfy and Discord, stored as "ntfy", "discord", "ntfy,discord" or
+ * NULL (the single notification_channel applies). Accepts a list or a comma string. */
+export function requireNotificationChannels(value) {
+  if (value === null || value === undefined) return null;
+  const listed = (Array.isArray(value) ? value : String(value).split(",")).map(item => String(item).trim().toLowerCase()).filter(Boolean);
+  if (listed.some(item => !NOTIFICATION_CHANNELS.has(item)) || new Set(listed).size !== listed.length) {
+    validationError("notification_channels", "unsupported_notification_channel", "notification_channels must list ntfy and/or discord once each");
+  }
+  return listed.length ? ["ntfy", "discord"].filter(item => listed.includes(item)).join(",") : null;
+}
 
 const BOOLEAN_FIELDS = new Set([
   "minimum_reserve_enabled",
@@ -258,6 +271,19 @@ function requireNtfyAuthToken(value) {
   return token;
 }
 
+// A write-only token must never silently follow a different destination. Import
+// callers pass original field presence, before compatibility defaults are added.
+export function assertNotificationTokenAssociation(currentSettings = {}, updates = {}, tokenProvided = Object.hasOwn(updates, "ntfy_auth_token") && updates.ntfy_auth_token !== undefined) {
+  if (currentSettings.ntfy_auth_token && Object.hasOwn(updates, "ntfy_url")
+    && String(updates.ntfy_url || "").trim() !== String(currentSettings.ntfy_url || "").trim()
+    && !tokenProvided) {
+    const message = String(currentSettings.locale || "en").startsWith("pl")
+      ? "Zmiana adresu ntfy wymaga ponownego podania lub wyczyszczenia tokenu dostępu w tym samym żądaniu."
+      : "Changing the ntfy destination requires re-entering or clearing the access token in the same request.";
+    throw conflict(message, [{ field: "ntfy_auth_token", reason: "destination_requires_token_reentry" }]);
+  }
+}
+
 export function validateAndNormalizeSettings(values = {}, options = {}) {
   // Keep validation independent from database writes so imports can fail before safety backups or mutations.
   const {
@@ -265,6 +291,7 @@ export function validateAndNormalizeSettings(values = {}, options = {}) {
     allowedKeysOnly = false,
     currentSettings = {},
     includeOperationalSettings = true,
+    notificationTokenProvided = Object.hasOwn(values, "ntfy_auth_token") && values.ntfy_auth_token !== undefined,
     normalizeLocale = value => String(value || "en").trim().toLowerCase()
   } = options;
   if (allowedKeysOnly) {
@@ -311,6 +338,11 @@ export function validateAndNormalizeSettings(values = {}, options = {}) {
   if (has("backup_interval_minutes")) {
     next.backup_interval_minutes = requireNumber(next.backup_interval_minutes, "backup_interval_minutes", { min: 1, integer: true });
   }
+  // Instance backup limits use zero for no limit; fit both SQLite and PostgreSQL integers.
+  for (const field of ["backup_max_retention_count", "backup_max_age_days"]) {
+    if (has(field)) next[field] = requireNumber((typeof next[field] === "string" && next[field].trim() === "") || next[field] === null ? 0 : next[field], field,
+      { min: 0, max: 2147483647, integer: true });
+  }
   if (has("backup_retention_count")) {
     next.backup_retention_count = requireNumber(next.backup_retention_count, "backup_retention_count", { min: 1, integer: true });
   }
@@ -345,8 +377,10 @@ export function validateAndNormalizeSettings(values = {}, options = {}) {
     }
     next.notification_channel = channel;
   }
+  if (has("notification_channels")) next.notification_channels = requireNotificationChannels(next.notification_channels);
   if (has("ntfy_url")) next.ntfy_url = requireNtfyUrl(next.ntfy_url);
   if (has("ntfy_auth_token")) next.ntfy_auth_token = requireNtfyAuthToken(next.ntfy_auth_token);
+  assertNotificationTokenAssociation(currentSettings, next, notificationTokenProvided);
   if (has("discord_webhook_url")) next.discord_webhook_url = requireDiscordWebhookUrl(next.discord_webhook_url);
 
   if (has("notification_delivery_time")) {

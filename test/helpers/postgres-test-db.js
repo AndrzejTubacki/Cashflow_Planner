@@ -12,6 +12,20 @@ import {
 loadDotenv({ quiet: true });
 
 const CASHFLOW_POSTGRES_SCHEMA_TABLES = [
+  // Audit tables are runtime metadata outside the planning-row table list.
+  // Drop children first: CASCADE on budgets removes their FK, not their rows.
+  "cashflow_ledger_origins",
+  "cashflow_ledger_corrections",
+  "cashflow_ledger_originals",
+  "cashflow_ledger_audit_state",
+  "cashflow_sync_operations",
+  "cashflow_sync_heads",
+  "cashflow_app_sync_tombstones",
+  "cashflow_app_sync_events",
+  "cashflow_app_sync_schema",
+  "cashflow_app_sync_receipts",
+  "cashflow_app_sync_sources",
+  "cashflow_app_sync_heads",
   "cashflow_schema_migrations",
   "cashflow_schema_backups",
   "cashflow_backup_artifacts",
@@ -53,6 +67,7 @@ export function requirePostgresRuntimeTestConfig(env = process.env) {
 }
 
 export async function resetPostgresCashflowObjects(client) {
+  requirePostgresRuntimeTestConfig();
   if (process.env.CASHFLOW_ENABLE_POSTGRES_TESTS !== "1") {
     throw new Error("Refusing to reset Postgres objects without CASHFLOW_ENABLE_POSTGRES_TESTS=1");
   }

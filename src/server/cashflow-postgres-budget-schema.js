@@ -1,9 +1,12 @@
+import { POSTGRES_LEDGER_AUDIT_SCHEMA, LEDGER_ORIGIN_SCHEMA } from "./cashflow-ledger-audit-store.js";
+import { LEDGER_SUMMARY_SCHEMA } from "./cashflow-ledger-history-summary.js";
 import {
   LEDGER_SCHEMA_VERSION,
   LEDGER_TABLE_NAMES,
   PLANNING_SCHEMA_VERSION,
   PLANNING_TABLE_NAMES
 } from "./cashflow-schema.js";
+import { FINANCIAL_JOURNAL_SCHEMA } from "./cashflow-financial-journal.js";
 
 export const POSTGRES_PLANNING_SCHEMA_VERSION = PLANNING_SCHEMA_VERSION;
 export const POSTGRES_LEDGER_SCHEMA_VERSION = LEDGER_SCHEMA_VERSION;
@@ -39,6 +42,7 @@ export const POSTGRES_BUDGET_COLUMNS = {
     "ntfy_url",
     "ntfy_auth_token",
     "discord_webhook_url",
+    "notification_channels",
     "notification_delivery_time",
     "notify_goal_impossible",
     "notify_necessary_underfunded",
@@ -259,6 +263,7 @@ export const POSTGRES_BUDGET_COLUMNS = {
     "entity_id",
     "queued_at",
     "sent_at",
+    "sent_channels",
     "dedupe_key"
   ],
   projection_snapshots: [
@@ -301,6 +306,10 @@ export const POSTGRES_BUDGET_COLUMNS = {
 };
 
 const POSTGRES_BUDGET_SCHEMA_BODY = `
+${FINANCIAL_JOURNAL_SCHEMA}
+${POSTGRES_LEDGER_AUDIT_SCHEMA}
+${LEDGER_ORIGIN_SCHEMA}
+${LEDGER_SUMMARY_SCHEMA.replace("budget_id TEXT PRIMARY KEY", "budget_id TEXT PRIMARY KEY REFERENCES budgets(id) ON DELETE CASCADE")}
 CREATE TABLE IF NOT EXISTS cashflow_budget_schema_version (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   planning_version INTEGER NOT NULL,
@@ -335,6 +344,7 @@ CREATE TABLE IF NOT EXISTS settings (
   ntfy_url TEXT,
   ntfy_auth_token TEXT,
   discord_webhook_url TEXT,
+  notification_channels TEXT CHECK (notification_channels IS NULL OR notification_channels ~ '^(ntfy|discord)?(,(ntfy|discord))?$'),
   notification_delivery_time TEXT NOT NULL DEFAULT '08:00'
     CHECK (notification_delivery_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
   notify_goal_impossible BOOLEAN NOT NULL DEFAULT true,
@@ -683,6 +693,7 @@ CREATE TABLE IF NOT EXISTS notification_queue (
   entity_id TEXT,
   queued_at TIMESTAMPTZ NOT NULL,
   sent_at TIMESTAMPTZ,
+  sent_channels TEXT NOT NULL DEFAULT '',
   dedupe_key TEXT,
   PRIMARY KEY (budget_id, id)
 );

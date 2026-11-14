@@ -26,7 +26,7 @@ export default function UserMenu({ account, onSelectSettings, onSignOut }) {
 
   function switchToLegacy() {
     localStorage.setItem("cashflow_preferred_ui", "legacy");
-    window.location.href = "/";
+    window.location.href = "/legacy/";
   }
 
   async function handleLogout() {

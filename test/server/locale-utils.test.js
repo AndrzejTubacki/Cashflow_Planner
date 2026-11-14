@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createCashflowLocaleService } from "../../src/server/cashflow-locale-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const localeDir = path.resolve(__dirname, "../../public/app/cashflow/locales");
+const localeDir = path.resolve(__dirname, "../../public-legacy/app/cashflow/locales");
 
 test("locale service lists and translates available locale files", async () => {
   const service = createCashflowLocaleService(localeDir);

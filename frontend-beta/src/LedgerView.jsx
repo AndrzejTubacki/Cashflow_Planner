@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { formatMoney } from "./format.js";
 import { apiFetch, confirmPending } from "./api.js";
 import EditModal from "./EditModal.jsx";
-import { transactionMoneyDisplay } from "./moneyDisplay.js";
+import { transactionLedgerDisplay, transactionMoneyDisplay, transactionTypeLabel } from "./moneyDisplay.js";
 import { sortFundingEntries } from "./parity.js";
 
 function Tile({ label, value }) {
@@ -71,12 +71,12 @@ function FundingRow({ label, item, ledgerCurrency, today }) {
   );
 }
 
-function FundingOverview({ snapshot, ledgerCurrency }) {
+export function FundingOverview({ snapshot, ledgerCurrency, showFullyConfirmed = false }) {
   const [showAll, setShowAll] = useState(false);
   const items = sortFundingEntries([
     ...(snapshot?.goals || []).map(item => ({ item, name: item.name, label: formatMessage("Goal: {name}", { name: item.name || "-" }) })),
     ...(snapshot?.flexTransactions || []).map(item => ({ item, name: item.name, label: formatMessage("Flex: {name}", { name: item.name || "-" }) }))
-  ].filter(entry => !isFullyConfirmed(entry.item)));
+  ].filter(entry => showFullyConfirmed || !isFullyConfirmed(entry.item)));
 
   if (!items.length) return null;
 
@@ -114,6 +114,7 @@ function isReadableNote(note) {
 
 function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onRegenerate, onMoveToPending, onDismiss, onEdit, confirming }) {
   const money = transactionMoneyDisplay(tx, ledgerCurrency);
+  const ledgerMoney = transactionLedgerDisplay(tx, ledgerCurrency);
   const isIncome = tx.type === "income";
   const runningBalance = tx.running_balance ?? tx.runningBalance;
   const reservedBalance = tx.reserved_balance ?? tx.reservedBalance;
@@ -127,6 +128,7 @@ function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onRegener
       <td className="beta-date-cell">{tx.date || tx.confirmed_date || "-"}</td>
       <td>
         <div className="beta-tx-name">{tx.name || tx.description || t("Untitled")}</div>
+        <div className="beta-tx-detail">{transactionTypeLabel(tx.type)}</div>
         {isReadableNote(tx.note) ? <div className="beta-tx-detail">{tx.note}</div> : null}
         {tx.warning ? <div className="beta-tx-detail beta-tx-warning">{String(tx.warning)}</div> : null}
       </td>
@@ -141,6 +143,13 @@ function TxRow({ tx, status: sectionStatus, ledgerCurrency, onConfirm, onRegener
         {money.isPartiallyFunded && money.requested !== null ? (
           <div className="beta-tx-detail">{formatMessage("of {amount} requested", { amount: formatMoney(Math.abs(money.requested), money.currency) })}</div>
         ) : null}
+      </td>
+      <td className="beta-num">
+        {ledgerMoney ? <>
+          {formatMoney(ledgerMoney.amount, ledgerMoney.currency)}
+          {ledgerMoney.currency !== ledgerMoney.ledgerCurrency && ledgerMoney.equivalent !== null
+            ? <div className="beta-tx-detail">({formatMoney(ledgerMoney.equivalent, ledgerMoney.ledgerCurrency)})</div> : null}
+        </> : "-"}
       </td>
       <td className="beta-num">
         {runningBalance !== undefined && runningBalance !== null
@@ -211,6 +220,7 @@ function TxTable({ rows, status, ledgerCurrency, emptyLabel, onConfirm, onRegene
             <th>{t("Date")}</th>
             <th>{t("Description")}</th>
             <th className="beta-num">{t("Amount")}</th>
+            <th className="beta-num">{t("Ledger amount")}</th>
             <th className="beta-num">{t("Balance")}</th>
             <th>{t("Status")}</th>
             <th></th>

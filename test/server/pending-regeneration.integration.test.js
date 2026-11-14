@@ -52,9 +52,8 @@ test("regenerating a stale fulfilled goal removes the row without reducing the g
     // Real storage: fulfilled target plus an obsolete pending allocation.
     const stamp = "2026-05-20T08:00:00.000Z";
     const ledger = harness.openLedgerDb("2026");
-    const { initializeLedgerSchema } = await import("../../src/server/cashflow-schema.js");
     try {
-      initializeLedgerSchema(ledger);
+      // The planning database already holds the ledger (schema 22+).
       ledger.prepare(`INSERT INTO confirmed_transactions
         (id, name, currency, amount, type, date, confirmed_date, ledger_currency,
          ledger_amount, running_balance_pln, source_goal_id, fx_rate, buffered_fx_rate, created_at, updated_at)

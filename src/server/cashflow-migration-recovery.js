@@ -91,6 +91,10 @@ export function cleanupMigrationRecoveryFolders(backupDir, currentTime = Date.no
     if (!entry.isDirectory()) continue;
     const fullPath = path.join(backupDir, entry.name);
     const stat = fs.statSync(fullPath);
+    // A directory name alone is not authority to delete operator files.
+    // Interrupted folders without an identifiable Cashflow manifest are kept.
+    const manifest = readManifest(fullPath);
+    if (manifest?.format !== RECOVERY_FORMAT) continue;
 
     if (entry.name.startsWith("migration_backup_") && entry.name.endsWith(".tmp")) {
       if (currentTime - stat.mtimeMs > STALE_TEMP_AGE_MS) {
@@ -101,7 +105,6 @@ export function cleanupMigrationRecoveryFolders(backupDir, currentTime = Date.no
     }
 
     if (!entry.name.startsWith("migration_backup_")) continue;
-    const manifest = readManifest(fullPath);
     
     if (manifest?.status === "pending") {
       if (currentTime - stat.mtimeMs > STALE_TEMP_AGE_MS) {
@@ -137,7 +140,10 @@ function canReusePendingRecovery(manifest, databases) {
   if (manifest?.targetVersions?.ledger !== LEDGER_SCHEMA_VERSION) return false;
 
   const original = new Map((manifest.databases || []).map(item => [item.file, item]));
-  if (original.size !== databases.length) return false;
+  // Yearly ledger files leave the live folder once merged into planning.sqlite;
+  // every other database the snapshot covered must still be present.
+  const present = new Set(databases.map(item => item.file));
+  if ([...original.values()].some(item => !present.has(item.file) && item.kind !== "ledger")) return false;
 
   return databases.every(item => {
     const saved = original.get(item.file);

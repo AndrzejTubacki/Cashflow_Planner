@@ -19,19 +19,21 @@ function NavIcon({ id }) {
   );
 }
 
-export default function Shell({ activeSection, onSelectSection, budgetLabel, ledgerCurrency, sections, installedVersion, updateNotice, children }) {
+export default function Shell({ activeSection, onSelectSection, budgetLabel, ledgerCurrency, sections, installedVersion, versionCheck = { status: "checking" }, updateNotice, children }) {
   const navSections = sections || DEFAULT_NAV_SECTIONS;
   return (
     <div className="beta-shell">
       <aside className="beta-rail">
         <div className="beta-wordmark">
-          <span className="beta-mark">&#8353;</span>{t("Cashflow")}<span className="beta-badge">{t("BETA")}</span>
+          <span className="beta-mark">&#8353;</span>{t("Cashflow")}
         </div>
         <div className="beta-rail-version">
           {installedVersion ? <span>{formatMessage("Version {version}", { version: installedVersion })}</span> : null}
           {updateNotice ? <a href={updateNotice.url || "https://github.com/AndrzejTubacki/Cashflow_Planner/releases"} target="_blank" rel="noreferrer">
             {formatMessage("Update available: {version}", { version: `v${updateNotice.latest}` })}
           </a> : null}
+          {!updateNotice && installedVersion ? <span role="status">{versionCheck.status === "current" ? t("Up to date")
+            : versionCheck.status === "checking" ? t("Checking for updates") : t("Version check unavailable")}</span> : null}
         </div>
         <nav className="beta-sections">
           {navSections.map(section => (

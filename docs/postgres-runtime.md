@@ -1,7 +1,8 @@
 # External Database Runtime
 
 SQLite remains the default supported backend for a single process. Postgres is
-an optional runtime backend, shipped in v1.0.0. Its global and budget stores serve
+an optional runtime backend. Cashflow 1.2.0 uses global schema 8 and planning
+schema 22, upgraded by `postgres-v1.2.0.sql`. Its global and budget stores serve
 live HTTP routes, sessions, planning, ledger, projection, import and restore.
 
 ## Configuration
@@ -182,9 +183,14 @@ payloads, including the safety copy needed after a failed restore.
 
 Legacy path-only backups still require the original file to be available on the
 restoring replica; missing files return 404. They are not automatically uploaded.
-There is still no public backup-list endpoint. Shared payload retention is not
-automated; monitor database growth and preserve safety artifacts when managing
-history. The financial JSON export/migration format does not include artifact
+The budget-scoped backup-list endpoint returns successful backup metadata;
+paired devices require the current read grant and restore permission. Shared
+payload retention follows the owner’s backup count and the optional administrator
+`backup_max_retention_count` and `backup_max_age_days` limits. Pruning runs after
+each successful backup and in background retention maintenance. It removes bytes
+and metadata in one transaction under the restore/import lock, always keeping
+the newest successful backup and artifacts currently in use. Legacy path-only
+references are not eligible for database-artifact pruning. The financial JSON export/migration format does not include artifact
 payloads. Back up the **whole Postgres database**, including artifact and auth
 state, for disaster recovery. A backup kept in the same DB is not protection
 against losing that DB.
@@ -226,17 +232,29 @@ Run SQLite and browser tests first, then all Postgres tests serially:
 ```sh
 CASHFLOW_ENABLE_POSTGRES_TESTS=0 npm test
 CASHFLOW_ENABLE_POSTGRES_TESTS=1 npm run test:postgres
+# Or let Docker provide and remove the disposable database:
+npm run test:postgres:disposable
 npm run smoke
 npm run test:container
 ```
 
 The Postgres runner discovers all guarded test files and invokes
-`node --test --test-concurrency=1`. It requires a disposable database: the helper
+`node --test --test-concurrency=1`. With `CASHFLOW_ENABLE_POSTGRES_TESTS=1`,
+`npm run test:postgres` uses `CASHFLOW_DATABASE_URL` from the environment or
+`.env`; contributors supply their own disposable database. The helper
 drops and recreates Cashflow tables around each test. Never use it on retained
 data. It does not drop roles, databases, or extensions. Concurrent test-file
-execution against that same disposable database is unsupported.
+execution against that same disposable database is unsupported. Both commands
+accept `-- --standalone-transfers` for the transfer subset.
+
+`npm run test:postgres:disposable` starts only its own loopback-mapped
+`postgres:16-alpine` container from the existing local image. The database container
+is capped at 1 GiB RAM, with swap disabled, one CPU and 256 processes. These limits
+are applied to Docker itself because the Docker client's systemd scope does not
+constrain a daemon-created container. It overrides inherited database and lock
+settings and checks the owned URL before running tests. Only its own container and anonymous volume are removed
+on completion. These test limits do not configure a retained PostgreSQL server.
 
 Existing migration commands, exports and verification are documented in
-[Migration](migration.md). This hardening release
-does not introduce a new data-transfer path. Full database backup and a tested
-restore procedure remain the operator's responsibility.
+[Migration](migration.md), including standalone-budget transfer in 1.2.0.
+Full database backup and a tested restore procedure remain the operator's responsibility.

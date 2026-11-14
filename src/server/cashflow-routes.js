@@ -1,3 +1,4 @@
+import { newOAuthBrowserSecret, oauthCookieName } from "./cashflow-oauth-browser-binding.js";
 import { sendApiError } from "./cashflow-error-utils.js";
 import {
   CAPABILITIES,
@@ -11,9 +12,43 @@ import {
   BUDGET_RUNTIME_LOCK_JOBS,
   budgetRuntimeLockName
 } from "./cashflow-runtime-locks.js";
-import { conflict, forbidden, unauthorized } from "./cashflow-user-utils.js";
+import { badRequest, conflict, forbidden, unauthorized } from "./cashflow-user-utils.js";
+
+const DEVICE_ALLOWED_SETTINGS_KEYS = new Set([
+  // Devices may explicitly replace/clear a token, but responses still redact it.
+  "ntfy_auth_token",
+  "notification_channels",
+  "ntfy_url",
+  "discord_webhook_url",
+  "notify_goal_impossible",
+  "notify_necessary_underfunded",
+  "notify_funding_shortfall",
+  "notify_income_missing",
+  "notify_pending_summary",
+  "notify_goal_funded",
+  "notify_fx_changed",
+  "ntfy_priority_goal_impossible",
+  "ntfy_priority_necessary_underfunded",
+  "ntfy_priority_funding_shortfall",
+  "ntfy_priority_income_missing",
+  "ntfy_priority_pending_summary",
+  "ntfy_priority_goal_funded",
+  "ntfy_priority_fx_changed"
+]);
+const DEVICE_REDACTED_SETTINGS_KEYS = [
+  "ntfy_url",
+  "ntfy_auth_token",
+  "discord_webhook_url",
+  "backup_location"
+];
 
 export function registerCashflowRoutes(app, {
+  deviceService = null,
+  deviceBudgetMutation = null,
+  updateDeviceSettings = null,
+  transferHost = null,
+  createSyncHost = null,
+  devicePortability = null,
   acceptInvitation = null,
   acceptInvitationAsync = null,
   activateAdminAuthDraft = null,
@@ -28,11 +63,14 @@ export function registerCashflowRoutes(app, {
   compactLedgerHistory = null,
   confirmPendingTransaction,
   completeSetup = null,
+  validateSetupInput = null,
   createNoneSession = null,
   createBackup,
   createBackupAsync = null,
   createBudget = null,
   createBudgetAsync = null,
+  rollbackCreatedBudget = null,
+  rollbackCreatedBudgetAsync = null,
   completeAuthProviderCallback = null,
   completeInternalPasswordSetup = null,
   createInvitation = null,
@@ -78,6 +116,7 @@ export function registerCashflowRoutes(app, {
   getProviderPairRate,
   getSettingsAsync = null,
   getSnapshot,
+  getAppSnapshot = null,
   getSnapshotAsync = null,
   countPendingTransactions = null,
   listAvailableLocales = () => [{ id: "en", label: "English" }],
@@ -151,6 +190,7 @@ export function registerCashflowRoutes(app, {
   importFullDataAsync = null,
   importOneOffCsv,
   importOneOffCsvAsync = null,
+  prepareOneOffCsvImportPlanAsync = null,
   importSampleData,
   importSampleDataAsync = null,
   previewFullImport,
@@ -250,14 +290,28 @@ export function registerCashflowRoutes(app, {
     }
 
     async function snapshotForUser(userId) {
-      return typeof getSnapshotAsync === "function"
-        ? await getSnapshotAsync(userId)
-        : getSnapshot(userId);
+      const snapshot = typeof getSnapshotAsync === "function"
+        ? await getSnapshotAsync(userId) : getSnapshot(userId);
+      // Owners can explain effective retention without exposing other admin options.
+      const options = await globalOptions();
+      return { ...snapshot, backupPolicy: {
+        backup_max_retention_count: Number(options?.backup_max_retention_count) || 0,
+        backup_max_age_days: Number(options?.backup_max_age_days) || 0
+      } };
     }
 
-    async function fail(req, res, error, fallback, logKind = null) {
+    async function fail(req, res, error, fallback, logKind = null, { sanitizeUnexpected = false } = {}) {
       // An expired or revoked cookie would otherwise fail every later request too.
       if (error?.code === "CASHFLOW_SESSION_INVALID") clearSessionCookie(req, res);
+      if (sanitizeUnexpected) {
+        const status = Number(error?.status);
+        if (!Number.isInteger(status) || status < 400 || status >= 500) {
+          // Keep operational details in server logs, never in device responses.
+          if (logKind) logError(logKind, error);
+          error = Object.assign(new Error(fallback), { status: 500 });
+          logKind = null;
+        }
+      }
       await sendApiError({
         req,
         res,
@@ -306,7 +360,8 @@ export function registerCashflowRoutes(app, {
     }
 
     async function contextForRequest(req) {
-      if ((await activeAuthMode()) !== "none" && !sessionTokenFromRequest(req)) {
+      // Device bearers reach here only on DEVICE_BUDGET_ROUTES; the resolver checks the grant.
+      if ((await activeAuthMode()) !== "none" && !sessionTokenFromRequest(req) && !deviceBudgetRoute(req)) {
         throw unauthorized();
       }
       if (typeof resolveRequestContext !== "function") {
@@ -391,6 +446,16 @@ export function registerCashflowRoutes(app, {
       throw new Error(message);
     }
 
+    /** Browser services keep their ordinary path; device writes carry the
+     * credential into the repository transaction instead of reusing actor cache. */
+    async function budgetMutation(req, operation, asyncFn, syncFn, args, message) {
+      if (req.headers.authorization) {
+        if (typeof deviceBudgetMutation !== 'function') throw unauthorized();
+        return deviceBudgetMutation(String(req.headers.authorization).replace(/^Bearer\s+/i, ''), req.params.budgetId, operation, args);
+      }
+      return callGlobal(asyncFn, syncFn, args, message);
+    }
+
     async function requireAdmin(req) {
       const context = await actorForRequest(req);
       if (context) {
@@ -443,7 +508,52 @@ export function registerCashflowRoutes(app, {
       return (await adminAuthConfig())?.activeMode || "none";
     }
 
+    // A paired phone acts with the account's role in a granted budget, on these
+    // budget-scoped routes only. Money changes from devices go
+    // through sync v1 or coordinated portability imports; account, admin, auth and device-approval
+    // routes never accept device tokens. A budget in the path must be the selected one.
+    const DEVICE_BUDGET_ROUTES = [
+      ["POST", /^\/import\/(?:full|one-offs-csv)(?:\/preview)?$/],
+      ["GET", /^\/backups$/], ["POST", /^\/restore\/[^/]+$/],
+      ["PUT", /^\/settings$/],
+      ["GET", /^\/ledger\/confirmed$/], ["GET", /^\/export\/full$/], ["GET", /^\/export\/confirmed-ledger\.csv$/],
+      ["PUT", /^\/budgets\/([^/]+)$/], ["GET", /^\/budgets\/([^/]+)\/export$/],
+      ["POST", /^\/budgets\/([^/]+)\/(archive|leave|transfer-ownership)$/],
+      ["GET", /^\/budgets\/([^/]+)\/members$/], ["PUT", /^\/budgets\/([^/]+)\/members\/[^/]+$/],
+      ["DELETE", /^\/budgets\/([^/]+)\/members\/[^/]+$/],
+      ["GET", /^\/budgets\/([^/]+)\/invitations$/], ["POST", /^\/budgets\/([^/]+)\/invitations$/],
+      ["DELETE", /^\/budgets\/([^/]+)\/invitations\/[^/]+$/]
+    ];
+    function deviceBudgetRoute(req) {
+      const selected = String(req.headers["x-cashflow-budget-id"] || "").trim();
+      if (!selected || req.headers.cookie || req.headers["x-cashflow-user-id"]) return false;
+      // req.path is mount-relative inside app.use("/api"); use the full path everywhere.
+      const path = String(req.originalUrl || req.url || "").split("?")[0].replace(/^\/api(?=\/)/, "");
+      return DEVICE_BUDGET_ROUTES.some(([method, pattern]) => {
+        const match = req.method === method && pattern.exec(path);
+        if (!match) return false;
+        try { return match[1] === undefined || decodeURIComponent(match[1]) === selected; } catch { return false; }
+      });
+    }
+
     app.use("/api", (req, res, next) => {
+      // Bearer device tokens reach only the snapshot download, the v1 sync routes
+      // when the sync host is wired (which re-check a financial-sync grant), device
+      // budget labels (current sync grants), creation (separate permission), and the
+      // budget-scoped routes above (granted budget, the account's own role).
+      if (req.headers.authorization && /^\/(?:import\/(?:full|one-offs-csv)(?:\/preview)?|backups|restore\/[^/]+)$/.test(req.path)) {
+        res.setHeader('Cache-Control', 'no-store');
+      }
+      const syncRoute = typeof createSyncHost === "function" && req.method === "POST" && req.path.startsWith("/app/sync/v1/");
+      const deviceBudgets = ["GET", "POST"].includes(req.method) && req.path === "/device/budgets";
+      const deviceTransfer = transferHost && req.method === 'POST'
+        && ['/device/standalone-transfers/formats', '/device/standalone-transfers/review', '/device/standalone-transfers/submit', '/device/standalone-transfers/result', '/device/standalone-transfers/cancel'].includes(req.path);
+      const archiveReceiptRoute = req.method === 'POST'
+        && ['/device/archive-receipts/lookup', '/device/archive-receipts/ack'].includes(req.path);
+      if (req.headers.authorization && !(req.method === "GET" && req.path === "/app/snapshot") && !syncRoute && !deviceBudgets
+        && !deviceTransfer && !archiveReceiptRoute && !deviceBudgetRoute(req)) {
+        return res.status(401).json({ error: "Device credentials are limited to the budgets they were granted" });
+      }
       if (
         Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-user-id")
         && !Object.prototype.hasOwnProperty.call(req.headers, "x-cashflow-budget-id")
@@ -495,7 +605,7 @@ export function registerCashflowRoutes(app, {
         if ((await activeAuthMode()) !== "none") throw forbidden("Account creation is invite-only in this authentication mode");
         const created = await callGlobal(createUserAsync, createUser, [req.body || {}], "User service is unavailable");
         const issued = typeof createNoneSession === "function"
-          ? await createNoneSession(created.budgetId || created.userId)
+          ? await createNoneSession(created.budgetId || created.userId, { accountId: created.accountId })
           : null;
         if (issued?.token) setSessionCookie(req, res, issued.token);
         res.json({
@@ -570,10 +680,26 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    // Separate short-lived cookies permit multiple tabs/provider transactions.
+    // The URL contains only a commitment; only the initiating browser has its secret.
+    function setOAuthCookie(req, res, result, secret) {
+      const state = new URL(result.authorizationUrl).searchParams.get('state');
+      const secure = req.secure || String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+      res.append('Set-Cookie', `${oauthCookieName(state, secure)}=${secret}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${secure ? '; Secure' : ''}`);
+    }
+    function oauthSecret(req, state) {
+      const secure = req.secure || String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+      const name = oauthCookieName(state, secure);
+      return String(req.headers.cookie || '').split(';').map(part => part.trim()).find(part => part.startsWith(name + '='))?.slice(name.length + 1) || '';
+    }
+
     app.post("/api/auth/providers/:providerId/login/start", async (req, res) => {
       try {
         if (typeof startAuthProviderLogin !== "function") throw new Error("Authentication provider service is unavailable");
-        res.json(await startAuthProviderLogin(req.params.providerId));
+        const secret = newOAuthBrowserSecret();
+        const result = await startAuthProviderLogin(req.params.providerId, { secret });
+        setOAuthCookie(req, res, result, secret);
+        res.json(result);
       } catch (error) {
         await fail(req, res, error, "Failed to start provider login", "cashflow_provider_login_start_failed");
       }
@@ -583,7 +709,10 @@ export function registerCashflowRoutes(app, {
       try {
         const actor = await requireActor(req);
         if (typeof startAuthProviderLink !== "function") throw new Error("Authentication provider service is unavailable");
-        res.json(await startAuthProviderLink(actor.account.id, req.params.providerId));
+        const secret = newOAuthBrowserSecret();
+        const result = await startAuthProviderLink(actor.account.id, req.params.providerId, { secret, session: sessionTokenFromRequest(req), linking: true });
+        setOAuthCookie(req, res, result, secret);
+        res.json(result);
       } catch (error) {
         await fail(req, res, error, "Failed to start provider linking", "cashflow_provider_link_start_failed");
       }
@@ -593,7 +722,11 @@ export function registerCashflowRoutes(app, {
       try {
         if (typeof completeAuthProviderCallback !== "function") throw new Error("Authentication provider service is unavailable");
         if (typeof createInternalAccountSession !== "function") throw new Error("Session service is unavailable");
-        const completed = await completeAuthProviderCallback(req.params.providerId, absoluteRequestUrl(req));
+        const state = String(req.query.state || "");
+        if (state.startsWith("link.")) await requireActor(req);
+        const completed = await completeAuthProviderCallback(req.params.providerId, absoluteRequestUrl(req), {
+          secret: oauthSecret(req, state), session: sessionTokenFromRequest(req)
+        });
         if (completed.linked) {
           // Linking happens inside an existing session, which keeps its selected budget.
           res.redirect("/?cashflow_auth=linked#account");
@@ -649,6 +782,16 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/auth/internal/login", async (req, res) => {
       try {
+        // Browsers send Origin on login POSTs. Non-browser JSON clients remain
+        // supported; an originless simple form has no trustworthy login intent.
+        const origin = req.headers.origin;
+        const requestOrigin = `${req.protocol}://${req.get('host')}`;
+        if (String(req.headers['sec-fetch-site'] || '') === 'cross-site'
+          || (origin !== undefined && origin !== requestOrigin)
+          || (origin === undefined && !req.is('application/json'))) {
+          throw forbidden('Same-origin login required');
+        }
+
         if (typeof authenticateInternalLogin !== "function") throw new Error("Internal authentication service is unavailable");
         if (typeof createInternalAccountSession !== "function") throw new Error("Session service is unavailable");
         const authenticated = await authenticateInternalLogin(req.body || {});
@@ -656,7 +799,7 @@ export function registerCashflowRoutes(app, {
           res.json({ passwordSetupRequired: true, purpose: authenticated.purpose });
           return;
         }
-        const issued = await createInternalAccountSession(authenticated.accountId);
+        const issued = await createInternalAccountSession(authenticated.accountId, { credentialProof: authenticated.credentialProof });
         setSessionCookie(req, res, issued.token);
         res.json({
           session: issued.context.session,
@@ -801,7 +944,7 @@ export function registerCashflowRoutes(app, {
         }
         const issued = typeof createNoneSession === "function"
           ? await createNoneSession(selected?.budgetId || selected?.userId || requestedBudgetId, {
-              accountId: requestedAccountId
+              accountId: requestedAccountId || selected?.accountId
             })
           : null;
         if (issued?.token) setSessionCookie(req, res, issued.token);
@@ -900,8 +1043,15 @@ export function registerCashflowRoutes(app, {
     app.put("/api/budgets/:budgetId", async (req, res) => {
       try {
         const actor = await requireActor(req);
+        const isDevice = actor.authSession?.device === true;
+        const hasExpectedRevision = req.body?.expectedRevision !== undefined
+          && req.body?.expectedRevision !== null
+          && req.body?.expectedRevision !== "";
+        if (isDevice && !hasExpectedRevision) {
+          throw badRequest("expectedRevision is required for device requests");
+        }
         res.json({
-          budget: await callGlobal(
+          budget: await budgetMutation(req, "renameBudget",
             renameBudgetAsync,
             renameBudget,
             [actor.account.id, req.params.budgetId, req.body || {}],
@@ -909,6 +1059,24 @@ export function registerCashflowRoutes(app, {
           )
         });
       } catch (error) {
+        if (error?.status === 409 && error?.code === "budget_rename_conflict") {
+          const currentName = error.currentName ?? error.name;
+          const currentRevision = error.currentRevision ?? error.revision;
+          return res.status(409).json({
+            error: "budget_rename_conflict",
+            code: "budget_rename_conflict",
+            currentName,
+            currentRevision,
+            name: currentName,
+            displayName: currentName,
+            revision: currentRevision,
+            details: error.details || {
+              code: "budget_rename_conflict",
+              currentName,
+              currentRevision
+            }
+          });
+        }
         await fail(req, res, error, "Failed to rename budget", "cashflow_budget_rename_failed");
       }
     });
@@ -916,6 +1084,12 @@ export function registerCashflowRoutes(app, {
     // Authorization is enforced by the service layer (requireMembershipRole)
     app.post("/api/budgets/:budgetId/archive", async (req, res) => {
       try {
+        if (req.headers.authorization) {
+          res.setHeader('Cache-Control', 'no-store');
+          const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization));
+          if (!deviceService || !match || !deviceBudgetRoute(req)) throw unauthorized();
+          return res.json(await deviceService.archiveBudget(match[1], req.params.budgetId, req.body?.idempotencyKey));
+        }
         const actor = await requireActor(req);
         res.json({
           budget: await callGlobal(
@@ -937,8 +1111,9 @@ export function registerCashflowRoutes(app, {
           accountId: actor.account.id
         });
         assertCapability(context, CAPABILITIES.BUDGET_EXPORT, "Budget permission required");
-        const includeOperationalSettings = req.query.includeOperationalSettings === "1"
-          || req.query.includeOperationalSettings === "true";
+        const includeOperationalSettings = actor.authSession?.device !== true
+          && (req.query.includeOperationalSettings === "1"
+            || req.query.includeOperationalSettings === "true");
         const exported = typeof exportFullDataAsync === "function"
           ? await exportFullDataAsync(context.budget.id, appVersion, { includeOperationalSettings })
           : exportFullData(context.budget.id, appVersion, { includeOperationalSettings });
@@ -1007,7 +1182,7 @@ export function registerCashflowRoutes(app, {
       try {
         const actor = await requireActor(req);
         res.json({
-          membership: await callGlobal(
+          membership: await budgetMutation(req, "updateMemberRole",
             updateMemberRoleAsync,
             updateMemberRole,
             [
@@ -1028,7 +1203,7 @@ export function registerCashflowRoutes(app, {
     app.delete("/api/budgets/:budgetId/members/:accountId", async (req, res) => {
       try {
         const actor = await requireActor(req);
-        await callGlobal(
+        await budgetMutation(req, "removeMember",
           removeMemberAsync,
           removeMember,
           [actor.account.id, req.params.budgetId, req.params.accountId],
@@ -1044,7 +1219,7 @@ export function registerCashflowRoutes(app, {
     app.post("/api/budgets/:budgetId/leave", async (req, res) => {
       try {
         const actor = await requireActor(req);
-        await callGlobal(
+        await budgetMutation(req, "leaveBudget",
           leaveBudgetAsync,
           leaveBudget,
           [actor.account.id, req.params.budgetId],
@@ -1061,7 +1236,7 @@ export function registerCashflowRoutes(app, {
       try {
         const actor = await requireActor(req);
         res.json({
-          membership: await callGlobal(
+          membership: await budgetMutation(req, "transferOwnership",
             transferOwnershipAsync,
             transferOwnership,
             [
@@ -1098,7 +1273,7 @@ export function registerCashflowRoutes(app, {
       try {
         const actor = await requireActor(req);
         res.json({
-          invitation: await callGlobal(
+          invitation: await budgetMutation(req, "createInvitation",
             createInvitationAsync,
             createInvitation,
             [actor.account.id, req.params.budgetId, req.body || {}],
@@ -1114,7 +1289,7 @@ export function registerCashflowRoutes(app, {
     app.delete("/api/budgets/:budgetId/invitations/:invitationId", async (req, res) => {
       try {
         const actor = await requireActor(req);
-        await callGlobal(
+        await budgetMutation(req, "revokeInvitation",
           revokeInvitationAsync,
           revokeInvitation,
           [actor.account.id, req.params.budgetId, req.params.invitationId],
@@ -1454,6 +1629,181 @@ export function registerCashflowRoutes(app, {
       }
     });
 
+    app.get("/api/app/snapshot", async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      try {
+        if (req.headers.authorization) {
+          if (!deviceService || req.headers.cookie || req.headers["x-cashflow-user-id"]) throw unauthorized();
+          const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(req.headers.authorization);
+          const budgetId = String(req.headers["x-cashflow-budget-id"] || "");
+          if (!match || !budgetId) throw unauthorized();
+          const grant = await deviceService.authorize(match[1], budgetId);
+          if (!getAppSnapshot) throw forbidden("App snapshots unavailable");
+          const snapshot = await getAppSnapshot(grant.budgetId);
+          // A long export must not bypass a revocation that completed while
+          // reading. This does not claim atomic authorization with transmission.
+          await deviceService.authorize(match[1], grant.budgetId);
+          return res.json(snapshot);
+        }
+        await requireActor(req);
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
+        if (!getAppSnapshot) throw forbidden("App snapshots unavailable");
+        res.json(await getAppSnapshot(await requestUserId(req)));
+      } catch (error) {
+        await fail(req, res, error, "Failed to prepare app snapshot", "cashflow_app_snapshot_failed", { sanitizeUnexpected: true });
+      }
+    });
+
+    if (deviceService) {
+      const deviceRoute = handler => async (req, res) => {
+        res.setHeader("Cache-Control", "no-store");
+        try { res.json(await handler(req)); }
+        catch (error) { await fail(req, res, error, "Device request failed", "cashflow_device_request_failed", { sanitizeUnexpected: true }); }
+      };
+      const requireDeviceClient = req => {
+        // Public token exchange endpoints never consume browser credentials.
+        if (req.headers.cookie || req.headers.authorization) throw unauthorized();
+      };
+      app.post("/api/device/pairings", deviceRoute(async req => {
+        requireDeviceClient(req);
+        if (await activeAuthMode() === "none") throw forbidden("Verified authentication must be configured before pairing");
+        return { ...await deviceService.createPairing(req.body?.label, req.body?.scope), verificationPath: "/?devicePairing=1" };
+      }));
+      app.post("/api/device/pairings/poll", deviceRoute(async req => {
+        requireDeviceClient(req);
+        return deviceService.poll(req.body?.deviceCode);
+      }));
+      for (const [path, acknowledge] of [['lookup', false], ['ack', true]]) {
+        app.post(`/api/device/archive-receipts/${path}`, deviceRoute(async req => {
+          if (req.headers.cookie || req.headers['x-cashflow-user-id'] || req.headers['x-cashflow-budget-id']) throw unauthorized();
+          const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization || ''));
+          if (!match) throw unauthorized();
+          return deviceService.archiveReceipt(match[1], req.body?.budgetId, req.body?.idempotencyKey, acknowledge);
+        }));
+      }
+      // Financial sync protocol v1: negotiated snapshots, revisioned operations and replayable receipts.
+      // Device bearer tokens only; every call re-checks the grant on its own
+      // financial transaction. Protocol errors expose safe codes; stale-FX
+      // refusals retain their actionable pair/age and refresh instructions.
+      if (typeof createSyncHost === "function") {
+        const SYNC_STATUS = { INVALID_SYNC_REQUEST: 400, INVALID_CURSOR: 400, INVALID_BOOTSTRAP_TOKEN: 400,
+          SYNC_BINDING_MISMATCH: 403, SOURCE_NOT_FOUND: 404, OCCURRENCE_NOT_FOUND: 404, UNKNOWN_BUDGET: 404,
+          REVISION_CONFLICT: 409, OPERATION_ID_REUSED: 409, SOURCE_EXISTS: 409, BOOTSTRAP_STALE: 409, RESYNC_REQUIRED: 409,
+          COMPATIBILITY_REQUIRED: 409, CURSOR_EXPIRED: 410, BOOTSTRAP_EXPIRED: 410, FX_RATE_REQUIRED: 422,
+          FX_RATE_NOT_APPLICABLE: 422, LEDGER_BALANCE_NEGATIVE: 422, UNSUPPORTED_OPERATION: 422, OPERATION_REJECTED: 422, JOURNAL_INCOMPLETE: 503 };
+        const syncRoute = method => async (req, res) => {
+          res.setHeader("Cache-Control", "no-store");
+          try {
+            if (req.headers.cookie || req.headers["x-cashflow-user-id"]) throw unauthorized();
+            const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization || ""));
+            if (!match) throw unauthorized();
+            res.json(await createSyncHost(match[1])[method](req.body));
+          } catch (error) {
+            if (typeof error?.code === "string" && SYNC_STATUS[error.code]) return res.status(SYNC_STATUS[error.code]).json({ error: { code: error.code } });
+            await fail(req, res, error, "Sync request failed", "cashflow_sync_request_failed", { sanitizeUnexpected: true });
+          }
+        };
+        app.post("/api/app/sync/v1/negotiate", syncRoute("negotiate"));
+        app.post("/api/app/sync/v1/bootstrap", syncRoute("bootstrap"));
+        app.post("/api/app/sync/v1/bootstrap/page", syncRoute("bootstrapPage"));
+        app.post("/api/app/sync/v1/operations", syncRoute("submit"));
+        app.post("/api/app/sync/v1/results", syncRoute("results"));
+        app.post("/api/app/sync/v1/changes", syncRoute("syncChanges"));
+      }
+      // A sync device with the browser-approved "may create budgets" permission creates
+      // an account-owned budget that only this device is granted. Setup failures leave
+      // the budget in the account (visible in the browser), never a broader grant.
+      // Labels only, under current grants; this does not expose the account's
+      // complete budget list or grant authority to create or edit anything.
+      app.get("/api/device/budgets", deviceRoute(async req => {
+        if (req.headers.cookie || req.headers["x-cashflow-user-id"]) throw unauthorized();
+        const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization || ""));
+        if (!match) throw unauthorized();
+        return deviceService.listBudgetNames(match[1]);
+      }));
+      app.post("/api/device/budgets", deviceRoute(async req => {
+        if (req.headers.cookie || req.headers["x-cashflow-user-id"]) throw unauthorized();
+        const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization || ""));
+        if (!match) throw unauthorized();
+        const grant = await deviceService.authorizeBudgetCreation(match[1]);
+        const body = req.body || {};
+        if (typeof completeSetup !== "function" || typeof validateSetupInput !== "function") throw new Error("Setup service is unavailable");
+        const setupInput = { currency: body.currency, opening_balance: body.openingBalance ?? 0,
+          income_enabled: false, future_periods: 3, timezone: body.timezone || "Europe/Warsaw", holiday_country: body.holidayCountry || "PL",
+          locale: body.locale || "en" };
+        // All fallible input validation precedes account/storage allocation.
+        validateSetupInput(setupInput);
+        const budget = await callGlobal(createBudgetAsync, createBudget, [grant.accountId, { displayName: body.name }],
+          "Budget service is unavailable");
+        try {
+          await completeSetup(budget.id, setupInput);
+          return { ...await deviceService.grantCreatedBudget(match[1], budget.id), name: budget.displayName ?? budget.display_name, revision: budget.revision ?? 1 };
+        } catch (error) {
+          // Compensate the committed budget if setup or device grant fails so
+          // a failed request leaves no ungranted orphan budget behind.
+          try {
+            await callGlobal(rollbackCreatedBudgetAsync, rollbackCreatedBudget, [grant.accountId, budget.id],
+              "Budget service is unavailable");
+          } catch (cleanupError) {
+            if (typeof logError === "function") {
+              logError("cashflow_device_budget_create_cleanup_failed", { budgetId: budget.id, error: cleanupError.message });
+            }
+          }
+          throw error;
+        }
+      }));
+      if (transferHost) {
+        const TRANSFER_STATUS = { INVALID_TRANSFER_REQUEST: 400, INVALID_TRANSFER_SOURCE: 400, INVALID_SYNC_REQUEST: 400,
+          COMPATIBILITY_REQUIRED: 409, TRANSFER_ID_REUSED: 409, TRANSFER_BINDING_MISMATCH: 403,
+          TRANSFER_ALREADY_STARTED: 409, TRANSFER_TARGET_EXISTS: 409, TRANSFER_STORAGE_CONFLICT: 409,
+          TRANSFER_PENDING_LIMIT: 409, TRANSFER_SIZE_LIMIT: 413, TRANSFER_RATE_REVIEW_REQUIRED: 422,
+          TRANSFER_RATE_REFRESH_FAILED: 503, TRANSFER_OUTCOME_NOT_RECORDED: 503, TRANSFER_METADATA_NOT_RECORDED: 503,
+          TRANSFER_RECORD_INVALID: 503 };
+        for (const method of ['formats', 'review', 'submit', 'result', 'cancel']) app.post(`/api/device/standalone-transfers/${method}`, async (req, res) => {
+          res.setHeader('Cache-Control', 'no-store');
+          try {
+            if (['cookie', 'x-cashflow-user-id', 'x-cashflow-budget-id'].some(key => Object.hasOwn(req.headers, key))) throw unauthorized();
+            const match = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization || ''));
+            if (!match) throw unauthorized();
+            res.json(await transferHost[method](match[1], req.body));
+          } catch (error) {
+            const status = TRANSFER_STATUS[error.code] ?? ([401, 403].includes(error.status) ? error.status : 500);
+            const code = TRANSFER_STATUS[error.code] ? error.code : status === 401 ? 'AUTHENTICATION_REQUIRED'
+              : status === 403 ? 'PERMISSION_REQUIRED' : 'TRANSFER_FAILED';
+            // Never log or echo source JSON, driver row details, provider bodies
+            // or transport errors. The publisher records fixed operational codes.
+            res.status(status).json({ error: { code } });
+          }
+        });
+      }
+      app.post("/api/device/renew", deviceRoute(async req => {
+        requireDeviceClient(req);
+        return deviceService.renew(req.body?.renewalToken);
+      }));
+      app.post("/api/device/revoke", deviceRoute(async req => {
+        requireDeviceClient(req);
+        return deviceService.revokeWithRenewal(req.body?.renewalToken);
+      }));
+      app.post("/api/account/device-pairings/approve", deviceRoute(async req => {
+        const actor = await requireActor(req);
+        return deviceService.approve({ verificationCode: req.body?.verificationCode,
+          accountId: actor.account.id, sessionId: actor.authSession.id, budgetIds: req.body?.budgetIds,
+          writeBudgetIds: req.body?.writeBudgetIds, mayCreateBudgets: req.body?.mayCreateBudgets ?? false });
+      }));
+      app.post("/api/account/device-pairings/inspect", deviceRoute(async req => {
+        await requireActor(req);
+        return deviceService.inspectPairing(req.body?.verificationCode);
+      }));
+      app.get("/api/account/devices", deviceRoute(async req => {
+        const actor = await requireActor(req);
+        return { devices: await deviceService.list(actor.account.id) };
+      }));
+      app.delete("/api/account/devices/:id", deviceRoute(async req => {
+        const actor = await requireActor(req);
+        return deviceService.revoke(actor.account.id, req.params.id);
+      }));
+    }
+
     app.get("/api", async (req, res) => {
       try {
         await requireBudgetCapability(req, CAPABILITIES.BUDGET_READ);
@@ -1651,11 +2001,36 @@ export function registerCashflowRoutes(app, {
 
     app.put("/api/settings", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.BUDGET_SETTINGS);
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_SETTINGS);
+        const isDevice = context?.authSession?.device === true;
+        if (isDevice) {
+          // Device tokens may only update alert delivery/switch settings; financial
+          // settings go through sync v1 settings.update and server secrets stay write-only/blocked.
+          if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+            throw badRequest("Settings payload must be an object");
+          }
+          const disallowedKey = Object.keys(req.body).find(key => !DEVICE_ALLOWED_SETTINGS_KEYS.has(key));
+          if (disallowedKey) {
+            throw badRequest(`Device tokens cannot update setting: ${disallowedKey}`, [{
+              field: disallowedKey,
+              reason: "device_setting_not_allowed"
+            }]);
+          }
+        }
         const userId = await resolveRequestUser(req);
-        const updated = await updateSettings(userId, req.body);
+        const updated = isDevice
+          ? await updateDeviceSettings(String(req.headers.authorization).replace(/^Bearer\s+/i, ""), userId, req.body)
+          : await updateSettings(userId, req.body);
+        if (isDevice && updated && typeof updated === "object") {
+          const sanitized = { ...updated };
+          for (const key of DEVICE_REDACTED_SETTINGS_KEYS) {
+            delete sanitized[key];
+          }
+          res.json(sanitized);
+          return;
+        }
 
-        res.json(withProjectionStatus(userId, updated));
+        res.json(updated);
       } catch (error) {
         await fail(req, res, error, "Failed to save settings", "cashflow_settings_update_failed");
       }
@@ -1698,9 +2073,10 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/pending/:id/confirm", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.LEDGER_CONFIRM);
+        const context = await requireBudgetCapability(req, CAPABILITIES.LEDGER_CONFIRM);
         const userId = await resolveRequestUser(req);
-        const confirmed = await confirmPendingTransaction(userId, req.params.id, req.body);
+        const actorId = context?.account?.id || context?.accountId || context?.session?.accountId;
+        const confirmed = await confirmPendingTransaction(userId, req.params.id, req.body, { actorId });
         res.json(confirmed);
       } catch (error) {
         await fail(req, res, error, "Failed to confirm pending transaction", "cashflow_pending_confirm_failed");
@@ -2031,10 +2407,11 @@ export function registerCashflowRoutes(app, {
 
     app.get("/api/export/full", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.BUDGET_EXPORT);
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_EXPORT);
         const userId = await resolveRequestUser(req);
-        const includeOperationalSettings = req.query.includeOperationalSettings === "1"
-          || req.query.includeOperationalSettings === "true";
+        const includeOperationalSettings = context?.authSession?.device !== true
+          && (req.query.includeOperationalSettings === "1"
+            || req.query.includeOperationalSettings === "true");
         const exported = typeof exportFullDataAsync === "function"
           ? await exportFullDataAsync(userId, appVersion, { includeOperationalSettings })
           : exportFullData(userId, appVersion, { includeOperationalSettings });
@@ -2050,8 +2427,12 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/import/full/preview", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
         const userId = await resolveRequestUser(req);
+        if (context?.authSession?.device === true) {
+          const token = req.headers.authorization.slice('Bearer '.length);
+          return res.json(await devicePortability.preview(token, userId, req.body || {}, 'full'));
+        }
         const previewArgs = [
           userId,
           req.body?.export || req.body,
@@ -2063,14 +2444,18 @@ export function registerCashflowRoutes(app, {
           : previewFullImport(...previewArgs);
         res.json(result);
       } catch (error) {
-        await fail(req, res, error, "Failed to preview cashflow import", "cashflow_full_import_preview_failed");
+        await fail(req, res, error, "Failed to preview cashflow import", "cashflow_full_import_preview_failed", { sanitizeUnexpected: Boolean(req.headers.authorization) });
       }
     });
 
     app.post("/api/import/full", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
         const userId = await resolveRequestUser(req);
+        if (context?.authSession?.device === true) {
+          const token = req.headers.authorization.slice('Bearer '.length);
+          return res.json(await devicePortability.apply(token, userId, req.body || {}, 'full'));
+        }
         const importArgs = [
           userId,
           req.body?.export || req.body,
@@ -2087,14 +2472,41 @@ export function registerCashflowRoutes(app, {
           import: result
         });
       } catch (error) {
-        await fail(req, res, error, "Failed to import cashflow data", "cashflow_full_import_failed");
+        await fail(req, res, error, "Failed to import cashflow data", "cashflow_full_import_failed", { sanitizeUnexpected: Boolean(req.headers.authorization) });
+      }
+    });
+
+    // A CSV preview uses precisely the same validation/deletion plan as apply.
+    app.post('/api/import/one-offs-csv/preview', async (req, res) => {
+      try {
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const userId = await resolveRequestUser(req);
+        if (context?.authSession?.device !== true) {
+          return res.json(await prepareOneOffCsvImportPlanAsync(userId, req.body?.csv || '', req.body?.mode || 'append'));
+        }
+        res.json(await devicePortability.preview(req.headers.authorization.slice('Bearer '.length), userId, req.body || {}, 'csv'));
+      } catch (error) {
+        await fail(req, res, error, 'Failed to preview one-off CSV', 'cashflow_csv_preview_failed', { sanitizeUnexpected: Boolean(req.headers.authorization) });
+      }
+    });
+
+    app.get('/api/backups', async (req, res) => {
+      try {
+        await requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
+        res.json({ backups: await devicePortability.listBackups(await resolveRequestUser(req)) });
+      } catch (error) {
+        await fail(req, res, error, 'Failed to list backups', 'cashflow_backups_list_failed', { sanitizeUnexpected: Boolean(req.headers.authorization) });
       }
     });
 
     app.post("/api/import/one-offs-csv", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_IMPORT);
         const userId = await resolveRequestUser(req);
+        if (context?.authSession?.device === true) {
+          const token = req.headers.authorization.slice('Bearer '.length);
+          return res.json(await devicePortability.apply(token, userId, req.body || {}, 'csv'));
+        }
         const csv = req.body?.csv || "";
         const mode = req.body?.mode || "append";
         const result = await withBudgetRouteLock(
@@ -2113,7 +2525,7 @@ export function registerCashflowRoutes(app, {
           import: result
         });
       } catch (error) {
-        await fail(req, res, error, "Failed to import one-off CSV", "cashflow_oneoff_csv_import_failed");
+        await fail(req, res, error, "Failed to import one-off CSV", "cashflow_oneoff_csv_import_failed", { sanitizeUnexpected: Boolean(req.headers.authorization) });
       }
     });
 
@@ -2177,19 +2589,25 @@ export function registerCashflowRoutes(app, {
 
     app.post("/api/restore/:backupId", async (req, res) => {
       try {
-        await requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
+        const context = await requireBudgetCapability(req, CAPABILITIES.BUDGET_RESTORE);
         const userId = await resolveRequestUser(req);
         // Restore owns the shared data-portability lock in the service;
         // acquiring that same lock here would self-reject before restore runs.
         const result = typeof restoreBackupAsync === "function"
-          ? await restoreBackupAsync(userId, req.params.backupId)
+          ? await restoreBackupAsync(userId, req.params.backupId, context?.authSession?.device === true ? {
+            within: work => devicePortability.within(String(req.headers.authorization).replace(/^Bearer\s+/i, ""), userId, work, CAPABILITIES.BUDGET_RESTORE)
+          } : {})
           : restoreBackup(userId, req.params.backupId);
+        if (context?.authSession?.device === true) return res.json({ ok: true, rebootstrapRequired: true,
+          safetyBackupId: await devicePortability.backupIdForPath(userId, result.safetyBackup) });
         res.json({
           ...(await snapshotForUser(userId)),
           restore: result
         });
       } catch (error) {
-        await fail(req, res, error, "Failed to restore backup", "cashflow_restore_failed");
+        // Backup validation details can contain server filesystem paths.
+        if (req.headers.authorization && error?.details) delete error.details;
+        await fail(req, res, error, "Failed to restore backup", "cashflow_restore_failed", { sanitizeUnexpected: Boolean(req.headers.authorization) });
       }
     });
 }

@@ -1,13 +1,21 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { hasOwn, requireMoneyAmount, requireNumber } from "./cashflow-input-validation.js";
+import { budgetLedgerOpeningBalance } from "./cashflow-ledger-opening.js";
 import {
   applyLedgerRunningBalancePlan,
   createLedgerRunningBalancePlan
 } from "./cashflow-ledger-balance-plan.js";
 import { multiplyMoney } from "./cashflow-money-utils.js";
 import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
-import { badRequest, notFound } from "./cashflow-user-utils.js";
+import { badRequest, conflict, notFound } from "./cashflow-user-utils.js";
+
+/** Keep the browser's validation text/status while giving sync clients a safe,
+ * stable refusal reason. No financial rows or arbitrary error details go on wire. */
+function negativeBalanceRefusal() {
+  return Object.assign(badRequest("Cannot confirm transaction because it would make the ledger balance negative"),
+    { code: "LEDGER_BALANCE_NEGATIVE" });
+}
 
 export function createCashflowPendingConfirmationService({
   budgetStore = null,
@@ -24,9 +32,12 @@ export function createCashflowPendingConfirmationService({
   wouldLedgerGoNegativeAfterInsert,
   wouldLedgerGoNegativeAfterInsertAsync = null
 }) {
-  async function confirmPendingTransaction(userId, id, input = {}) {
-    if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return await confirmPendingTransactionWithBudgetStore(userId, id, input);
+  /** Actor context is supplied only by the authenticated host, never input.
+   * Both databases use their owning financial transaction for new confirmations. */
+  async function confirmPendingTransaction(userId, id, input = {}, context = { actorId: 'server' }) {
+    if ((budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function")
+      || (budgetStore?.backend === "sqlite" && typeof budgetStore.planningTransaction === "function")) {
+      return await confirmPendingTransactionWithBudgetStore(userId, id, input, context);
     }
 
     const planningDb = openPlanningDb(userId);
@@ -128,7 +139,7 @@ export function createCashflowPendingConfirmationService({
     const isLedgerConversion = String(occurrenceKey || "").startsWith("ledger_currency_conversion:");
 
     if (!isLedgerConversion && wouldLedgerGoNegativeAfterInsert(userId, candidate)) {
-      throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
+      throw negativeBalanceRefusal();
     }
 
     const confirmationResult = await runRecoverableUserMutation(userId, "confirm_pending_transaction", async () => {
@@ -195,7 +206,7 @@ export function createCashflowPendingConfirmationService({
     });
 
     if (confirmationResult === null) {
-      throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
+      throw negativeBalanceRefusal();
     }
     return confirmationResult;
   }
@@ -204,22 +215,25 @@ export function createCashflowPendingConfirmationService({
     return (rows || []).find(row => String(row?.id) === String(id)) || null;
   }
 
-  async function findConfirmedOccurrenceWithBudgetStore(userId, occurrenceKey) {
+  async function findConfirmedOccurrenceWithBudgetStore(userId, occurrenceKey, store = budgetStore) {
     if (!occurrenceKey) return null;
-    const rows = await budgetStore.listConfirmedTransactions(userId);
+    const rows = await store.listConfirmedTransactions(userId);
     return rows.find(row =>
       row.occurrence_key === occurrenceKey
       || (!row.occurrence_key && occurrenceKeyFromRow(row) === occurrenceKey)
     ) || null;
   }
 
-  async function confirmPendingTransactionWithBudgetStore(userId, id, input = {}) {
-    const planningRows = await Promise.all([
-      budgetStore.listPlanningRows(userId, "pending_transactions"),
-      budgetStore.listPlanningRows(userId, "settings"),
-      budgetStore.listPlanningRows(userId, "ledger_currency_events"),
-      budgetStore.listPlanningRows(userId, "recurring_incomes")
-    ]);
+  /** A financial host can lend a single SQLite or PostgreSQL transaction connection.
+   * Finish each preflight read before starting another, and leave no queued
+   * queries behind if one fails and the owner needs to roll back. */
+  async function confirmPendingTransactionWithBudgetStore(userId, id, input = {}, context) {
+    const transaction = work => budgetStore.backend === 'sqlite'
+      ? budgetStore.planningTransaction(userId, work) : budgetStore.transaction(work);
+    const planningRows = [];
+    for (const table of ["pending_transactions", "settings", "ledger_currency_events", "recurring_incomes"]) {
+      planningRows.push(await budgetStore.listPlanningRows(userId, table));
+    }
     const [pendingRows, settingsRows, ledgerCurrencyEvents, recurringIncomes] = planningRows;
     const pending = rowById(pendingRows, id);
     if (!pending) throw notFound("Pending transaction not found");
@@ -270,8 +284,15 @@ export function createCashflowPendingConfirmationService({
 
     const alreadyConfirmed = await findConfirmedOccurrenceWithBudgetStore(userId, occurrenceKey);
     if (alreadyConfirmed) {
-      await budgetStore.deletePlanningRowsById(userId, "pending_transactions", [id]);
-      return withProjectionStatus(userId, alreadyConfirmed);
+      return transaction(async writer => {
+        if (typeof writer.lockBudgetLedger === "function") await writer.lockBudgetLedger(userId);
+        const accepted = await findConfirmedOccurrenceWithBudgetStore(userId, occurrenceKey, writer);
+        if (!accepted) throw conflict("Confirmed occurrence changed; retry confirmation");
+        const removed = await writer.deletePlanningRowsById(userId, "pending_transactions", [id]);
+        const projected = await withProjectionStatus(userId, accepted, { store: writer });
+        if (removed.deleted) await writer.recordFinancialChange(userId, "ledger");
+        return projected;
+      });
     }
 
     const fx = await getConfirmedFxForDate(pending.currency, confirmedDate, settings, input, userId);
@@ -292,14 +313,42 @@ export function createCashflowPendingConfirmationService({
       ? await wouldLedgerGoNegativeAfterInsertAsync(userId, candidate, { ledgerCurrency, settings })
       : wouldLedgerGoNegativeAfterInsert(userId, candidate);
     if (!isLedgerConversion && negative) {
-      throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
+      throw negativeBalanceRefusal();
     }
 
-    const confirmationResult = await runRecoverableUserMutation(userId, "confirm_pending_transaction", async () => {
+    // PostgreSQL rolls the entire confirmation back on one connection. Restoring
+    // an earlier safety backup after a transaction failure could erase a sibling
+    // replica's accepted work, so never wrap this atomic path in snapshot restore.
+    const confirmationResult = await (async () => {
       const year = Number(confirmedDate.slice(0, 4));
-      const result = await budgetStore.transaction(async writer => {
+      const result = await transaction(async writer => {
         if (typeof writer.lockBudgetLedger === "function") {
           await writer.lockBudgetLedger(userId);
+        }
+
+        const accepted = await findConfirmedOccurrenceWithBudgetStore(userId, occurrenceKey, writer);
+        if (accepted) {
+          const removed = await writer.deletePlanningRowsById(userId, "pending_transactions", [id]);
+          const projected = await withProjectionStatus(userId, accepted, { store: writer });
+          if (removed.deleted) await writer.recordFinancialChange(userId, "ledger");
+          return projected;
+        }
+        const currentPending = rowById(await writer.listPlanningRows(userId, "pending_transactions"), id);
+        const currentSettings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
+        // FX retrieval happens before locking. Reject concurrent edits rather
+        // than applying an FX decision or amount to a different source/settings.
+        if (JSON.stringify(currentPending) !== JSON.stringify(pending)
+          || JSON.stringify(currentSettings) !== JSON.stringify(settings)) {
+          throw conflict("Pending transaction or settings changed; retry confirmation");
+        }
+        if (pending.source_recurring_income_id) {
+          const currentIncome = rowById(await writer.listPlanningRows(userId, "recurring_incomes"), pending.source_recurring_income_id);
+          if (currentIncome?.period_setting) {
+            const rows = await writer.listConfirmedTransactions(userId);
+            if (rows.some(row => row.date && String(row.date).slice(0, 10) > confirmedDate)) {
+              throw badRequest("Period-setting income cannot be confirmed earlier than the newest confirmed ledger transaction");
+            }
+          }
         }
 
         // The pre-lock check above only rules out a balance that was already
@@ -307,16 +356,18 @@ export function createCashflowPendingConfirmationService({
         // confirmation racing against this one. Re-run it now that the lock
         // guarantees any such sibling has already committed (or never will),
         // so the combined effect of both writes is what gets checked, not
-        // each one in isolation. A losing candidate returns null here,
-        // before any write, so runRecoverableUserMutation sees a normal
-        // success and never restores the winner's just-committed snapshot.
+        // each one in isolation. A losing candidate returns null before writes;
+        // the caller reports rejection after releasing its transaction.
         const stillNegative = typeof wouldLedgerGoNegativeAfterInsertAsync === "function"
-          ? await wouldLedgerGoNegativeAfterInsertAsync(userId, candidate, { ledgerCurrency, settings })
+          ? await wouldLedgerGoNegativeAfterInsertAsync(userId, candidate, { ledgerCurrency, settings }, writer)
           : wouldLedgerGoNegativeAfterInsert(userId, candidate);
         if (!isLedgerConversion && stillNegative) {
           return null;
         }
 
+        // Legacy facts must be captured before insertion. Both hooks use this
+        // writer's connection, so projection/journal failure rolls everything back.
+        await writer.prepareLedgerAuditCapture(userId, now);
         await writer.insertConfirmedTransactions(userId, [{
           amount,
           buffered_fx_rate: fx.bufferedFxRate,
@@ -345,22 +396,29 @@ export function createCashflowPendingConfirmationService({
           budgetId: userId,
           budgetStore: writer,
           ledgerCurrency,
-          openingBalance: 0
+          // The same writer sees retained or newly imported origin proof.
+          openingBalance: await budgetLedgerOpeningBalance(writer, userId, ledgerCurrency)
         });
         await applyLedgerRunningBalancePlan({
           budgetStore: writer,
           plan
         });
+        await writer.captureLedgerAuditPayment(userId, { paymentId: id, actorId: context?.actorId, capturedAt: now });
         await writer.deletePlanningRowsById(userId, "pending_transactions", [id]);
 
-        return rowById(await writer.listConfirmedTransactions(userId, { ledgerYear: year }), id);
+        const projected = await withProjectionStatus(userId,
+          rowById(await writer.listConfirmedTransactions(userId, { ledgerYear: year }), id), { store: writer });
+        // Ledger, balance updates, pending removal, projection and revision all
+        // belong to this confirmation transaction; no post-commit receipt gap.
+        await writer.recordFinancialChange(userId, "ledger");
+        return projected;
       });
 
-      return result === null ? null : withProjectionStatus(userId, result);
-    });
+      return result;
+    })();
 
     if (confirmationResult === null) {
-      throw badRequest("Cannot confirm transaction because it would make the ledger balance negative");
+      throw negativeBalanceRefusal();
     }
     return confirmationResult;
   }

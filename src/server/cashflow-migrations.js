@@ -1,4 +1,8 @@
+import { LEDGER_AUDIT_SCHEMA, LEDGER_ORIGIN_SCHEMA } from "./cashflow-ledger-audit-store.js";
+import { LEDGER_SUMMARY_SCHEMA } from "./cashflow-ledger-history-summary.js";
 import { extractNtfyCredentialsFromUrl } from "./cashflow-notification-service.js";
+import { FINANCIAL_JOURNAL_SCHEMA } from "./cashflow-financial-journal.js";
+import { LEDGER_IN_PLANNING_SCHEMA } from "./cashflow-schema.js";
 
 export function applyLedgerMigrations(db, {
   occurrenceKeyFromRow,
@@ -819,7 +823,6 @@ export function applyPlanningMigrations(db, {
       addColumnIfMissing("recurring_expenses", "anchor_income_id", "anchor_income_id TEXT");
       db.pragma("user_version = 20");
     }
-
     if (currentVersion < 21) {
       beforeStep(21, db);
       // Optional inclusive last month (YYYY-MM) for recurring items (e.g. a
@@ -828,6 +831,38 @@ export function applyPlanningMigrations(db, {
       if (tableExists("recurring_expenses")) addColumnIfMissing("recurring_expenses", "end_month_year", "end_month_year TEXT");
       if (tableExists("recurring_incomes")) addColumnIfMissing("recurring_incomes", "end_month_year", "end_month_year TEXT");
       db.pragma("user_version = 21");
+    }
+
+    if (currentVersion < 22) {
+      beforeStep(22, db);
+      // Journal metadata stays out of financial backup table replacement lists;
+      // restore/import must explicitly rotate epochs instead of replaying receipts.
+      db.exec(FINANCIAL_JOURNAL_SCHEMA);
+      // Journal retention: receipts/fingerprints stay forever; only change-feed
+      // payloads below a retained floor are pruned (cursors there expire).
+      addColumnIfMissing("cashflow_sync_heads", "retained_after", "retained_after INTEGER NOT NULL DEFAULT 0 CHECK (retained_after >= 0)");
+      addColumnIfMissing("cashflow_sync_operations", "payload_pruned", "payload_pruned INTEGER NOT NULL DEFAULT 0 CHECK (payload_pruned IN (0, 1))");
+      // Ledger moves into planning.sqlite; the db service imports legacy yearly
+      // files (in one transaction, behind ledger_merge_state) after this step.
+      db.exec(LEDGER_IN_PLANNING_SCHEMA);
+      // Several delivery channels at once (comma list of ntfy/discord; NULL keeps the
+      // single notification_channel), and per-channel delivery progress so a retry
+      // after a partial failure resends only to the channels that failed.
+      if (tableExists("settings")) addColumnIfMissing("settings", "notification_channels", "notification_channels TEXT");
+      if (tableExists("notification_queue")) addColumnIfMissing("notification_queue", "sent_channels", "sent_channels TEXT NOT NULL DEFAULT ''");
+      // Summaries retain original accepted payments and never alter sync history.
+      db.exec(LEDGER_SUMMARY_SCHEMA);
+      // Only register storage; baseline/capture writes require the financial
+      // host's owning transaction. Migration never invents source evidence.
+      db.exec(LEDGER_AUDIT_SCHEMA);
+      // Add provenance capacity without seeding financial evidence. Missing
+      // prior audit storage is corruption, not permission to invent a baseline.
+      for (const table of ['cashflow_ledger_audit_state', 'cashflow_ledger_originals', 'cashflow_ledger_corrections']) {
+        if (!tableExists(table)) throw new Error('Existing audit storage is required before origin migration');
+      }
+      addColumnIfMissing('cashflow_ledger_audit_state', 'origin_version', 'origin_version INTEGER NOT NULL DEFAULT 0 CHECK (origin_version IN (0, 1))');
+      db.exec(LEDGER_ORIGIN_SCHEMA);
+      db.pragma("user_version = 22");
     }
   })();
 

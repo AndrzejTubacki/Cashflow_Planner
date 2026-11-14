@@ -212,8 +212,11 @@ test("GitHub provider linking and sign-in run end to end on Postgres", gated, as
         const state = new URL(authorizationUrl).searchParams.get("state");
         return `https://cashflow.example.test/api/auth/providers/github/callback?code=pg-code&state=${encodeURIComponent(state)}`;
       };
-      const link = await service.startAuthProviderLink("pg_linker", "github");
-      assert.deepEqual(await service.completeAuthProviderCallback("github", callbackFor(link.authorizationUrl)),
+      await insertSession(globalStore, "provider-link-session", "pg_linker");
+      await pool.query("UPDATE auth_sessions SET token_hash = $1 WHERE id = $2", [(await import("node:crypto")).createHash("sha256").update("token_provider-link-session").digest("hex"), "provider-link-session"]);
+      const binding = { secret: "s".repeat(43), session: "token_provider-link-session", linking: true };
+      const link = await service.startAuthProviderLink("pg_linker", "github", binding);
+      assert.deepEqual(await service.completeAuthProviderCallback("github", callbackFor(link.authorizationUrl), binding),
         { accountId: "pg_linker", linked: true });
       const identity = (await pool.query("SELECT subject, email, email_verified, last_used_at FROM auth_identities WHERE account_id = 'pg_linker'")).rows[0];
       assert.equal(identity.subject, "9001");
@@ -221,8 +224,8 @@ test("GitHub provider linking and sign-in run end to end on Postgres", gated, as
       assert.equal(identity.email_verified, true);
       assert.ok(identity.last_used_at);
 
-      const login = await service.startAuthProviderLogin("github");
-      assert.deepEqual(await service.completeAuthProviderCallback("github", callbackFor(login.authorizationUrl)),
+      const login = await service.startAuthProviderLogin("github", { secret: binding.secret });
+      assert.deepEqual(await service.completeAuthProviderCallback("github", callbackFor(login.authorizationUrl), { secret: binding.secret }),
         { accountId: "pg_linker", linked: false });
     } finally {
       await globalStore.close();

@@ -28,12 +28,12 @@ test("beta full-import confirmation uses the real preview response fields", asyn
     conflicts: [{ table: "goals", id: "goal-1", reason: "duplicate id" }]
   });
 
-  assert.match(description, /Mode: replace/);
+  assert.match(description, /Mode: Replace/);
   assert.match(description, /replace this budget's planning data, settings, and ledger years/i);
-  assert.match(description, /recurring expenses: 4 \/ 2; defaults used for: anchor_income_id/);
+  assert.match(description, /Recurring expenses: 4 \/ 2\nDefaults used for: anchor_income_id/);
   assert.match(description, /Ledger years in file: 2025, 2026/);
   assert.match(description, /holiday_country: PL → DE/);
-  assert.match(description, /goals \/ goal-1: duplicate id/);
+  assert.match(description, /Goals \/ goal-1: Duplicate ID/);
 
   const settingsView = await source("SettingsView.jsx");
   assert.match(settingsView, /describeFullImportPreview\(preview\)/);
@@ -98,7 +98,7 @@ test("remaining beta parity controls are explicit and persistent", async () => {
   assert.match(auth, /authorizationEndpoint/);
   assert.match(auth, /tokenEndpoint/);
   assert.match(auth, /userInfoEndpoint/);
-  assert.match(settings, /beta-validation-panel/);
+  assert.match(app, /beta-validation-panel/);
   assert.match(app, /api\.github\.com\/repos\/AndrzejTubacki\/Cashflow_Planner\/releases\/latest/);
   assert.doesNotMatch(menu, /Default landing tab|Switch budget|Validate data|Regenerate projections|Theme|Density/);
   assert.match(modal, /inputMode="decimal"/);
@@ -107,7 +107,7 @@ test("remaining beta parity controls are explicit and persistent", async () => {
   assert.match(css, /data-cashflow-density="compact"/);
 });
 
-test("beta settings use deep-linked tabs, a focused account menu, and admin-only update copy", async () => {
+test("beta settings use deep-linked tabs, a focused account menu, and version states for all members", async () => {
   const [app, menu, page, settings, shell] = await Promise.all([
     source("App.jsx"), source("UserMenu.jsx"), source("SettingsPage.jsx"), source("SettingsView.jsx"), source("Shell.jsx")
   ]);
@@ -117,7 +117,8 @@ test("beta settings use deep-linked tabs, a focused account menu, and admin-only
   assert.match(page, /"account"[\s\S]*"budget"[\s\S]*canAdmin[\s\S]*"admin"/);
   assert.doesNotMatch(menu, /Switch budget|Validate data|Regenerate projections|Theme|Density/);
   assert.match(menu, /Settings[\s\S]*Switch to legacy UI[\s\S]*Sign out/);
-  assert.match(app, /canAdmin && versionCheck\.status === "available"/);
+  assert.match(app, /updateNotice=\{versionCheck\.status === "available"/);
+  assert.doesNotMatch(app, /canAdmin && versionCheck\.status/);
   assert.match(shell, /Update available: \{version\}/);
   assert.match(settings, /from !== to/);
 });

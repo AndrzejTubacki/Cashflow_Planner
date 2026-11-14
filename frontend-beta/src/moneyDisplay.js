@@ -1,3 +1,5 @@
+import { t } from "./i18n.js";
+
 function hasValue(value) {
   return value !== undefined && value !== null && value !== "";
 }
@@ -49,4 +51,23 @@ export function recurringExpensePredictionDisplay(row, fallbackLedgerCurrency = 
   const ledgerRaw = row?.current_prediction_ledger_amount ?? row?.currentPredictionLedgerAmount;
   const ledgerAmount = hasValue(ledgerRaw) && Number.isFinite(Number(ledgerRaw)) ? Number(ledgerRaw) : null;
   return { amount, currency, ledgerAmount, ledgerCurrency };
+}
+
+// Keep the posted ledger amount separate from the native amount conversion.
+export function transactionLedgerDisplay(tx, fallbackLedgerCurrency = "PLN") {
+  const raw = tx?.ledger_amount ?? tx?.ledgerAmount;
+  if (!hasValue(raw) || !Number.isFinite(Number(raw))) return null;
+  const native = transactionMoneyDisplay(tx, fallbackLedgerCurrency);
+  const currency = currencyCode(tx?.ledger_amount_currency ?? tx?.ledgerAmountCurrency, native.ledgerCurrency);
+  const equivalentRaw = tx?.ledger_amount_ledger_amount ?? tx?.ledgerAmountLedgerAmount;
+  const equivalent = hasValue(equivalentRaw) && Number.isFinite(Number(equivalentRaw)) ? Number(equivalentRaw) : null;
+  const amount = Number(raw);
+  if (currency === native.currency && Math.abs(amount - native.displayAmount) < 0.0001
+    && (equivalent === null || equivalent === native.ledgerAmount)) return null;
+  return { amount, currency, equivalent, ledgerCurrency: native.ledgerCurrency };
+}
+
+export function transactionTypeLabel(type) {
+  const labels = { income: t("Income"), expense: t("Expense"), goal_allocation: t("Goal allocation") };
+  return labels[type] || type || "-";
 }

@@ -22,7 +22,6 @@ async function requestJson(url, options = {}) {
   return JSON.parse(body);
 }
 
-// Retain the issued cookie: budget headers are not authentication.
 async function postJson(url, payload = {}) {
   const response = await fetch(url, {
     method: "POST",
@@ -37,7 +36,7 @@ async function postJson(url, payload = {}) {
     throw new Error(`${url} returned ${response.status}: ${body.slice(0, 200)}`);
   }
 
-  return { body: JSON.parse(body), cookie: String(response.headers.get("set-cookie") || "").split(";")[0] };
+  return JSON.parse(body);
 }
 
 async function waitForHealth(baseUrl, timeoutMs = Number(process.env.SMOKE_START_TIMEOUT_MS || 180000)) {
@@ -75,9 +74,12 @@ async function startServer() {
     cwd: path.resolve(import.meta.dirname, ".."),
     env: {
       ...process.env,
-      // A temporary DATA_DIR must never inherit a live PostgreSQL connection.
-      CASHFLOW_DB_BACKEND: "sqlite",
       PORT: port,
+      CASHFLOW_BIND_HOST: "127.0.0.1",
+      CASHFLOW_DB_BACKEND: "sqlite",
+      CASHFLOW_DATABASE_URL: "",
+      CASHFLOW_RUNTIME_LOCK_BACKEND: "none",
+      CASHFLOW_RUNTIME_LOCK_DATABASE_URL: "",
       DATA_DIR: dataDir,
       LOGS_DIR: logsDir
     },
@@ -124,8 +126,8 @@ async function stopChildren() {
 async function main() {
   const deployed = Boolean(process.env.CASHFLOW_BASE_URL);
   let baseUrl = process.env.CASHFLOW_BASE_URL || "";
-  let userId = "smoke_isolated_user";
-  let cookie = "";
+  let userId = "cashflow-smoke";
+  let sessionHeaders = {};
 
   if (!baseUrl) {
     const started = await startServer();
@@ -144,15 +146,24 @@ async function main() {
   }
 
   if (!deployed) {
-    // Fresh instances intentionally have no implicit local account. Create a
-    // synthetic account only on the temporary server owned by this script.
-    const created = await postJson(`${baseUrl}/api/users`, {
-      userId, displayName: "Isolated Smoke Test"
+    // Fresh installations have no implicit local user. Exercise supported setup
+    // inside the temporary runtime, using the returned session and CSRF token.
+    const created = await fetch(`${baseUrl}/api/users`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, displayName: "Disposable smoke account" })
     });
-    cookie = created.cookie;
-    if (!cookie || created.body?.session?.userId !== userId) {
-      throw new Error("Smoke account creation did not issue an authenticated session");
-    }
+    const account = await created.json();
+    if (!created.ok) throw new Error(`Account creation failed: ${JSON.stringify(account)}`);
+    const cookie = created.headers.getSetCookie().map(value => value.split(";")[0]).join("; ");
+    sessionHeaders = { cookie, "x-cashflow-csrf-token": account.csrfToken };
+    const setup = await fetch(`${baseUrl}/api/setup`, {
+      method: "POST", headers: { ...sessionHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ currency: "PLN", opening_balance: 1000,
+        income_enabled: false, future_periods: 3, timezone: "Europe/Warsaw",
+        holiday_country: "PL", locale: "en" })
+    });
+    const result = await setup.json();
+    if (!setup.ok || !result.setup?.ok) throw new Error(`Budget setup failed: ${JSON.stringify(result)}`);
   } else {
     const session = await requestJson(`${baseUrl}/api/session`, {
       headers: {
@@ -167,8 +178,8 @@ async function main() {
   const response = await fetch(`${baseUrl}/api`, {
     cache: "no-store",
     headers: {
-      "x-cashflow-user-id": userId,
-      ...(cookie ? { cookie } : {})
+      ...sessionHeaders,
+      "x-cashflow-user-id": userId
     }
   });
   const cashflow = await response.json().catch(() => ({}));

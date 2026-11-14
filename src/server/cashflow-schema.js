@@ -1,10 +1,15 @@
+import { LEDGER_AUDIT_SCHEMA, LEDGER_ORIGIN_SCHEMA } from "./cashflow-ledger-audit-store.js";
+import { LEDGER_SUMMARY_SCHEMA } from "./cashflow-ledger-history-summary.js";
 import {
   DEFAULT_FUTURE_PERIODS,
   DEFAULT_FX_BUFFER_PERCENT,
   NOTIFICATION_DELIVERY_TIME
 } from "./cashflow-constants.js";
+import { FINANCIAL_JOURNAL_SCHEMA } from "./cashflow-financial-journal.js";
 
-export const PLANNING_SCHEMA_VERSION = 21;
+export const PLANNING_SCHEMA_VERSION = 22;
+/** First planning schema that holds the ledger (ledger_transactions). */
+export const LEDGER_IN_PLANNING_SCHEMA_VERSION = 22;
 export const LEDGER_SCHEMA_VERSION = 5;
 export const PLANNING_TABLE_NAMES = [
   "settings",
@@ -75,6 +80,7 @@ export function initializePlanningSchema(db) {
       ntfy_url TEXT,
       ntfy_auth_token TEXT,
       discord_webhook_url TEXT,
+      notification_channels TEXT,
       notification_delivery_time TEXT NOT NULL DEFAULT '${NOTIFICATION_DELIVERY_TIME}',
       notify_goal_impossible INTEGER NOT NULL DEFAULT 1,
       notify_necessary_underfunded INTEGER NOT NULL DEFAULT 1,
@@ -334,6 +340,7 @@ export function initializePlanningSchema(db) {
       entity_id TEXT,
       queued_at TEXT NOT NULL,
       sent_at TEXT,
+      sent_channels TEXT NOT NULL DEFAULT '',
       dedupe_key TEXT UNIQUE
     );
 
@@ -372,6 +379,79 @@ export function initializePlanningSchema(db) {
     INSERT INTO settings (id, ledger_currency, updated_at)
     VALUES (1, 'PLN', datetime('now'));
   `);
+  db.exec(FINANCIAL_JOURNAL_SCHEMA);
+  db.exec(LEDGER_SUMMARY_SCHEMA);
+  db.exec(LEDGER_AUDIT_SCHEMA);
+  db.exec(LEDGER_ORIGIN_SCHEMA);
+  db.exec(LEDGER_IN_PLANNING_SCHEMA);
+  db.prepare("INSERT INTO ledger_merge_state (id, merged_at) VALUES (1, datetime('now'))").run();
+}
+
+/** Schema 22: the ledger lives in planning.sqlite, so a financial commit that
+ * touches sources, pending rows, ledger and the sync journal is one SQLite
+ * transaction (as on PostgreSQL). ledger_merge_state marks completed imports
+ * of legacy yearly ledger files. */
+export const LEDGER_IN_PLANNING_SCHEMA = `
+CREATE TABLE IF NOT EXISTS ledger_transactions (
+  id TEXT PRIMARY KEY,
+  ledger_year INTEGER NOT NULL CHECK (ledger_year BETWEEN 1 AND 9999),
+  name TEXT NOT NULL,
+  currency TEXT NOT NULL,
+  amount REAL NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+  date TEXT NOT NULL,
+  confirmed_date TEXT NOT NULL,
+  fx_rate REAL,
+  buffered_fx_rate REAL,
+  ledger_currency TEXT NOT NULL DEFAULT 'PLN',
+  running_balance_pln REAL NOT NULL,
+  ledger_amount REAL,
+  source_recurring_expense_id TEXT,
+  source_recurring_income_id TEXT,
+  source_one_off_id TEXT,
+  source_flex_id TEXT,
+  source_goal_id TEXT,
+  occurrence_key TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_year ON ledger_transactions(ledger_year);
+CREATE INDEX IF NOT EXISTS idx_ledger_date ON ledger_transactions(date);
+CREATE INDEX IF NOT EXISTS idx_ledger_occurrence_key ON ledger_transactions(occurrence_key);
+CREATE INDEX IF NOT EXISTS idx_ledger_source_one_off ON ledger_transactions(source_one_off_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_source_goal ON ledger_transactions(source_goal_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_source_flex ON ledger_transactions(source_flex_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_source_recurring_income ON ledger_transactions(source_recurring_income_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_source_recurring_expense ON ledger_transactions(source_recurring_expense_id);
+CREATE TABLE IF NOT EXISTS ledger_merge_state (id INTEGER PRIMARY KEY CHECK (id = 1), merged_at TEXT NOT NULL);`;
+
+/** Columns of the legacy yearly confirmed_transactions table, in order. */
+export const LEDGER_COLUMNS = ["id", "name", "currency", "amount", "type", "date", "confirmed_date", "fx_rate", "buffered_fx_rate",
+  "ledger_currency", "running_balance_pln", "ledger_amount", "source_recurring_expense_id", "source_recurring_income_id",
+  "source_one_off_id", "source_flex_id", "source_goal_id", "occurrence_key", "created_at", "updated_at"];
+
+/** SQL that (re)points the temporary `confirmed_transactions` view of a
+ * planning connection at one ledger year. INSTEAD OF triggers write through to
+ * ledger_transactions with that year; they are unqualified because SQLite
+ * forbids schema prefixes inside trigger bodies (the table lives only in main).
+ * Legacy per-year SQL keeps working, and every ledger write shares the planning
+ * file's locks and transactions. */
+export function ledgerYearViewSql(year) {
+  const ledgerYear = Number(year);
+  if (!Number.isInteger(ledgerYear) || ledgerYear < 1 || ledgerYear > 9999) throw new Error("Invalid ledger year");
+  const columns = LEDGER_COLUMNS.join(", ");
+  const defaults = { ledger_currency: "'PLN'", running_balance_pln: "0" };
+  const values = LEDGER_COLUMNS.map(column => defaults[column] ? `COALESCE(NEW.${column}, ${defaults[column]})` : `NEW.${column}`).join(", ");
+  return `
+    DROP VIEW IF EXISTS temp.confirmed_transactions;
+    CREATE TEMP VIEW confirmed_transactions AS SELECT ${columns} FROM main.ledger_transactions WHERE ledger_year = ${ledgerYear};
+    CREATE TEMP TRIGGER confirmed_transactions_insert INSTEAD OF INSERT ON confirmed_transactions
+    BEGIN INSERT INTO ledger_transactions (${columns}, ledger_year) VALUES (${values}, ${ledgerYear}); END;
+    CREATE TEMP TRIGGER confirmed_transactions_update INSTEAD OF UPDATE ON confirmed_transactions
+    BEGIN UPDATE ledger_transactions SET ${LEDGER_COLUMNS.map(column => `${column} = NEW.${column}`).join(", ")}
+      WHERE id = OLD.id AND ledger_year = ${ledgerYear}; END;
+    CREATE TEMP TRIGGER confirmed_transactions_delete INSTEAD OF DELETE ON confirmed_transactions
+    BEGIN DELETE FROM ledger_transactions WHERE id = OLD.id AND ledger_year = ${ledgerYear}; END;`;
 }
 
 export function initializeLedgerSchema(db) {

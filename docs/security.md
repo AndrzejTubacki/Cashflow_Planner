@@ -8,7 +8,7 @@ credential for at least one system administrator.
 The global database now separates accounts, budgets, memberships, global roles,
 and budget capabilities. Server routes authorize memberships before opening
 budget storage, and a system administrator does not automatically gain access
-to financial data. However, `none` mode assigns visitors the automatic legacy
+to financial data. However, `none` mode lets visitors select a real
 account without checking credentials. Public exposure in `none` mode is unsafe
 without reverse-proxy authentication, VPN, private network access, SSO, or
 another access-control layer. HTTPS alone is not access control.
@@ -32,11 +32,21 @@ The `x-cashflow-budget-id` request header selects a requested budget and is
 authorized against the current actor. It is not proof of identity.
 `x-cashflow-user-id` remains a deprecated `none`-mode budget alias for one
 compatibility release. Neither header is suitable as a direct mapping from an
-SSO username.
+SSO username. Without a cookie in `none` mode, a budget selector selects the
+compatibility account identified by that budget's storage key, subject to its
+active status and membership. It never selects an arbitrary owner. A budget
+whose account differs from its storage key requires explicit account selection
+and a session. Service budget-context resolution always requires an account ID;
+missing actors fail clearly, with no owner fallback.
 
 Fresh installations grant `system_admin` only to the first successfully
-created account. Existing profile installations migrate to one automatic
-legacy administrator. The global database prevents removal or disabling of the
+created account. Discovery of existing per-user storage never creates an
+account. A compatibility folder belongs to an existing active account whose ID
+matches its storage key; otherwise explicit `POST /api/users` with that user ID
+creates the account and adopts the folder, preserving its financial settings.
+No account ID has special meaning; upgrades keep existing accounts and roles
+(see [migration rules](migration.md#accounts-and-budget-ownership)).
+The global database prevents removal or disabling of the
 last active system administrator. System administrators can disable accounts
 and revoke active sessions, but in `none` mode those controls are operational
 guardrails rather than proof of identity because account selection still has no
@@ -193,3 +203,113 @@ Authelia and Authentik can both sit in the forward-auth position. Use their
 stable subject/username header as Cashflow's subject header, pass verified email
 and group headers if needed, and keep Cashflow's automatic provisioning at
 `deny_unknown` until explicit account links or invitation flows are tested.
+
+
+## Companion-device authentication
+
+Device pairing is available for the companion Android app, which is not public
+yet. Pairing requires explicit approval from an authenticated account session;
+per-budget grants determine read and financial-write access. Device credentials
+are scoped, expire, and can be revoked. They cannot be mixed with browser
+cookies or compatibility account/budget selectors. Financial writes recheck the
+current account, device grant and budget permission on the owning transaction.
+
+Admin global options configure access-token lifetime (default 15 minutes),
+renewal inactivity (90 days), and absolute device lifetime (365 days).
+The global authorization database stores device and pairing state and token
+hashes; keep it protected alongside browser authentication state.
+
+## Paired-device CSV/JSON portability
+
+The device budget allowlist admits only the four `POST /api/import/full` and
+`POST /api/import/one-offs-csv` preview/application routes, `GET /api/backups`,
+and `POST /api/restore/:backupId` in addition to the existing device routes.
+Import previews and application require an explicit per-budget write grant and
+the same `budget:import` role permission as browser imports. Backup listing
+requires a read grant and `budget:restore`; restoration requires a write grant
+and `budget:restore`. Selecting a backup ID never changes the selected budget.
+Cookies and the deprecated user header cannot accompany device credentials.
+
+Coordinated import preview/application recheck the device token, current grant,
+account status and role using the owning financial connection. SQLite attaches
+the configured global authorization database under its existing transaction;
+PostgreSQL uses the existing device/membership locks and budget ledger advisory
+lock. Expected epoch/revision and a process-local authenticated preview hash
+bind file, mode, device, budget and financial state. Application repeats checks
+after taking a durable replacement backup; all source writes, projections and
+epoch invalidation share one financial commit. Concurrent state changes require
+another download/review. Tokens confer no authority and fail closed on restart
+or a different server instance.
+
+Device full exports and imports exclude operational settings. Import replies
+contain backup IDs and counts, never backup paths or browser snapshots. Backup
+listing includes only successful budget-scoped recovery IDs/timestamps/sizes.
+Unexpected portability errors are sanitized for device responses. Restore keeps
+the existing backup validation/restore workflow and returns only success plus
+a bootstrap requirement to devices. No generic snapshot upload, backup creation,
+validation, sample import, account, auth, or admin route was added to the device
+allowlist. File application requires a fresh authorized preview; a lost response
+must be resolved against the current financial revision before another import.
+
+## Budget renaming and optimistic concurrency
+
+Renaming a budget (`PUT /api/budgets/:budgetId`) uses a stale-write check rather
+than last-write-wins concurrency:
+- Every budget record has an integer metadata `revision` (default 1) that increments
+  atomically on every rename.
+- Paired sync devices MUST send `expectedRevision` in the request body. Device
+  requests without `expectedRevision` are rejected with HTTP 400.
+- When `expectedRevision` is present and differs from the current revision, the
+  rename is rejected with HTTP 409 conflict, returning error code
+  `budget_rename_conflict` along with `currentName` and `currentRevision`, changing
+  nothing.
+- A lost-response retry with the same `expectedRevision` returns HTTP 409 with the
+  current name, allowing a client to see that its own rename won.
+- Existing browser sessions omitting `expectedRevision` preserve their existing
+  behavior, updating the name and incrementing the revision counter.
+
+## Currency-history transfer reader boundary
+
+The standalone transfer `formats` probe uses the same bearer-only, cookie/header
+refusal and current creation permission checks as review. It accepts only lookup
+scope, allocates nothing and returns no financial data. A positive version-2
+reader advertisement is required before a phone sends currency-history source
+bytes. Exact engine negotiation guards linked origin readers. Source/origin
+replay verifies pending mirrors and H5 recomputation evidence; neither a claimed
+balance nor an opening/conversion mirror can become an additional payment.
+Supported source versions are advertised by the authenticated formats probe;
+review and submission validate the exact supported financial evidence.
+
+## Device archive recovery
+
+A device archive is an atomic owner-authorized metadata operation with a stable
+removal idempotency key. Only the initiating device changes to a restricted,
+receipt-only state; it receives no budget access during the acknowledgement
+window. All normal authorization paths reject this state, including renewal,
+financial owning-transaction checks and standalone transfer recovery. Other
+devices' grants/revocations are preserved. Browser-initiated archival retains its
+existing conservative revocation rules.
+
+Receipt lookup and acknowledgement are exact bearer-only POST routes under
+`/api/device/archive-receipts`, with no-store responses and no mixed browser or
+budget-selector credentials. The capability binds device, instance, account,
+approving session, exact archive access-token hash, budget and idempotency key.
+It survives normal access expiry solely to recover that receipt. A same-key
+archive retry returns the identical receipt without executing another archive;
+a different key/budget is refused. No token hash or financial data is returned.
+
+Acknowledgement or the 24-hour deadline ends recovery. The configurable deadline
+(`CASHFLOW_DEVICE_ARCHIVE_RECEIPT_HOURS`, bounded to one minute through seven days)
+is fixed at commit, never sliding, and capped by absolute device expiry. Refusal
+at timeout is immediate; the next receipt request durably records revocation.
+Independent account/session/device revocation always wins. Device state uses the
+existing nonportable `state_json`, so no applied migration changes or new schema
+are needed. Portable metadata exports still omit device state.
+
+Android saves the complete copy before archival, then saves the archive receipt
+before acknowledgement. HTTP 401 never proves an unknown archive outcome. It
+can only finish an acknowledgement retry after that receipt is already durable.
+Unrecoverable expiry before the local receipt checkpoint keeps both the link and
+copy for review. Diagnostic materialization failures carry allowlisted static
+check/reason/record-kind codes; values, names, IDs and arbitrary exception text
+are excluded from the diagnostic envelope.

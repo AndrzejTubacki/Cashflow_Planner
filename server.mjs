@@ -2,7 +2,8 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-import { createInternalAuthLimiter } from "./src/server/cashflow-auth-rate-limit.js";
+import { deviceResponsePolicy } from "./src/server/cashflow-device-response-policy.js";
+import { createInternalAuthLimiter, isDevicePairingPoll } from "./src/server/cashflow-auth-rate-limit.js";
 import { DEFAULT_TIMEZONE } from "./src/server/cashflow-constants.js";
 import { normalizeTimezone } from "./src/server/cashflow-date-utils.js";
 import {
@@ -39,8 +40,8 @@ const readyzCheckDefaultBudget = enabledByEnv(process.env.CASHFLOW_READYZ_CHECK_
 const databaseConfig = resolveCashflowDbConfig(process.env);
 const databaseAutoMigrate = String(process.env.CASHFLOW_DB_AUTO_MIGRATE || "").trim().toLowerCase() !== "false";
 const publicDir = path.join(__dirname, "public");
-const publicBetaDir = path.join(__dirname, "public-beta");
-const localeDir = path.join(publicDir, "app", "cashflow", "locales");
+const legacyPublicDir = path.join(__dirname, "public-legacy");
+const localeDir = path.join(legacyPublicDir, "app", "cashflow", "locales");
 const startedAt = new Date();
 
 // package.json is the canonical app version; APIs expose it for UI/build diagnostics.
@@ -189,6 +190,7 @@ if (helmet) {
     contentSecurityPolicy: false
   }));
 }
+app.use(deviceResponsePolicy);
 app.use(express.json({ limit: jsonLimit }));
 app.use(express.urlencoded({ extended: true }));
 let createCashflowModule;
@@ -248,6 +250,17 @@ async function initializeCashflow() {
     cashflowRouter.use("/api/auth/internal", createInternalAuthLimiter({
       rateLimit, globalStore: module.globalStore, logError
     }));
+    cashflowRouter.use(["/api/device/pairings/poll", "/api/device/renew", "/api/device/revoke", "/api/device/archive-receipts"], createInternalAuthLimiter({
+      rateLimit, globalStore: module.globalStore, logError, limit: 180, windowMs: 15 * 60 * 1000, namespace: "device-poll-renew"
+    }));
+    const deviceEnrollmentLimiter = createInternalAuthLimiter({
+      rateLimit, globalStore: module.globalStore, logError, namespace: "device-enrollment"
+    });
+    cashflowRouter.use(["/api/device/pairings", "/api/account/device-pairings"], (req, res, next) => {
+      // The polling subroute has its own budget; do not consume enrollment hits.
+      if (isDevicePairingPoll(req)) return next();
+      return deviceEnrollmentLimiter(req, res, next);
+    });
     module.registerRoutes(cashflowRouter);
     cashflow = module;
     backgroundInterval = module.startBackgroundJobs();
@@ -384,34 +397,56 @@ app.get("/api/system", (req, res) => {
 });
 
 // Serve the static browser apps after API routes so /api/* never falls through to HTML.
-// The React beta lives under /beta, built separately (frontend-beta/) into
-// public-beta/; it's optional (only a `git pull` + build, not always present
-// in every checkout), so its mounts are skipped gracefully if missing.
-const betaBuildExists = fs.existsSync(path.join(publicBetaDir, "index.html"));
-if (betaBuildExists) {
-  app.use("/beta", express.static(publicBetaDir));
+// Old /beta URLs redirect to root / preserving any subpath and query parameters.
+app.use((req, res, next) => {
+  if (req.method === "GET" && (req.path === "/beta" || req.path.startsWith("/beta/"))) {
+    // Strip every leading slash/backslash so "/beta//host" cannot become a
+    // protocol-relative redirect to another site.
+    const rest = req.path.slice(5).replace(/^[\/\\]+/, "");
+    const query = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    res.redirect(302, `/${rest}${query}`);
+    return;
+  }
+  next();
+});
+
+const legacyBuildExists = fs.existsSync(path.join(legacyPublicDir, "index.html"));
+if (legacyBuildExists) {
+  app.use("/legacy", express.static(legacyPublicDir));
   app.use((req, res, next) => {
-    // SPA fallback for the beta app, mirroring the legacy fallback below.
-    if (req.method !== "GET" || !req.path.startsWith("/beta")) {
+    // SPA fallback for the legacy app.
+    if (req.method !== "GET" || (req.path !== "/legacy" && !req.path.startsWith("/legacy/"))) {
       next();
       return;
     }
 
-    res.sendFile(path.join(publicBetaDir, "index.html"));
+    res.sendFile(path.join(legacyPublicDir, "index.html"));
   });
 }
 
-app.use(express.static(publicDir));
+// The React UI lives at /, built separately (frontend-beta/) into
+// public/; it's optional (only a `git pull` + build, not always present
+// in every checkout), so its mounts are skipped gracefully if missing.
+const publicBuildExists = fs.existsSync(path.join(publicDir, "index.html"));
+if (publicBuildExists) {
+  app.use(express.static(publicDir));
+  app.use((req, res, next) => {
+    // SPA fallback: direct navigation to app paths should return index.html
+    // for non-API paths that are not legacy paths.
+    if (
+      req.method !== "GET" ||
+      req.path === "/api" ||
+      req.path.startsWith("/api/") ||
+      req.path === "/legacy" ||
+      req.path.startsWith("/legacy/")
+    ) {
+      next();
+      return;
+    }
 
-app.use((req, res, next) => {
-  // SPA fallback: direct navigation to app paths should return index.html.
-  if (req.method !== "GET" || req.path.startsWith("/api/")) {
-    next();
-    return;
-  }
-
-  res.sendFile(path.join(publicDir, "index.html"));
-});
+    res.sendFile(path.join(publicDir, "index.html"));
+  });
+}
 
 try {
   // Optional operator-owned routes live in ignored local/dev.mjs and remain outside published APIs.
@@ -428,7 +463,7 @@ try {
   }
 }
 
-const server = app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, process.env.CASHFLOW_BIND_HOST || "0.0.0.0", () => {
   // Bind on all interfaces for container networking.
   logServerEvent("server_start", {
     port,

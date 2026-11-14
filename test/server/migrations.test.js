@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
+import fs from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,10 +10,17 @@ import {
   applyLedgerMigrations,
   applyPlanningMigrations
 } from "../../src/server/cashflow-migrations.js";
+import { createCashflowDbService } from "../../src/server/cashflow-db-service.js";
+import { createCashflowStoragePaths } from "../../src/server/cashflow-storage-utils.js";
+import { initializeMainPlanningSchema } from "../helpers/main-schema-fixtures.js";
+import { LEDGER_AUDIT_SCHEMA, LEDGER_ORIGIN_SCHEMA } from "../../src/server/cashflow-ledger-audit-store.js";
 import { occurrenceKeyFromRow } from "../../src/server/cashflow-occurrence-utils.js";
 import {
+  initializeLedgerSchema,
+  LEDGER_COLUMNS,
   LEDGER_SCHEMA_VERSION,
-  PLANNING_SCHEMA_VERSION
+  PLANNING_SCHEMA_VERSION,
+  initializePlanningSchema
 } from "../../src/server/cashflow-schema.js";
 
 async function withTempDb(fn) {
@@ -31,6 +39,25 @@ async function withTempDb(fn) {
 function indexNames(db) {
   return new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(row => row.name));
 }
+
+test("planning v22 journal migration rolls back failures and preserves existing financial rows", () => withTempDb(db => {
+  initializePlanningSchema(db);
+  db.exec("DROP TABLE cashflow_sync_operations; DROP TABLE cashflow_sync_heads; PRAGMA user_version = 20;");
+  db.prepare("INSERT INTO one_off_transactions (id,name,currency,amount,type,date,created_at,updated_at) VALUES ('bill','Bill','PLN',10,'expense','2026-06-10','2026-06-01','2026-06-01')").run();
+  assert.throws(() => applyPlanningMigrations(db, { beforeStep(version, connection) {
+    if (version === 22) {
+      connection.exec("CREATE TABLE cashflow_sync_heads (budget_id TEXT PRIMARY KEY)");
+      throw new Error("Injected journal migration failure");
+    }
+  } }), /Injected journal migration failure/);
+  assert.equal(db.pragma("user_version", { simple: true }), 20);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='cashflow_sync_heads'").get().n, 0);
+  assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id='bill'").get().amount, 10);
+  applyPlanningMigrations(db);
+  assert.equal(db.pragma("user_version", { simple: true }), PLANNING_SCHEMA_VERSION);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM cashflow_sync_operations").get().n, 0);
+  assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id='bill'").get().amount, 10);
+}));
 
 test("planning migration from version 8 adds locale and preserves valid settings data", () => withTempDb(db => {
   db.exec(`
@@ -451,7 +478,7 @@ test("planning migration extracts a URL-embedded ntfy access token into its own 
     );
 
     INSERT INTO settings (id, ntfy_url)
-    VALUES (1, 'https://:tk_g5qdcly4l23ssxlpx8ys8wcwtqh68@ntfy.tubacki.pl/budget');
+    VALUES (1, 'https://:tk_exampletokenexampletoken0001@ntfy.example.com/budget');
   `);
 
   applyPlanningMigrations(db);
@@ -460,8 +487,8 @@ test("planning migration extracts a URL-embedded ntfy access token into its own 
   const row = db.prepare("SELECT ntfy_url, ntfy_auth_token FROM settings WHERE id = 1").get();
 
   assert.equal(version, PLANNING_SCHEMA_VERSION);
-  assert.equal(row.ntfy_url, "https://ntfy.tubacki.pl/budget");
-  assert.equal(row.ntfy_auth_token, "tk_g5qdcly4l23ssxlpx8ys8wcwtqh68");
+  assert.equal(row.ntfy_url, "https://ntfy.example.com/budget");
+  assert.equal(row.ntfy_auth_token, "tk_exampletokenexampletoken0001");
 }));
 
 test("planning migration leaves a plain ntfy URL untouched", () => withTempDb(db => {
@@ -522,3 +549,183 @@ test("planning migration from version 20 adds nullable recurring end months and 
   );
   assert.equal(db.prepare("SELECT end_month_year FROM recurring_incomes WHERE id = 'inc-1'").get().end_month_year, null);
 }));
+
+// A failed metadata upgrade must leave both the previous version and facts intact.
+test("planning v22 summary migration is atomic and retryable", () => withTempDb(db => {
+  initializePlanningSchema(db);
+  db.exec("DROP TABLE cashflow_ledger_summary_cache; PRAGMA user_version = 21;");
+  db.prepare("INSERT INTO one_off_transactions (id,name,currency,amount,type,date,created_at,updated_at) VALUES ('kept','Kept','PLN',10,'expense','2026-06-10','2026-06-01','2026-06-01')").run();
+  assert.throws(() => applyPlanningMigrations(db, { beforeStep(version, connection) {
+    if (version === 22) {
+      connection.exec("CREATE TABLE cashflow_ledger_summary_cache (budget_id TEXT PRIMARY KEY)");
+      throw new Error("Injected summary migration failure");
+    }
+  } }), /Injected summary migration failure/);
+  assert.equal(db.pragma("user_version", { simple: true }), 21);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='cashflow_ledger_summary_cache'").get().n, 0);
+  applyPlanningMigrations(db);
+  assert.equal(db.pragma("user_version", { simple: true }), PLANNING_SCHEMA_VERSION);
+  assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id='kept'").get().amount, 10);
+}));
+
+
+// Audit DDL and the version stamp must roll back with the financial database.
+test("planning v22 audit migration preserves prior data and retries after late failure", () => withTempDb(db => {
+  initializePlanningSchema(db);
+  db.exec("DROP TABLE cashflow_ledger_origins; DROP TABLE cashflow_ledger_corrections; DROP TABLE cashflow_ledger_originals; DROP TABLE cashflow_ledger_audit_state; PRAGMA user_version = 21;");
+  db.prepare("INSERT INTO one_off_transactions (id,name,currency,amount,type,date,created_at,updated_at) VALUES ('kept','Kept','PLN',10,'expense','2026-06-10','2026-06-01','2026-06-01')").run();
+  assert.throws(() => applyPlanningMigrations(db, { beforeStep(version, connection) {
+    if (version === 22) {
+      connection.exec(LEDGER_AUDIT_SCHEMA);
+      throw new Error("Injected audit migration failure");
+    }
+  } }), /Injected audit migration failure/);
+  assert.equal(db.pragma("user_version", { simple: true }), 21);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name LIKE 'cashflow_ledger_%' AND name <> 'cashflow_ledger_summary_cache'").get().n, 0);
+  assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id='kept'").get().amount, 10);
+  applyPlanningMigrations(db);
+  assert.equal(db.pragma("user_version", { simple: true }), PLANNING_SCHEMA_VERSION);
+  for (const table of ['cashflow_ledger_audit_state', 'cashflow_ledger_originals', 'cashflow_ledger_corrections']) {
+    assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n, 0, 'Migration must not invent acceptance evidence');
+  }
+  assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id='kept'").get().amount, 10);
+  db.exec("PRAGMA foreign_keys = ON");
+  assert.throws(() => db.prepare("INSERT INTO cashflow_ledger_originals VALUES ('missing','payment',1,'{}','fixture')").run(), /FOREIGN KEY/);
+}));
+
+test('planning v22 origin migration preserves prior state and rolls back late failure', () => withTempDb(db => {
+  initializePlanningSchema(db);
+  db.exec('DROP TABLE cashflow_ledger_origins; ALTER TABLE cashflow_ledger_audit_state DROP COLUMN origin_version; PRAGMA user_version = 21;');
+  db.prepare("INSERT INTO one_off_transactions (id,name,currency,amount,type,date,created_at,updated_at) VALUES ('kept-origin','Kept','PLN',10,'expense','2026-06-10','2026-06-01','2026-06-01')").run();
+  db.prepare("INSERT INTO cashflow_ledger_audit_state (budget_id,last_sequence,baseline_complete) VALUES ('kept-origin',0,1)").run();
+  const prior = db.prepare("SELECT * FROM cashflow_ledger_audit_state WHERE budget_id = 'kept-origin'").get();
+  const exec = db.exec;
+  db.exec = function(sql) {
+    const result = exec.call(this, sql);
+    if (sql === LEDGER_ORIGIN_SCHEMA) throw new Error('Injected origin migration failure');
+    return result;
+  };
+  try { assert.throws(() => applyPlanningMigrations(db), /Injected origin migration failure/); }
+  finally { db.exec = exec; }
+  assert.equal(db.pragma('user_version', { simple: true }), 21);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='cashflow_ledger_origins'").get().n, 0);
+  assert.deepEqual(db.prepare("SELECT * FROM cashflow_ledger_audit_state WHERE budget_id = 'kept-origin'").get(), prior);
+  applyPlanningMigrations(db);
+  assert.equal(db.pragma('user_version', { simple: true }), PLANNING_SCHEMA_VERSION);
+  assert.deepEqual(db.prepare("SELECT * FROM cashflow_ledger_audit_state WHERE budget_id = 'kept-origin'").get(), { ...prior, origin_version: 0 });
+  assert.equal(db.prepare('SELECT count(*) AS n FROM cashflow_ledger_origins').get().n, 0);
+  assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id='kept-origin'").get().amount, 10);
+  db.pragma('foreign_keys = ON');
+  assert.throws(() => db.prepare("INSERT INTO cashflow_ledger_origins VALUES ('missing','{}','synthetic')").run(), /FOREIGN KEY/);
+}));
+
+for (const sourceVersion of [20, 21]) {
+  test(`planning ${sourceVersion} to 22 calls backup hooks before the combined step and is a no-op on retry`, () => withTempDb(db => {
+    initializeMainPlanningSchema(db);
+    if (sourceVersion === 20) db.exec(`
+      ALTER TABLE recurring_expenses DROP COLUMN end_month_year;
+      ALTER TABLE recurring_incomes DROP COLUMN end_month_year;
+      PRAGMA user_version = 20;
+    `);
+    const steps = [];
+    applyPlanningMigrations(db, { beforeStep(version, connection) {
+      steps.push([version, connection.pragma('user_version', { simple: true })]);
+      assert.equal(connection.prepare("SELECT 1 FROM sqlite_master WHERE name = 'cashflow_sync_heads'").get(), undefined);
+      if (version === 22) {
+        assert.ok(connection.prepare('PRAGMA table_info(recurring_expenses)').all().some(column => column.name === 'end_month_year'));
+      }
+    } });
+    assert.deepEqual(steps, sourceVersion === 20 ? [[21, 20], [22, 21]] : [[22, 21]]);
+    assert.equal(db.pragma('user_version', { simple: true }), 22);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM ledger_merge_state').get().n, 0);
+    for (const table of ['cashflow_ledger_audit_state', 'cashflow_ledger_originals', 'cashflow_ledger_corrections', 'cashflow_ledger_origins']) {
+      assert.equal(db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n, 0);
+    }
+    const before = db.serialize();
+    applyPlanningMigrations(db, { beforeStep() { assert.fail('Current schema must not migrate'); } });
+    assert.deepEqual(db.serialize(), before);
+  }));
+}
+
+for (const sourceVersion of [14, 20, 21]) {
+  test(`main planning ${sourceVersion} imports every legacy yearly ledger row into planning 22 and retains recovery copies`, async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'cashflow-main-upgrade-'));
+    const paths = createCashflowStoragePaths(directory);
+    const userId = 'main-user';
+    const planningPath = paths.planningDbPath(userId);
+    const planning = new Database(planningPath);
+    initializeMainPlanningSchema(planning);
+    planning.exec(`
+      UPDATE settings SET ledger_currency = 'EUR', ntfy_url = 'https://ntfy.example/budget' WHERE id = 1;
+      INSERT INTO recurring_incomes (id,name,currency,amount,prediction_strategy,repeat_every_months,
+        start_month_year,end_month_year,anchor_type,anchor_day_of_month,created_at,updated_at)
+      VALUES ('salary','Salary','EUR',1000,'fixed',1,'2025-01','2027-12','day_of_month',1,'2025-01-01','2025-01-01');
+      INSERT INTO one_off_transactions (id,name,currency,amount,type,date,created_at,updated_at)
+      VALUES ('kept','Kept','EUR',12,'expense','2026-01-10','2026-01-01','2026-01-01');
+    `);
+    const priorSettings = planning.prepare('SELECT * FROM settings').get();
+    const priorIncome = planning.prepare('SELECT * FROM recurring_incomes').get();
+    planning.close();
+    const originals = [];
+    const files = [];
+    for (const year of [2025, 2026]) {
+      const filename = paths.ledgerDbPath(userId, year);
+      files.push(filename);
+      const ledger = new Database(filename);
+      initializeLedgerSchema(ledger);
+      for (const index of [1, 2]) ledger.prepare(`INSERT INTO confirmed_transactions (
+        id,name,currency,amount,type,date,confirmed_date,fx_rate,buffered_fx_rate,ledger_currency,
+        running_balance_pln,ledger_amount,source_recurring_income_id,occurrence_key,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(`payment-${year}-${index}`, 'Kept payment', 'EUR', 10.25 * index,
+        'income', `${year}-01-0${index}`, `${year}-01-0${index}`, 1, 1, 'EUR', 10.25 * index, 10.25 * index,
+        'salary', `income:salary:${year}-01-0${index}`, `${year}-01-01`, `${year}-01-01`);
+      originals.push(...ledger.prepare('SELECT * FROM confirmed_transactions ORDER BY id').all().map(row => ({ ...row, ledger_year: year })));
+      ledger.close();
+    }
+    if (sourceVersion < 21) {
+      const legacy = new Database(planningPath);
+      legacy.exec(`ALTER TABLE recurring_expenses DROP COLUMN end_month_year;
+        ALTER TABLE recurring_incomes DROP COLUMN end_month_year`);
+      if (sourceVersion < 20) legacy.exec('ALTER TABLE recurring_expenses DROP COLUMN anchor_income_id');
+      if (sourceVersion < 19) legacy.exec('ALTER TABLE settings DROP COLUMN ntfy_auth_token');
+      if (sourceVersion < 18) legacy.exec('ALTER TABLE settings DROP COLUMN ledger_history_compaction_months');
+      if (sourceVersion < 17) legacy.exec(`ALTER TABLE settings DROP COLUMN notification_channel;
+        ALTER TABLE settings DROP COLUMN discord_webhook_url`);
+      if (sourceVersion < 15) legacy.exec('ALTER TABLE pending_transactions DROP COLUMN pending_origin');
+      legacy.pragma(`user_version = ${sourceVersion}`);
+      legacy.close();
+    }
+    const service = createCashflowDbService(paths);
+    try {
+      const db = service.openPlanningDb(userId);
+      try {
+        assert.equal(db.pragma('user_version', { simple: true }), 22);
+        assert.deepEqual(db.prepare(`SELECT ${LEDGER_COLUMNS.join(', ')}, ledger_year FROM ledger_transactions ORDER BY id`).all(), originals);
+        assert.deepEqual(db.prepare('SELECT * FROM settings').get(), { ...priorSettings, notification_channels: null });
+        assert.deepEqual(db.prepare('SELECT * FROM recurring_incomes').get(), { ...priorIncome, end_month_year: sourceVersion < 21 ? null : priorIncome.end_month_year });
+        assert.equal(db.prepare("SELECT amount FROM one_off_transactions WHERE id = 'kept'").get().amount, 12);
+        assert.equal(db.prepare('SELECT count(*) AS n FROM ledger_merge_state').get().n, 1);
+        assert.equal(db.prepare('SELECT count(*) AS n FROM cashflow_ledger_originals').get().n, 0);
+      } finally { db.close(); }
+      for (const filename of files) {
+        assert.equal(fs.existsSync(filename), false);
+        assert.equal(fs.existsSync(`${filename}.merged`), true);
+      }
+      const userDir = paths.userDataDir(userId);
+      const recoveries = fs.readdirSync(path.join(userDir, 'backups')).filter(name => name.startsWith('migration_backup_'));
+      assert.equal(recoveries.length, 1);
+      const backupPath = path.join(userDir, 'backups', recoveries[0], 'planning.sqlite');
+      const backup = new Database(backupPath, { readonly: true });
+      try { assert.equal(backup.pragma('user_version', { simple: true }), sourceVersion); }
+      finally { backup.close(); }
+      const reopened = service.openPlanningDb(userId);
+      try { assert.deepEqual(reopened.prepare(`SELECT ${LEDGER_COLUMNS.join(', ')}, ledger_year FROM ledger_transactions ORDER BY id`).all(), originals); }
+      finally { reopened.close(); }
+      for (const year of [2025, 2026]) {
+        const ledger = service.openLedgerDb(userId, year);
+        try { assert.equal(ledger.prepare('SELECT count(*) AS n FROM confirmed_transactions').get().n, 2); }
+        finally { ledger.close(); }
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+}

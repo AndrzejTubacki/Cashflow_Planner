@@ -5,6 +5,7 @@ import { formatDate } from "./format.js";
 import { applyUiPreferences, loadUiPreferences, saveUiPreferences, UI_DENSITY_OPTIONS, UI_DEFAULT_TAB_OPTIONS, UI_THEME_OPTIONS } from "./uiPreferences.js";
 import { AvatarIcon, AVATAR_IDS, AVATAR_LABELS } from "./AvatarIcons.jsx";
 import { resolvedAvatarId } from "./avatar.js";
+import DevicesPanel from "./DevicesPanel.jsx";
 
 const PASSWORD_MIN_LENGTH = 12;
 
@@ -463,6 +464,7 @@ export default function AccountView({ onRefresh, notice = null, onDismissNotice 
           <PasswordPanel account={account} onSaved={handleSaved} />
           <LinkedSignInsPanel account={account} onSaved={handleSaved} />
           <PasswordOffPanel account={account} onSaved={handleSaved} />
+          <DevicesPanel />
         </>
       ) : !error ? <p className="beta-empty">{t("Loading your account...")}</p> : null}
     </section>

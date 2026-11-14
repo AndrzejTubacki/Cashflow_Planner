@@ -240,6 +240,8 @@ test('two HTTP replicas enforce one auth limit and fail closed if the shared tab
         const app = express();
         app.use('/api/auth/internal', createInternalAuthLimiter({ rateLimit, globalStore, logError: (...args) => errors.push(args) }));
         app.post('/api/auth/internal', (req, res) => res.sendStatus(204));
+        app.use('/api/device-poll', createInternalAuthLimiter({ rateLimit, globalStore, namespace: 'device-poll-renew', limit: 180 }));
+        app.post('/api/device-poll', (req, res) => res.sendStatus(204));
         const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
         servers.push(server);
       }
@@ -251,6 +253,11 @@ test('two HTTP replicas enforce one auth limit and fail closed if the shared tab
       const statuses = await Promise.all(Array.from({ length: 26 }, (_, i) => attempt(i)));
       assert.equal(statuses.filter(s => s === 204).length, 20);
       assert.equal(statuses.filter(s => s === 429).length, 6);
+      // Polling/renewal must not inherit exhausted login counters in PostgreSQL.
+      const poll = await fetch(`http://127.0.0.1:${servers[0].address().port}/api/device-poll`, { method: 'POST' });
+      assert.equal(poll.status, 204);
+      await poll.text();
+      assert.equal((await pool.query('SELECT count(*) AS n FROM cashflow_auth_rate_limits')).rows[0].n, '2');
       await pool.query("UPDATE cashflow_auth_rate_limits SET reset_at = now() - interval '1 second'");
       assert.equal(await attempt(1), 204);
       await pool.query('DROP TABLE cashflow_auth_rate_limits');

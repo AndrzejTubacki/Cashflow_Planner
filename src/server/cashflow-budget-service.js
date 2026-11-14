@@ -118,7 +118,7 @@ export function createCashflowBudgetService({
   function budgetRow(db, budgetId) {
     return db.prepare(`
       SELECT id, storage_key, display_name, status, created_by_account_id,
-        created_at, updated_at, archived_at, deleted_at
+        created_at, updated_at, archived_at, deleted_at, revision
       FROM budgets
       WHERE id = ?
     `).get(normalizeUserId(budgetId));
@@ -204,7 +204,7 @@ export function createCashflowBudgetService({
       requireActiveAccount(db, normalizedAccountId);
       return db.prepare(`
         SELECT b.id, b.display_name, b.status, b.created_at, b.updated_at,
-          b.archived_at, bm.role
+          b.archived_at, bm.role, b.revision
         FROM budget_memberships bm
         JOIN budgets b ON b.id = bm.budget_id
         WHERE bm.account_id = ?
@@ -376,27 +376,110 @@ export function createCashflowBudgetService({
     }
   }
 
-  function renameBudget(actorAccountId, budgetId, input = {}) {
-    const name = displayName(input.displayName || input.display_name || input.name, "displayName");
+  // Compensate a multi-step budget creation (such as POST /api/device/budgets)
+  // when setup or device grant fails after createBudget committed. Marking the
+  // budget deleted first satisfies the last-owner trigger before row deletion
+  // removes memberships/settings without revoking the account's existing devices.
+  function rollbackCreatedBudget(actorAccountId, budgetId) {
+    const normalizedAccountId = normalizeUserId(actorAccountId);
+    const normalizedBudgetId = normalizeUserId(budgetId);
     const db = openGlobalDb();
     try {
-      requireBudget(db, budgetId);
-      requireMembershipRole(db, budgetId, actorAccountId, ["owner", "manager"]);
       db.transaction(() => {
         db.prepare(`
           UPDATE budgets
-          SET display_name = ?,
+          SET status = 'deleted',
+              deleted_at = datetime('now'),
               updated_at = datetime('now')
           WHERE id = ?
-        `).run(name, budgetId);
+        `).run(normalizedBudgetId);
+        db.prepare("DELETE FROM budget_invitations WHERE budget_id = ?").run(normalizedBudgetId);
+        db.prepare("DELETE FROM budget_memberships WHERE budget_id = ?").run(normalizedBudgetId);
+        db.prepare("DELETE FROM budgets WHERE id = ?").run(normalizedBudgetId);
+        audit(db, {
+          action: "budget_create_rollback",
+          actorAccountId: normalizedAccountId,
+          outcome: "failure",
+          targetId: normalizedBudgetId,
+          targetType: "budget"
+        });
+      })();
+    } finally {
+      db.close();
+    }
+    deleteBudgetStorage(normalizedBudgetId);
+  }
+
+  async function rollbackCreatedBudgetAsync(actorAccountId, budgetId) {
+    if (!globalStore || globalStore.backend === "sqlite" || typeof globalStore.transaction !== "function") {
+      return rollbackCreatedBudget(actorAccountId, budgetId);
+    }
+    const normalizedAccountId = normalizeUserId(actorAccountId);
+    const normalizedBudgetId = normalizeUserId(budgetId);
+    await globalStore.transaction(async repo => {
+      await repo.budgets.markDeleted(normalizedBudgetId);
+      await repo.invitations.deleteAllForBudget(normalizedBudgetId);
+      await repo.memberships.deleteAllForBudget(normalizedBudgetId);
+      await repo.budgets.delete(normalizedBudgetId);
+      await repo.audit.insertSecurityEvent({
+        action: "budget_create_rollback",
+        actorAccountId: normalizedAccountId,
+        outcome: "failure",
+        targetId: normalizedBudgetId,
+        targetType: "budget"
+      });
+    });
+    await deleteBudgetStorage(normalizedBudgetId);
+  }
+
+  function createBudgetRenameConflict(current) {
+    const err = conflict("Budget rename conflict: expected revision does not match current revision");
+    err.code = "budget_rename_conflict";
+    err.currentName = current.display_name ?? current.name;
+    err.currentRevision = current.revision;
+    err.name = current.display_name ?? current.name;
+    err.displayName = current.display_name ?? current.name;
+    err.revision = current.revision;
+    err.details = {
+      code: "budget_rename_conflict",
+      currentName: current.display_name ?? current.name,
+      currentRevision: current.revision
+    };
+    return err;
+  }
+
+  function renameBudget(actorAccountId, budgetId, input = {}) {
+    const name = displayName(input.displayName || input.display_name || input.name, "displayName");
+    const hasExpectedRevision = input.expectedRevision !== undefined
+      && input.expectedRevision !== null
+      && input.expectedRevision !== "";
+    const db = openGlobalDb();
+    try {
+      // Acquire the SQLite writer before reading permissions/revision, avoiding
+      // a read-to-write upgrade race with another connection.
+      return db.transaction(() => {
+        const current = requireBudget(db, budgetId);
+        requireMembershipRole(db, budgetId, actorAccountId, ["owner", "manager"]);
+        if (hasExpectedRevision && Number(input.expectedRevision) !== Number(current.revision)) {
+          throw createBudgetRenameConflict(current);
+        }
+        const updated = db.prepare(`
+          UPDATE budgets
+          SET display_name = ?,
+              revision = revision + 1,
+              updated_at = datetime('now')
+          WHERE id = ? AND revision = ?
+          RETURNING *
+        `).get(name, budgetId, current.revision);
+        if (!updated) throw createBudgetRenameConflict(requireBudget(db, budgetId));
         audit(db, {
           action: "budget_rename",
           actorAccountId,
           targetId: budgetId,
           targetType: "budget"
         });
-      })();
-      return budgetRow(db, budgetId);
+        return updated;
+      }).immediate();
     } finally {
       db.close();
     }
@@ -405,20 +488,33 @@ export function createCashflowBudgetService({
   async function renameBudgetAsync(actorAccountId, budgetId, input = {}) {
     const name = displayName(input.displayName || input.display_name || input.name, "displayName");
     const normalizedBudgetId = normalizeUserId(budgetId);
+    const hasExpectedRevision = input.expectedRevision !== undefined
+      && input.expectedRevision !== null
+      && input.expectedRevision !== "";
     // Full merge is unsafe: Postgres requires await for all repo operations,
     // but SQLite requires a strictly synchronous transaction closure.
     return await withExternalGlobalTransaction(async repo => {
-      await requireBudgetForRepo(repo, normalizedBudgetId);
+      const budget = await requireBudgetForRepo(repo, normalizedBudgetId);
       await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
-      await repo.budgets.updateDisplayName(normalizedBudgetId, name);
+      if (hasExpectedRevision && Number(input.expectedRevision) !== Number(budget.revision)) {
+        throw createBudgetRenameConflict(budget);
+      }
+      // Legacy browser requests omit a revision; still fence their write at
+      // the revision read in this transaction so they cannot overwrite a peer.
+      const updated = await repo.budgets.updateDisplayName(normalizedBudgetId, name, budget.revision);
+      if (!updated) {
+        const current = await requireBudgetForRepo(repo, normalizedBudgetId);
+        await requireMembershipRoleForRepo(repo, normalizedBudgetId, actorAccountId, ["owner", "manager"]);
+        throw createBudgetRenameConflict(current);
+      }
       await repo.audit.insertSecurityEvent({
         action: "budget_rename",
         actorAccountId,
         targetId: normalizedBudgetId,
         targetType: "budget"
       });
-      return await repo.budgets.get(normalizedBudgetId);
-    }, () => renameBudget(actorAccountId, normalizedBudgetId, { displayName: name }));
+      return updated;
+    }, () => renameBudget(actorAccountId, normalizedBudgetId, { ...input, displayName: name }));
   }
 
   function archiveBudget(actorAccountId, budgetId) {
@@ -428,6 +524,8 @@ export function createCashflowBudgetService({
       requireMembershipRole(db, budgetId, actorAccountId, ["owner"]);
       if (budget.status !== "active") throw conflict("Only active budgets can be archived");
       db.transaction(() => {
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id IN (SELECT account_id FROM budget_memberships WHERE budget_id = ?)")
+          .run(Date.now(), budgetId);
         db.prepare(`
           UPDATE budgets
           SET status = 'archived',
@@ -718,6 +816,8 @@ export function createCashflowBudgetService({
               revoked_at = COALESCE(revoked_at, datetime('now'))
           WHERE account_id = ? AND selected_budget_id = ?
         `).run(targetAccountId, budgetId);
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+          .run(Date.now(), targetAccountId);
         audit(db, {
           action: "budget_member_remove",
           actorAccountId,
@@ -772,6 +872,8 @@ export function createCashflowBudgetService({
               revoked_at = COALESCE(revoked_at, datetime('now'))
           WHERE account_id = ? AND selected_budget_id = ?
         `).run(accountId, budgetId);
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+          .run(Date.now(), accountId);
         audit(db, {
           action: "budget_member_leave",
           actorAccountId: accountId,
@@ -1240,6 +1342,8 @@ export function createCashflowBudgetService({
     renameBudgetAsync,
     restoreBudget,
     restoreBudgetAsync,
+    rollbackCreatedBudget,
+    rollbackCreatedBudgetAsync,
     revokeInvitation,
     revokeInvitationAsync,
     transferOwnership,

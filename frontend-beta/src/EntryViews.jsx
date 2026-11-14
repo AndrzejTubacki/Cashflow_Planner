@@ -11,7 +11,7 @@ function EntryFrame({ title, subtitle, onSignOut, centered = false, children }) 
     <div className={centered ? "beta-entry beta-entry--centered" : "beta-entry"}>
       <header className="beta-entry-head">
         <div className="beta-wordmark">
-          <span className="beta-mark">&#8353;</span>{t("Cashflow")}<span className="beta-badge">{t("BETA")}</span>
+          <span className="beta-mark">&#8353;</span>{t("Cashflow")}
         </div>
         {onSignOut ? (
           <button type="button" className="beta-btn-small" onClick={onSignOut}>{t("Sign out")}</button>
@@ -23,7 +23,7 @@ function EntryFrame({ title, subtitle, onSignOut, centered = false, children }) 
       </div>
       {children}
       <p className="beta-entry-foot">
-        <a href="/?ui=legacy" onClick={() => localStorage.setItem("cashflow_preferred_ui", "legacy")}>{t("Use the legacy app instead")}</a>
+        <a href="/legacy/?ui=legacy" onClick={() => localStorage.setItem("cashflow_preferred_ui", "legacy")}>{t("Use the legacy app instead")}</a>
       </p>
     </div>
   );
@@ -133,7 +133,7 @@ function AccountPicker({ onSignedIn }) {
                 {(account.globalRoles || []).includes("system_admin")
                   ? formatMessage("Account {id} · administrator", { id: account.id })
                   : account.id}
-                {account.status && account.status !== "active" ? ` · ${account.status}` : ""}
+                {account.status && account.status !== "active" ? ` · ${t(account.status)}` : ""}
               </span>
             </button>
           ))}
@@ -251,6 +251,9 @@ function InternalLogin({ auth, onSignedIn, onRegister, onPasswordSetup }) {
         </div>
       ) : null}
 
+      <p className="beta-signin-foot">
+        <button type="button" className="beta-link-btn" onClick={() => onPasswordSetup({})}>{t("Set password with a token")}</button>
+      </p>
       <p className="beta-signin-foot">{t("Have an invitation?")}{" "}
         <button type="button" className="beta-link-btn" onClick={onRegister}>{t("Create your account")}</button>
       </p>
@@ -313,7 +316,10 @@ function RegisterView({ onSignedIn, onBack }) {
   );
 }
 
-function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
+// Direct token redemption needs no email or enabled password-login form.
+export function PasswordSetupView({ email, token: initialToken, purpose, onSignedIn, onBack }) {
+  const [token, setToken] = useState(initialToken || "");
+  const [saved, setSaved] = useState(false);
   const setup = useSubmit();
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -326,11 +332,20 @@ function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
     }
     setup.run(async () => {
       await apiFetch("/api/auth/internal/password", { method: "POST", body: { token, password }, scoped: false });
-      const result = await apiFetch("/api/auth/internal/login", { method: "POST", body: { email, password }, scoped: false });
-      rememberSession(result);
-      await onSignedIn();
+      if (email) {
+        const result = await apiFetch("/api/auth/internal/login", { method: "POST", body: { email, password }, scoped: false });
+        rememberSession(result);
+        await onSignedIn();
+      } else {
+        setToken(""); setPassword(""); setConfirm(""); setSaved(true);
+      }
     });
   }
+
+  if (saved) return <div className="beta-panel beta-settings-section beta-signin-card">
+    <p className="beta-success" role="status">{t("Password saved. You can now sign in with your email and new password when password sign-in is enabled.")}</p>
+    <button type="button" className="beta-btn-primary" onClick={onBack}>{t("Back to sign in")}</button>
+  </div>;
 
   return (
     <form className="beta-panel beta-settings-section beta-signin-card" onSubmit={handleSubmit}>
@@ -340,10 +355,12 @@ function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
           : t("Choose the password you'll sign in with.")}
       </p>
       {setup.error ? <div className="beta-error">{setup.error}</div> : null}
-      <div className="beta-field">
-        <span>{t("Email")}</span>
-        <strong>{email}</strong>
-      </div>
+      {email ? <div className="beta-field">
+        <span>{t("Email")}</span><strong>{email}</strong>
+      </div> : <label className="beta-field">
+        <span>{t("Password token")}</span>
+        <input id="beta-password-token" value={token} required autoComplete="off" onChange={e => setToken(e.target.value)} />
+      </label>}
       <label className="beta-field">
         <span>{t("New password")}</span>
         <input id="beta-setup-new-password" type="password" value={password} required minLength={12} maxLength={1024}
@@ -356,7 +373,7 @@ function PasswordSetupView({ email, token, purpose, onSignedIn, onBack }) {
           autoComplete="new-password" onChange={e => setConfirm(e.target.value)} />
       </label>
       <button type="submit" className="beta-btn-primary beta-signin-submit" disabled={setup.busy}>
-        {setup.busy ? t("Saving...") : t("Save password and sign in")}
+        {setup.busy ? t("Saving...") : email ? t("Save password and sign in") : t("Save password")}
       </button>
       <p className="beta-signin-foot">
         <button type="button" className="beta-link-btn" onClick={onBack}>{t("Back to sign in")}</button>

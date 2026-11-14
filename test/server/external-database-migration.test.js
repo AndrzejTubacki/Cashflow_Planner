@@ -26,6 +26,8 @@ import { createPostgresBudgetDbService } from "../../src/server/cashflow-postgre
 import { createPostgresGlobalRepository } from "../../src/server/cashflow-postgres-global-repository.js";
 import { createPostgresGlobalStore } from "../../src/server/cashflow-postgres-global-store.js";
 import { createSqliteGlobalStore } from "../../src/server/cashflow-sqlite-global-store.js";
+import { createCashflowDbService } from "../../src/server/cashflow-db-service.js";
+import { createCashflowStoragePaths } from "../../src/server/cashflow-storage-utils.js";
 import {
   createGlobalStoreExport
 } from "../../src/server/cashflow-global-store-export.js";
@@ -112,6 +114,8 @@ async function withTempDirs(fn) {
 function createGlobalSource(dataDir) {
   const db = new Database(path.join(dataDir, "cashflow-global.sqlite"));
   try {
+    initializeGlobalSchema(db);
+    db.exec("INSERT INTO accounts (id, display_name, created_at, updated_at) VALUES ('household', 'Household', datetime('now'), datetime('now')); INSERT INTO account_global_roles (account_id, role, created_at) VALUES ('household', 'system_admin', datetime('now'))");
     initializeGlobalSchema(db, { storageProfileIds: ["household"] });
     db.prepare(`
       INSERT INTO accounts (
@@ -140,6 +144,8 @@ function createGlobalSource(dataDir) {
   }
 }
 
+/** A budget whose ledger is still a yearly file the server has not merged yet
+ * (planning.sqlite carries no ledger_merge_state marker). */
 function createBudgetStorageSource(dataDir) {
   const budgetDir = path.join(dataDir, "household");
   fs.mkdirSync(budgetDir, { recursive: true });
@@ -147,6 +153,7 @@ function createBudgetStorageSource(dataDir) {
   const planning = new Database(path.join(budgetDir, "planning.sqlite"));
   try {
     initializePlanningSchema(planning);
+    planning.prepare("DELETE FROM ledger_merge_state").run();
     planning.prepare(`
       INSERT INTO one_off_transactions (
         id, name, currency, amount, type, date, created_at, updated_at
@@ -1080,8 +1087,9 @@ test("Postgres budget store facade mirrors the SQLite runtime-neutral surface", 
     assert.equal(saveBackupArtifact, "function");
     // SQLite groups planning replacement on one file connection; Postgres
     // already offers a surrounding transaction across all budget storage.
-    const { replacePlanningTables, ...sqliteSharedSurface } = budgetStoreSurface(sqlite);
+    const { replacePlanningTables, planningTransaction, ...sqliteSharedSurface } = budgetStoreSurface(sqlite);
     assert.equal(replacePlanningTables, "function");
+    assert.equal(planningTransaction, "function");
     assert.deepEqual(sharedSurface, sqliteSharedSurface);
 
     await postgres.close();
@@ -1984,6 +1992,7 @@ test("budget store snapshot restore rolls back store transactions on failure", a
       version: SQLITE_BUDGET_STORAGE_EXPORT_VERSION
     },
     reason: "rollback-test",
+    ledgerAudits: [],
     version: BUDGET_STORE_SNAPSHOT_VERSION
   };
   const calls = [];
@@ -2536,6 +2545,25 @@ test("SQLite budget storage export flattens planning and yearly ledger rows for 
     assert.equal(exported.tables.confirmed_transactions[0].budget_id, "household");
     assert.equal(exported.tables.confirmed_transactions[0].ledger_year, 2026);
     assert.equal(exported.tables.confirmed_transactions[0].name, "Confirmed income");
+  });
+});
+
+test("SQLite budget storage export reads ledger rows merged into planning.sqlite", async () => {
+  await withTempDirs(async ({ dataDir, outputDir }) => {
+    createGlobalSource(dataDir);
+    createBudgetStorageSource(dataDir);
+    // The server's merge: rows move into planning.sqlite, the file is retired.
+    createCashflowDbService(createCashflowStoragePaths(dataDir)).openPlanningDb("household").close();
+    assert.equal(fs.existsSync(path.join(dataDir, "household", "ledger_2026.sqlite")), false);
+
+    const result = await createSqliteBudgetStorageExport({ dataDir, outputDir, now: new Date("2026-01-03T04:05:06Z") });
+    assert.equal(result.rowCounts.confirmed_transactions, 1);
+    const exported = JSON.parse(fs.readFileSync(result.exportPath, "utf8"));
+    assert.deepEqual(exported.budgetSources[0].ledgerSchemaVersions, [{ year: 2026, version: LEDGER_SCHEMA_VERSION }]);
+    assert.deepEqual(exported.tables.confirmed_transactions.map(row => [row.id, row.ledger_year, row.name]),
+      [["confirmed_income", 2026, "Confirmed income"]]);
+    // The export opened planning.sqlite read-only and left it unchanged.
+    assert.equal(fs.existsSync(path.join(dataDir, "household", "ledger_2026.sqlite")), false);
   });
 });
 
@@ -3168,7 +3196,7 @@ test("Postgres global repository parameterizes account, user, role, session, and
   });
   await repo.roles.insertSystemAdmin({
     accountId: "alice",
-    grantedByAccountId: "legacy-admin"
+    grantedByAccountId: "household"
   });
   await repo.users.setPermissions("alice", '["admin"]');
 
@@ -3212,8 +3240,8 @@ test("Postgres global repository parameterizes account, user, role, session, and
 
 test("Postgres global repository covers legacy budgets and auth metadata writes", async () => {
   const client = fakePostgresClient([
+    { rows: [{ id: "legacy_budget", status: "active" }] },
     { rows: [] },
-    { rowCount: 1, rows: [] },
     { rowCount: 1, rows: [] },
     { rowCount: 1, rows: [] },
     { rowCount: 1, rows: [] },
@@ -3282,22 +3310,22 @@ test("Postgres global repository covers legacy budgets and auth metadata writes"
   });
   await repo.invitations.revokePendingForTargetAccount("alice");
 
-  assert.match(client.queries[0].sql, /SELECT id FROM accounts/);
-  assert.match(client.queries[1].sql, /INSERT INTO accounts/);
-  assert.match(client.queries[2].sql, /INSERT INTO account_global_roles/);
-  assert.match(client.queries[3].sql, /INSERT INTO budgets/);
-  assert.match(client.queries[4].sql, /INSERT INTO budget_memberships/);
-  assert.match(client.queries[5].sql, /UPDATE auth_config/);
-  assert.equal(client.queries[5].params[3], JSON.stringify({ mode: "internal" }));
-  assert.match(client.queries[6].sql, /INSERT INTO auth_providers/);
-  assert.equal(client.queries[6].params[3], true);
-  assert.equal(client.queries[6].params[7], JSON.stringify({ redirectUri: "https://example.com/callback" }));
-  assert.match(client.queries[7].sql, /INSERT INTO auth_identities/);
-  assert.equal(client.queries[7].params[6], JSON.stringify({ source: "test" }));
-  assert.match(client.queries[8].sql, /INSERT INTO password_credentials/);
-  assert.match(client.queries[9].sql, /INSERT INTO auth_oauth_states/);
-  assert.match(client.queries[10].sql, /INSERT INTO password_reset_tokens/);
-  assert.match(client.queries[11].sql, /UPDATE budget_invitations/);
+  assert.match(client.queries[0].sql, /FROM accounts/);
+  assert.match(client.queries[1].sql, /FROM budgets/);
+  assert.match(client.queries[2].sql, /INSERT INTO budgets/);
+  assert.equal(client.queries[2].params[3], "legacy_budget");
+  assert.match(client.queries[3].sql, /INSERT INTO budget_memberships/);
+  assert.match(client.queries[4].sql, /UPDATE auth_config/);
+  assert.equal(client.queries[4].params[3], JSON.stringify({ mode: "internal" }));
+  assert.match(client.queries[5].sql, /INSERT INTO auth_providers/);
+  assert.equal(client.queries[5].params[3], true);
+  assert.equal(client.queries[5].params[7], JSON.stringify({ redirectUri: "https://example.com/callback" }));
+  assert.match(client.queries[6].sql, /INSERT INTO auth_identities/);
+  assert.equal(client.queries[6].params[6], JSON.stringify({ source: "test" }));
+  assert.match(client.queries[7].sql, /INSERT INTO password_credentials/);
+  assert.match(client.queries[8].sql, /INSERT INTO auth_oauth_states/);
+  assert.match(client.queries[9].sql, /INSERT INTO password_reset_tokens/);
+  assert.match(client.queries[10].sql, /UPDATE budget_invitations/);
 });
 
 test("Postgres global store wraps repository access and transactions", async () => {
@@ -3397,7 +3425,12 @@ test("SQLite global store mirrors the Postgres store surface and initializes leg
     });
 
     const budgets = sqlite.withRepository(repo => repo.budgets.listActiveStorage());
-    assert.equal(budgets.some(budget => budget.id === "legacy_budget"), true);
+    assert.equal(budgets.some(budget => budget.id === "legacy_budget"), false);
+    sqlite.transaction(repo => {
+      repo.accounts.insert({ id: "legacy_budget", displayName: "Legacy budget" });
+      repo.budgets.ensureLegacy({ id: "legacy_budget" });
+      assert.equal(repo.memberships.ownerAccountId("legacy_budget"), "legacy_budget");
+    });
 
     const lockService = sqlite.createLockService({
       now: () => new Date("2026-01-03T04:00:00Z"),

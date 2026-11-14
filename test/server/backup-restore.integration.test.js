@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import { initializeLedgerSchema } from "../../src/server/cashflow-schema.js";
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 
 async function withHarness(fn, options = {}) {
@@ -207,19 +206,11 @@ test("restore rejects corrupt backups before creating a safety backup", async ()
 test("staged backup failures clean partial folders and record failed metadata", async () => {
   for (const failurePhase of [
     "before_planning_copy",
-    "before_ledger_copy",
     "before_backup_validation",
     "before_success_metadata"
   ]) {
     let failBackup = false;
     await withHarness(async harness => {
-      const ledgerDb = harness.openLedgerDb("2026");
-      try {
-        initializeLedgerSchema(ledgerDb);
-      } finally {
-        ledgerDb.close();
-      }
-
       failBackup = true;
       const failed = await harness.request("/api/backup", { method: "POST", body: {} });
       assert.equal(failed.response.status, 500, failurePhase);
@@ -304,7 +295,7 @@ test("restore keeps its target backup until the deferred safety operation finish
   assert.equal(restored.oneOffs.some(row => row.id === removed.id), false);
 }));
 
-test("restore rollback failures return structured recovery details", async () => {
+test("restore failure before application needs no compensating replacement", async () => {
   let failRestore = false;
   await withHarness(async harness => {
     await harness.api("/api/backup", { method: "POST", body: {} });
@@ -316,10 +307,9 @@ test("restore rollback failures return structured recovery details", async () =>
       body: {}
     });
     assert.equal(failed.response.status, 500);
-    assert.equal(failed.body.details.phase, "rollback_failed");
-    assert.equal(typeof failed.body.details.safetyBackup, "string");
-    assert.match(failed.body.details.originalError, /forced restore failure/);
-    assert.match(failed.body.details.rollbackError, /forced restore rollback failure/);
+    assert.match(failed.body.error, /forced restore failure/);
+    assert.equal(failed.body.details, undefined);
+    assert.equal(harness.errors.some(event => event.kind === "cashflow_restore_rolled_back"), false);
   }, {
     backupServiceHook: ({ phase }) => {
       if (!failRestore) return;
@@ -433,11 +423,36 @@ test("operational retention prunes bounded rows and completed recovery folders",
     check.close();
   }
   assert.equal(fs.existsSync(pending), true);
-  assert.equal(fs.existsSync(staleTemp), false);
-  assert.equal(fs.existsSync(staleMigrationTemp), false);
+  // A backup-like name without a Cashflow artifact is not deletion authority.
+  assert.equal(fs.existsSync(staleTemp), true);
+  assert.equal(fs.existsSync(staleMigrationTemp), true);
   assert.equal(fs.existsSync(unrelatedTemp), true);
   assert.equal(
     fs.readdirSync(builtInBackupDir).filter(name => name.startsWith("migration_backup_completed_")).length,
     2
   );
 }));
+
+test("SQLite restore pins both selected and safety backups under admin limits during overlapping backup work", async () => {
+  let harnessRef;
+  let checked = false;
+  await withHarness(async harness => {
+    harnessRef = harness;
+    await harness.api("/api/backup", { method: "POST", body: {} });
+    const selected = latestBackupId(harness);
+    await harness.api("/api/admin/options", { method: "PUT", body: { backup_max_retention_count: 1, backup_max_age_days: 1 } });
+    const result = await harness.api(`/api/restore/${encodeURIComponent(selected)}`, { method: "POST", body: {} });
+    assert.equal(result.restore.ok, true);
+    assert.equal(checked, true);
+    assert.ok(fs.existsSync(result.restore.safetyBackup));
+  }, {
+    inProcess: true,
+    backupServiceHook: async ({ phase, backupPath, safetyBackup }) => {
+      if (phase !== "before_restore_apply") return;
+      await harnessRef.api("/api/backup", { method: "POST", body: {} });
+      assert.ok(fs.existsSync(backupPath));
+      assert.ok(fs.existsSync(safetyBackup));
+      checked = true;
+    }
+  });
+});

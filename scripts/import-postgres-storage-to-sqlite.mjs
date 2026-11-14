@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { ENGINE_AUDIT_HOST_OPTIONS } from "../src/engine/engine-host-capabilities.js";
+
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,16 +32,19 @@ function dataDirLooksOccupied(dataDir) {
   return fs.existsSync(path.join(path.resolve(dataDir), "cashflow-global.sqlite"));
 }
 
+/** Validate first, then restore into owned staging files before publishing.
+ * Only the calling host can enable origins; input JSON cannot enable them. */
 export async function importPostgresStorageToSqlite({
   apply = false,
   dataDir = process.env.DATA_DIR || path.resolve("data"),
   force = false,
+  allowStandaloneOrigins = false,
   input = ""
 } = {}) {
   if (!input) throw new Error("--input is required");
 
   const snapshot = normalizeCashflowStorageSnapshot(
-    JSON.parse(fs.readFileSync(path.resolve(input), "utf8"))
+    JSON.parse(fs.readFileSync(path.resolve(input), "utf8")), { allowStandaloneOrigins }
   );
 
   if (!apply) {
@@ -74,6 +79,7 @@ export async function importPostgresStorageToSqlite({
     userDataDir: paths.userDataDir
   });
   const budgetStore = createSqliteBudgetStore({
+    allowStandaloneOrigins,
     listLedgerYears: dbService.listLedgerYears,
     openLedgerDb: dbService.openLedgerDb,
     openPlanningDb: dbService.openPlanningDb
@@ -88,6 +94,7 @@ export async function importPostgresStorageToSqlite({
     result = await restoreCashflowStorageSnapshot({
       budgetStore,
       globalStore,
+      allowStandaloneOrigins,
       snapshot
     });
 
@@ -134,6 +141,8 @@ async function main() {
     string: ["--input","--data-dir"],
     boolean: ["--apply","--force","--pretty"],
     defaults: {
+    // The installed CLI supports the same financial format as engine 0.4.
+    ...ENGINE_AUDIT_HOST_OPTIONS,
     apply: false,
     dataDir: process.env.DATA_DIR || path.resolve("data"),
     force: false,

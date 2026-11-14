@@ -1,5 +1,7 @@
 import { useRef, useState } from "react";
 import { apiFetch, downloadFile } from "./api.js";
+import BackupsPanel from "./BackupsPanel.jsx";
+import { backupDraft, backupPermissions, backupSettings } from "./backups.js";
 import {
   FX_PROVIDER_OPTIONS,
   HOLIDAY_COUNTRIES,
@@ -174,13 +176,13 @@ function DataPortabilityPanel({ onRefresh }) {
 function describeValidation(result) {
   const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
   if (!warnings.length) return t("Validation passed. No warnings found.");
-  const lines = [warnings.length === 1 ? t("Validation found 1 warning:") : formatMessage("Validation found {count} warnings:", { count: warnings.length })];
-  warnings.slice(0, 8).forEach(warning => lines.push(`• ${warning?.message || warning?.type || t("Validation warning")}`));
+  const lines = [t("Review the warnings below before trusting the projection."), warnings.length === 1 ? t("Validation found 1 warning:") : formatMessage("Validation found {count} warnings:", { count: warnings.length })];
+  warnings.slice(0, 8).forEach(warning => lines.push(`• ${t(warning?.message || warning?.type || "Validation warning")}`));
   if (warnings.length > 8) lines.push(formatMessage("There are {count} additional warnings.", { count: warnings.length - 8 }));
   return lines.join("\n");
 }
 
-export default function SettingsView({ snapshot, onRefresh, validationResult = null, onValidation = () => {}, onDismissValidation = () => {}, embedded = false }) {
+export default function SettingsView({ snapshot, onRefresh, validationResult = null, onValidation = () => {}, onDismissValidation = () => {}, onRestored = () => {}, embedded = false }) {
   const settings = snapshot?.settings || {};
   const canMaintain = (snapshot?.session?.capabilities || []).includes("budget:maintain");
   const canValidate = (snapshot?.session?.capabilities || []).includes("budget:validate");
@@ -220,7 +222,9 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
   const [minReserveAmount, setMinReserveAmount] = useState(settings.minimum_reserve_amount ?? 0);
   const [compactionMonths, setCompactionMonths] = useState(settings.ledger_history_compaction_months ?? 0);
 
-  const [notificationChannel, setNotificationChannel] = useState(settings.notification_channel || "ntfy");
+  // Any combination of ntfy and Discord; an unset list means the single legacy channel.
+  const [notificationChannels, setNotificationChannels] = useState(
+    (settings.notification_channels || settings.notification_channel || "ntfy").split(",").filter(Boolean));
   const [ntfyUrl, setNtfyUrl] = useState(settings.ntfy_url || "");
   const [ntfyAuthToken, setNtfyAuthToken] = useState(settings.ntfy_auth_token || "");
   const [showNtfyToken, setShowNtfyToken] = useState(false);
@@ -233,6 +237,9 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
   const [notifyPriorities, setNotifyPriorities] = useState(() => Object.fromEntries(
     NOTIFICATION_TYPES.map(n => [n.key, settings[`ntfy_priority_${n.key}`] || "default"])
   ));
+
+  const [backupPreferences, setBackupPreferences] = useState(() => backupDraft(settings));
+  const [backupBackend, setBackupBackend] = useState("");
 
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -274,6 +281,7 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
       await apiFetch("/api/settings", {
         method: "PUT",
         body: {
+          ...(backupPermissions(snapshot).settings ? backupSettings(backupPreferences, backupBackend) : {}),
           locale,
           ledger_currency: ledgerCurrency,
           timezone,
@@ -287,7 +295,8 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
           minimum_reserve_enabled: minReserveEnabled ? 1 : 0,
           minimum_reserve_amount: Number(minReserveAmount) || 0,
           ledger_history_compaction_months: Number(compactionMonths) || 0,
-          notification_channel: notificationChannel,
+          notification_channel: notificationChannels[0] || "ntfy",
+          notification_channels: notificationChannels,
           ntfy_url: ntfyUrl,
           ntfy_auth_token: ntfyAuthToken,
           discord_webhook_url: discordWebhookUrl,
@@ -320,7 +329,7 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
   }
 
   async function handleCompact() {
-    if (!window.confirm(t("Compact old confirmed ledger rows? A safety backup will be created first."))) return;
+    if (!window.confirm(t("Summarize older payments? A safety backup will be created first, and payment details will be retained."))) return;
     setCompacting(true);
     setError("");
     try {
@@ -381,7 +390,6 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
             {canValidate ? <button type="button" className="beta-btn-small" disabled={Boolean(maintenanceBusy)} onClick={handleValidate}>{maintenanceBusy === "validate" ? t("Validating...") : t("Validate data")}</button> : null}
             {canMaintain ? <button type="button" className="beta-btn-small" disabled={Boolean(maintenanceBusy)} onClick={handleRegenerate}>{maintenanceBusy === "regenerate" ? t("Regenerating...") : t("Regenerate projections")}</button> : null}
           </div>
-          {validationResult ? <div className={`beta-validation-panel ${validationResult.kind === "error" ? "beta-error" : "beta-success"}`}><pre>{validationResult.message}</pre><button type="button" className="beta-btn-small" onClick={onDismissValidation}>{t("Dismiss")}</button></div> : null}
         </div>
       ) : null}
 
@@ -517,15 +525,15 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
                 <input type="number" step="0.01" value={minReserveAmount} onChange={e => setMinReserveAmount(e.target.value)} />
               </label>
               <label className="beta-field">
-                <span>{t("Ledger history compaction (months)")}</span>
+                <span>{t("Historical payment summaries (months)")}</span>
                 <input type="number" min="0" max="600" value={compactionMonths} onChange={e => setCompactionMonths(e.target.value)} />
-                <small className="beta-hint">{t("Use 0 to keep detailed ledger history forever.")}</small>
+                <small className="beta-hint">{t("Use 0 to disable summaries. Payment details are always retained.")}</small>
               </label>
             </div>
             {canMaintain ? (
               <div className="beta-form-actions beta-form-actions-start">
                 <button type="button" className="beta-btn-small" disabled={compacting} onClick={handleCompact}>
-                  {compacting ? t("Compacting...") : t("Compact ledger history now")}
+                  {compacting ? t("Summarizing...") : t("Summarize older payments now")}
                 </button>
               </div>
             ) : null}
@@ -537,13 +545,15 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
           <div className="beta-settings-section">
             <p className="beta-hint">{t("Cashflow checks the ledger and sends queued notifications at the same profile-local time.")}</p>
             <div className="beta-form-grid beta-form-grid-wide beta-form-grid-three">
-              <label className="beta-field">
-                <span>{t("Notification service")}</span>
-                <select value={notificationChannel} onChange={e => setNotificationChannel(e.target.value)}>
-                  <option value="ntfy">{t("ntfy")}</option>
-                  <option value="discord">{t("Discord")}</option>
-                </select>
-              </label>
+              <fieldset className="beta-field">
+                <legend>{t("Notification services")}</legend>
+                {[["ntfy", t("ntfy")], ["discord", t("Discord")]].map(([value, label]) => <label key={value} className="beta-check">
+                  <input type="checkbox" name={`notification_channel_${value}`} checked={notificationChannels.includes(value)}
+                    onChange={e => setNotificationChannels(previous => ["ntfy", "discord"].filter(channel =>
+                      channel === value ? e.target.checked : previous.includes(channel)))} />
+                  {label}
+                </label>)}
+              </fieldset>
               <label className="beta-field">
                 <span>{t("Full ntfy URL")}</span>
                 <input type="url" value={ntfyUrl} onChange={e => setNtfyUrl(e.target.value)} placeholder="https://ntfy.example.com/topic" />
@@ -596,6 +606,9 @@ export default function SettingsView({ snapshot, onRefresh, validationResult = n
             </div>
           </div>
         </details>
+
+        <BackupsPanel snapshot={snapshot} draft={backupPreferences} onChange={setBackupPreferences}
+          backend={backupBackend} onBackend={setBackupBackend} onRefresh={onRefresh} onRestored={onRestored} />
 
         <div className="beta-form-actions">
           <button type="submit" className="beta-btn-primary" disabled={saving}>

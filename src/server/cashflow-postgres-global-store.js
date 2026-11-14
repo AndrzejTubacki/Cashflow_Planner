@@ -210,7 +210,7 @@ export async function createPostgresGlobalStore({
     checkReadiness: dbService.checkReadiness,
     close: dbService.close,
     createLockService,
-    createAuthRateLimitStore: () => createPostgresAuthRateLimitStore({ withClient: dbService.withClient }),
+    createAuthRateLimitStore: (namespace) => createPostgresAuthRateLimitStore({ withClient: dbService.withClient, namespace }),
     initialize: dbService.initializeGlobalSchema,
     initializeLockSchema,
     insertRows,

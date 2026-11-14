@@ -4,6 +4,7 @@ import {
   POSTGRES_GLOBAL_SCHEMA_VERSION,
   POSTGRES_GLOBAL_TABLES
 } from "./cashflow-postgres-global-schema.js";
+import { validateStandaloneTransferRecord } from './cashflow-standalone-transfer-record.js';
 
 export const SQLITE_GLOBAL_METADATA_EXPORT_FORMAT = "cashflow-sqlite-global-metadata-export";
 export const SQLITE_GLOBAL_METADATA_EXPORT_VERSION = 1;
@@ -90,7 +91,7 @@ function normalizeRowsForTable(table, rows) {
       normalized[column] = normalizeRowValue(table, column, row[column], rowIndex);
     }
 
-    return normalized;
+    return table === 'cashflow_standalone_transfers' ? validateStandaloneTransferRecord(normalized) : normalized;
   });
 }
 
@@ -117,7 +118,7 @@ export function normalizeSqliteGlobalMetadataExport(payload) {
   const tables = {};
   const rowCounts = {};
   for (const table of POSTGRES_GLOBAL_TABLES) {
-    const rows = normalizeRowsForTable(table, payload.tables[table] || []);
+    const rows = table.startsWith("app_device") ? [] : normalizeRowsForTable(table, payload.tables[table] || []);
     tables[table] = rows;
     rowCounts[table] = rows.length;
   }

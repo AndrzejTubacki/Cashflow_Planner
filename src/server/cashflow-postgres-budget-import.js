@@ -4,6 +4,8 @@ import {
   POSTGRES_BUDGET_TABLES
 } from "./cashflow-postgres-budget-schema.js";
 import { normalizeUserId } from "./cashflow-user-utils.js";
+import { createLedgerAuditStore } from "./cashflow-ledger-audit-store.js";
+import { normalizeLedgerAuditFact } from "./cashflow-ledger-correction-service.js";
 
 export const SQLITE_BUDGET_STORAGE_EXPORT_FORMAT = "cashflow-sqlite-budget-storage-export";
 export const SQLITE_BUDGET_STORAGE_EXPORT_VERSION = 1;
@@ -165,6 +167,9 @@ export function normalizeSqliteBudgetStorageExport(payload) {
       detail("", 0, "version", "unsupported")
     ]);
   }
+  if (Object.hasOwn(payload, 'ledgerAudits') || Object.hasOwn(payload, 'ledgerAudit')) {
+    throw importValidationError('Row-only v1 storage exports cannot carry correction history; use a complete v2 snapshot');
+  }
   if (!isPlainObject(payload.tables)) {
     throw importValidationError("Budget storage export tables must be an object", [
       detail("", 0, "tables", "required")
@@ -231,14 +236,23 @@ async function insertRows(client, tableName, rows) {
   return inserted;
 }
 
+/** Import verified financial storage on the supplied owning connection. The
+ * host must explicitly enable origins; source JSON cannot request that policy.
+ * manageTransaction=false requires the caller to own the encompassing commit. */
 export async function importSqliteBudgetStorageToPostgres({
   client,
   dryRun = true,
   initializeSchema = true,
   manageTransaction = true,
+  allowStandaloneOrigins = false,
   payload
 } = {}) {
-  const normalized = normalizeSqliteBudgetStorageExport(payload);
+  if (typeof allowStandaloneOrigins !== 'boolean') throw importValidationError('Explicit standalone-origin host policy required');
+  // Audited migrations reuse runtime snapshot v2; legacy row-only exports stay
+  // readable. Load lazily because snapshot normalization uses this row parser.
+  const snapshot = payload?.format === 'cashflow-budget-store-snapshot'
+    ? (await import('./cashflow-budget-store-snapshot.js')).normalizeBudgetStoreSnapshot(payload, { allowStandaloneOrigins }) : null;
+  const normalized = snapshot?.payload || normalizeSqliteBudgetStorageExport(payload);
   if (dryRun) {
     return {
       ok: true,
@@ -256,8 +270,27 @@ export async function importSqliteBudgetStorageToPostgres({
     if (initializeSchema) {
       await client.query(createPostgresBudgetStorageSchemaSql({ includeTransaction: false }));
     }
+    const ids = [...new Set([...normalized.budgetSources.map(source => source?.budgetId),
+      ...Object.values(normalized.tables).flat().map(row => row.budget_id)].filter(Boolean))];
+    const existingAudit = await client.query('SELECT budget_id FROM cashflow_ledger_audit_state WHERE budget_id = ANY($1::text[])', [ids]);
+    if (existingAudit.rows.length) {
+      throw importValidationError('Migration cannot append to an audited destination; use a fresh target');
+    }
     for (const tableName of POSTGRES_BUDGET_TABLES) {
       inserted[tableName] = await insertRows(client, tableName, normalized.tables[tableName]);
+    }
+    for (const audit of snapshot?.ledgerAudits || []) {
+      const query = async (sql, values = []) => {
+        let index = 0;
+        return (await client.query(sql.replace(/\?/g, () => `$${++index}`), values)).rows;
+      };
+      // Original evidence and events share the ledger import transaction. A
+      // late failure must roll back global metadata and financial rows too.
+      await createLedgerAuditStore({ budgetId: audit.budgetId, query, allowStandaloneOrigins,
+        // Migration clients use pg's default DATE parser; cast explicitly to
+        // avoid locale/timezone shifts while retaining the stored calendar day.
+        loadEffectiveRows: async () => (await query('SELECT *, date::text AS date, confirmed_date::text AS confirmed_date FROM confirmed_transactions WHERE budget_id = ?', [audit.budgetId]))
+          .map(row => normalizeLedgerAuditFact(row, audit.budgetId)) }).restoreSnapshot(audit);
     }
     if (manageTransaction) await client.query("COMMIT");
   } catch (error) {

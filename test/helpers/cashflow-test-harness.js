@@ -1,3 +1,4 @@
+import { inProcessFetch } from './in-process-http.js';
 import express from "express";
 import Database from "better-sqlite3";
 import fs from "node:fs";
@@ -7,6 +8,8 @@ import path from "node:path";
 
 import { createCashflowModule } from "../../src/cashflow.js";
 import { setTodayOverrideForTests } from "../../src/server/cashflow-date-utils.js";
+import { createCashflowDbService } from "../../src/server/cashflow-db-service.js";
+import { createCashflowStoragePaths } from "../../src/server/cashflow-storage-utils.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
@@ -39,7 +42,7 @@ async function createCashflowTestHarness(options = {}) {
   const runtimeRoot = await mkdtemp(path.join(tmpdir(), "cashflow-test-"));
   const dataDir = path.join(runtimeRoot, "data");
   const logsDir = path.join(runtimeRoot, "logs");
-  const localeDir = path.join(repoRoot, "public", "app", "cashflow", "locales");
+  const localeDir = path.join(repoRoot, "public-legacy", "app", "cashflow", "locales");
   const userId = options.userId || "local";
   const fxSnapshot = Object.prototype.hasOwnProperty.call(options, "fxSnapshot")
     ? options.fxSnapshot
@@ -55,14 +58,21 @@ async function createCashflowTestHarness(options = {}) {
 
   const cashflow = await createCashflowModule({
     appVersion: "0.0.0-test",
+    allowStandaloneOrigins: options.allowStandaloneOrigins ?? true,
     authProviderHook: options.authProviderHook || null,
+    appSnapshotReadHook: options.appSnapshotReadHook || null,
+    ...(options.deviceNow ? { deviceNow: options.deviceNow } : {}),
+    ...(options.sessionNow ? { sessionNow: options.sessionNow } : {}),
     backupServiceHook: options.backupServiceHook || null,
+    deviceMutationHook: options.deviceMutationHook || null,
     dataDir,
+    ...(options.databaseConfig ? { databaseConfig: options.databaseConfig } : {}),
     envFilePath: options.envFilePath || null,
     localeDir,
     getCurrentFxSnapshot: () => fxSnapshot,
     // Allow deterministic confirmation barriers while retaining real storage/recovery.
-    getFxSnapshotForDate: options.getFxSnapshotForDate || (() => fxSnapshot),
+    getFxSnapshotForDate: Object.hasOwn(options, "getFxSnapshotForDate")
+      ? options.getFxSnapshotForDate : (() => fxSnapshot),
     lockService: options.lockService || null,
     fetchImpl: options.fetchImpl || fetch,
     portabilityMutationHook: options.portabilityMutationHook || null,
@@ -73,21 +83,37 @@ async function createCashflowTestHarness(options = {}) {
   });
 
   if (options.initializeUser !== false) {
+    // Test setup explicitly creates its actor; opening financial storage alone
+    // must never bootstrap an account.
+    cashflow.globalStore.transaction(repo => {
+      repo.accounts.insert({ id: userId, displayName: userId });
+      repo.roles.insertSystemAdmin({ accountId: userId });
+      repo.budgets.insert({ id: userId, displayName: userId, createdByAccountId: userId });
+      repo.memberships.insertOwner({ budgetId: userId, accountId: userId });
+    });
     cashflow.getSnapshot(userId);
   }
 
   let server = null;
   let baseUrl = null;
+  let inProcessApp = null;
   let sessionCookie = "";
+  const oauthCookies = new Map();
   let csrfToken = "";
 
   async function startServer() {
-    if (server) return baseUrl;
+    if (server || inProcessApp) return baseUrl;
 
     const app = express();
     app.use(express.json({ limit: "10mb" }));
     app.use(express.urlencoded({ extended: true }));
     cashflow.registerRoutes(app);
+    // Opt-in transport keeps route regressions runnable without socket access.
+    if (options.inProcess === true || (options.inProcess === undefined && process.env.CASHFLOW_TEST_IN_PROCESS === '1')) {
+      inProcessApp = app;
+      baseUrl = 'http://cashflow.test';
+      return baseUrl;
+    }
 
     server = await new Promise(resolve => {
       const listeningServer = app.listen(0, "127.0.0.1", () => resolve(listeningServer));
@@ -109,10 +135,12 @@ async function createCashflowTestHarness(options = {}) {
         ? { "x-cashflow-csrf-token": csrfToken }
         : {}),
       ...(requestOptions.skipUserHeader || useSession ? {} : { "x-cashflow-user-id": userId }),
+      ...(pathname.startsWith("/api/auth/providers/") && oauthCookies.size ? { cookie: [useSession ? sessionCookie : "", ...oauthCookies.values()].filter(Boolean).join("; ") } : {}),
       ...(requestOptions.headers || {})
     };
 
-    const response = await fetch(url, {
+    const transport = inProcessApp ? (url, options) => inProcessFetch(inProcessApp, url, options) : fetch;
+    const response = await transport(url, {
       ...requestOptions,
       useSession: undefined,
       headers,
@@ -131,8 +159,12 @@ async function createCashflowTestHarness(options = {}) {
       : null;
     const setCookie = response.headers.get("set-cookie");
     if (setCookie) {
-      sessionCookie = setCookie.split(";")[0];
-      if (/^cashflow_session=$/.test(sessionCookie)) sessionCookie = "";
+      for (const item of setCookie.split(/,(?=\s*[A-Za-z0-9_-]+=)/)) {
+        const cookie = item.trim().split(';')[0];
+        const name = cookie.split('=')[0];
+        if (name.startsWith('cashflow_oauth_') || name.startsWith('__Host-cashflow_oauth_')) oauthCookies.set(name, cookie);
+        if (name === 'cashflow_session') sessionCookie = cookie === 'cashflow_session=' ? '' : cookie;
+      }
     }
     if (body?.csrfToken) csrfToken = String(body.csrfToken);
 
@@ -156,8 +188,9 @@ async function createCashflowTestHarness(options = {}) {
     return new Database(planningDbPath(dataDir, targetUserId));
   }
 
+  // Schema 22 keeps the ledger inside planning.sqlite; use the server's year view.
   function openLedgerDb(year, targetUserId = userId) {
-    return new Database(ledgerDbPath(dataDir, targetUserId, year));
+    return createCashflowDbService(createCashflowStoragePaths(dataDir)).openLedgerDb(targetUserId, year);
   }
 
   async function cleanup() {
@@ -168,6 +201,9 @@ async function createCashflowTestHarness(options = {}) {
       server = null;
     }
 
+    // The public module does not expose budgetStore. Close its full lifecycle
+    // so financial pools and runtime locks cannot survive fixture teardown.
+    await cashflow.close();
     await rm(runtimeRoot, { recursive: true, force: true });
     setTodayOverrideForTests(previousTestToday);
   }

@@ -423,6 +423,7 @@ test("prepared full import plans apply through backend-neutral store writers", a
   const calls = [];
   const batchSummaries = [];
   const repo = {
+    async listPlanningRows() { return [{ id: 1 }]; },
     async insertConfirmedTransactions(budgetId, rows) {
       calls.push(["repo-insert-ledger", budgetId, rows.length]);
       return { inserted: rows.length };
@@ -822,6 +823,7 @@ function successfulReplaceBudgetStore(calls) {
     async transaction(fn) {
       calls.push(["begin"]);
       const repo = {
+        async listPlanningRows() { return [{ id: 1 }]; },
         async listLedgerYears() {
           return [];
         },
@@ -981,4 +983,38 @@ test("importFullDataAsync rolls back when projection regeneration fails after a 
   );
 
   assert.equal(logs.some(call => call[1] === "cashflow_async_import_rolled_back"), true);
+});
+
+test('CFSEC-01 prepared ordinary and audited imports refuse a changed notification association under the writer lock', async () => {
+  let current = { id: 1, ntfy_url: 'https://93.184.216.34/topic', ntfy_auth_token: 'tk_fixture' };
+  let locked = false, writes = 0;
+  const writer = {
+    async insertPlanningRows() { writes++; },
+    async insertConfirmedTransactions() { writes++; },
+    async lockBudgetLedger() { locked = true; },
+    async listPlanningRows() { assert.equal(locked, true); return [current]; },
+    async replacePlanningRows() { writes++; },
+    async replaceConfirmedTransactionsForYear() { writes++; }
+  };
+  const service = createCashflowDataPortabilityService({
+    budgetStore: {
+      ...writer,
+      async listPlanningRows() { return [current]; },
+      async transaction(work) { locked = false; return work(writer); }
+    },
+    generateId: prefix => `${prefix}-fixture`, listLedgerYears: () => []
+  });
+  for (const audited of [false, true]) {
+    const sample = service.exportSampleData();
+    const preflight = await service.prepareFullImportPlanAsync('fixture', sample, 'replace');
+    if (audited) preflight.importPlan.auditedSnapshot = {
+      format: 'cashflow-budget-store-snapshot', version: 2,
+      payload: createBudgetStorePayloadFromFullExport({ budgetId: 'fixture', exportData: preflight.exportData }),
+      ledgerAudits: []
+    };
+    current = { ...current, ntfy_auth_token: `${current.ntfy_auth_token}_changed` };
+    await assert.rejects(() => service.applyPreparedFullImportPlanAsync(preflight), error =>
+      error.status === 409 && /Notification settings changed/.test(error.message));
+    assert.equal(writes, 0);
+  }
 });

@@ -68,6 +68,8 @@ function createSnapshotSource(dataDir) {
 
   const global = new Database(path.join(dataDir, "cashflow-global.sqlite"));
   try {
+    initializeGlobalSchema(global);
+    global.exec("INSERT INTO accounts (id, display_name, created_at, updated_at) VALUES ('household', 'Household', datetime('now'), datetime('now'))");
     initializeGlobalSchema(global, { storageProfileIds: ["household"] });
   } finally {
     global.close();

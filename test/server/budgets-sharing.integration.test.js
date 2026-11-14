@@ -152,7 +152,8 @@ test("budget metadata async mutations can use an external global-store transacti
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     archived_at: null,
-    deleted_at: null
+    deleted_at: null,
+    revision: 1
   };
   const repo = {
     audit: {
@@ -175,9 +176,12 @@ test("budget metadata async mutations can use an external global-store transacti
         budget.status = "archived";
         budget.archived_at = "2026-01-02T00:00:00Z";
       },
-      updateDisplayName(id, displayName) {
+      updateDisplayName(id, displayName, expectedRevision) {
         assert.equal(id, budget.id);
+        assert.equal(expectedRevision, budget.revision);
         budget.display_name = displayName;
+        budget.revision += 1;
+        return { ...budget };
       }
     },
     memberships: {
@@ -945,7 +949,8 @@ test("authorization matrix covers account, budget role, and system-admin context
       return result;
     };
 
-    await assertStatus("none-mode requests without a usable budget actor are denied", 403, "/api/budgets", null);
+    // A budget selector alone supplies no authenticated actor.
+    await assertStatus("none-mode requests without a usable budget actor are denied", 401, "/api/budgets", null);
     await assertStatus("account without membership cannot read a selected budget", 403, "/api", outsider);
     await assertStatus("system admin without membership cannot read budget data", 403, "/api", admin);
 

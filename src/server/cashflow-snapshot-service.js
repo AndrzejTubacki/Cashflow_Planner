@@ -1,8 +1,10 @@
+import { fxRateAgeDays } from "../engine/cashflow-fx-freshness.js";
 import { DEFAULT_FUTURE_PERIODS, DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { recurringOccurrencesInPeriod, todayInTimezone } from "./cashflow-date-utils.js";
 import {
   addMoneyAmounts,
   getBufferedFxForCurrency,
+  getFxRateInfoForPair,
   multiplyMoney,
   normalizeCurrency,
   roundMoneyAmount,
@@ -17,6 +19,37 @@ import {
 import { periodAnchorOverridesForIncome } from "./cashflow-period-utils.js";
 import { compareFutureRowsForDisplay, computeReservedBalanceByRowId } from "./cashflow-planning-balance-plan.js";
 import { compareLedgerRowsForDisplay, confirmedRowsForDisplay } from "./cashflow-display-order.js";
+
+// Report the observations actually selected for budget planning. Direct pairs
+// take precedence over PLN legs, so obsolete fallback rows cannot leave a
+// warning behind after a successful direct-pair refresh.
+function staleFxRatesForBudget(fxSnapshot, settings, rows, today) {
+  const ledgerCurrency = normalizeCurrency(settings?.ledger_currency || "PLN");
+  const currencies = new Set([
+    ...normalizeFxCurrencyList(settings?.fx_used_currencies, ledgerCurrency),
+    ...rows.map(row => normalizeCurrency(row.currency))
+  ]);
+  const stale = new Map();
+  const observe = (entry, base, quote) => {
+    if (base === quote) return;
+    const rateDate = entry.rateDate || entry.effectiveDate;
+    const ageDays = fxRateAgeDays(today, rateDate, entry.source);
+    if (ageDays > 14) stale.set(`${base}/${quote}`, { pair: `${base}/${quote}`, rateDate, ageDays });
+  };
+  for (const currency of currencies) {
+    if (currency === ledgerCurrency) continue;
+    let info;
+    try { info = getFxRateInfoForPair(currency, ledgerCurrency, fxSnapshot); }
+    catch { continue; } // Missing-rate reporting is handled separately.
+    if (info.source === "derived") {
+      observe(info.details.baseToPln, currency, "PLN");
+      observe(info.details.quoteToPln, ledgerCurrency, "PLN");
+    } else {
+      observe(info.details, currency, ledgerCurrency);
+    }
+  }
+  return [...stale.values()].sort((a, b) => a.pair.localeCompare(b.pair));
+}
 
 export function createCashflowSnapshotService({
   budgetStore = null,
@@ -547,6 +580,9 @@ export function createCashflowSnapshotService({
         latestProjectionSnapshot: latestSnapshot || null,
         ledger: ledger || [],
         missingFxRates: [...missingFxRates],
+        staleFxRates: staleFxRatesForBudget(fxSnapshot, settings, [
+          ...recurringExpenses, ...recurringIncomes, ...oneOffs, ...goals, ...flexTransactions, ...pendingTransactions
+        ], today),
         availableLocales: listAvailableLocales(),
         generatedAt: new Date().toISOString()
       };
@@ -933,6 +969,9 @@ export function createCashflowSnapshotService({
       latestProjectionSnapshot: latestSnapshot || null,
       ledger: ledger || [],
       missingFxRates: [...missingFxRates],
+      staleFxRates: staleFxRatesForBudget(fxSnapshot, settings, [
+        ...recurringExpenses, ...recurringIncomes, ...oneOffs, ...goals, ...flexTransactions, ...pendingTransactions
+      ], today),
       availableLocales: listAvailableLocales(),
       generatedAt: new Date().toISOString()
     };

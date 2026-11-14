@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import crypto from 'node:crypto';
 import express from 'express';
+import { createLedgerCorrectionService } from '../../src/server/cashflow-ledger-correction-service.js';
 import { createCashflowBackupService } from '../../src/server/cashflow-backup-service.js';
 import { createCashflowLedgerService } from '../../src/server/cashflow-ledger-service.js';
 import { createPostgresGlobalStore } from '../../src/server/cashflow-postgres-global-store.js';
@@ -27,6 +28,9 @@ function artifactStoreFixture({ artifactPayload = null } = {}) {
     async listPlanningRows(_budgetId, tableName) {
       if (tableName === 'backup_metadata') return metadata;
       return [];
+    },
+    async listBackupArtifactsForPruning() {
+      return metadata.filter(row => row.success && artifacts.has(row.id) && row.backup_path === `postgres-backup:${row.id}`);
     },
     async readBackupArtifact(budgetId, artifactId) {
       calls.push({ artifactId, budgetId, operation: 'read' });
@@ -93,6 +97,7 @@ async function fixture(fn) {
         budgetStore: store,
         generateId: prefix => `${prefix}_${crypto.randomUUID()}`,
         getSettingsAsync: async id => (await store.listPlanningRows(id, 'settings'))[0],
+        getGlobalOptionsAsync: async () => (await global.listRows('global_options'))[0],
         backupRootDir: () => { throw new Error('Postgres backup must not use local files'); },
         backupHook: details => hook(details),
         lockService,
@@ -181,7 +186,7 @@ test('Postgres restore failure rolls back and retains both backup artifacts', ga
   const ref = await service.createBackupAsync('household');
   await pool.query("UPDATE settings SET minimum_reserve_amount = 123 WHERE budget_id = 'household'");
   setHook(({ phase }) => { if (phase === 'before_restore_apply') throw new Error('injected restore failure'); });
-  await assert.rejects(service.restoreBackupAsync('household', ref.slice('postgres-backup:'.length)), /rolled back/);
+  await assert.rejects(service.restoreBackupAsync('household', ref.slice('postgres-backup:'.length)), /injected restore failure/);
   assert.equal(Number((await store.listPlanningRows('household', 'settings'))[0].minimum_reserve_amount), 123);
   assert.equal((await store.listPlanningRows('household', 'backup_metadata')).length, 2);
 }));
@@ -296,3 +301,102 @@ test('Postgres backup blocks a racing mutation for its whole snapshot read, so t
   assert.equal(pendingIds.includes('racing_pending'), true);
   assert.equal(confirmedIds.includes('racing_confirmed'), false);
 }));
+
+
+test('Postgres backup artifacts preserve correction audit and keep pre-restore audit in the safety copy', gated,
+  async () => fixture(async ({ service, store }) => {
+    const capturedAt = '2026-10-23T12:00:00.000Z';
+    await store.insertConfirmedTransactions('household', [{ id: 'audited-income', name: 'Historical income', amount: 100,
+      currency: 'PLN', ledger_currency: 'PLN', type: 'income', date: '2018-01-01', confirmed_date: '2018-01-01',
+      ledger_year: 2018, fx_rate: 1, buffered_fx_rate: 1, ledger_amount: 100, running_balance_pln: 100,
+      occurrence_key: 'manual:audited-income', created_at: capturedAt, updated_at: capturedAt }]);
+    const correct = (id, amount, expectedCorrectionId) => store.transaction(async (writer, connection) => {
+      await writer.lockBudgetLedger('household');
+      const query = async (sql, values = []) => {
+        let index = 0;
+        return (await connection.query(sql.replace(/\?/g, () => `$${++index}`), values)).rows;
+      };
+      const auditService = createLedgerCorrectionService({ budgetId: 'household', writer, query });
+      await auditService.audit.ensureLegacyBaseline({ capturedAt });
+      return auditService.correct({ id, targetId: 'audited-income', expectedCorrectionId,
+        replacement: { amount, date: '2018-01-01' }, reason: 'Reviewed payment', actorId: 'reviewer',
+        today: '2026-10-23', createdAt: capturedAt });
+    });
+    await correct('first-review', 80, null);
+    const ref = await service.createBackupAsync('household');
+    const saved = JSON.parse(await store.readBackupArtifact('household', ref.slice('postgres-backup:'.length)));
+    assert.equal(saved.version, 2);
+    assert.equal(saved.ledgerAudits[0].originals[0].row.amount, 100);
+    assert.equal(saved.ledgerAudits[0].corrections[0].id, 'first-review');
+    await correct('second-review', 90, 'first-review');
+    const result = await service.restoreBackupAsync('household', ref.slice('postgres-backup:'.length));
+    assert.equal(result.ok, true);
+    assert.equal((await store.listConfirmedTransactions('household'))[0].amount, 80);
+    assert.deepEqual(await store.exportLedgerAuditSnapshot('household'), saved.ledgerAudits[0]);
+    const safety = JSON.parse(await store.readBackupArtifact('household', result.safetyBackup.slice('postgres-backup:'.length)));
+    assert.equal(safety.ledgerAudits[0].corrections.at(-1).id, 'second-review');
+    assert.equal(safety.payload.tables.confirmed_transactions[0].amount, 90);
+  }));
+
+test('Postgres count/age pruning removes artifacts and metadata only for the selected budget', gated,
+  async () => fixture(async ({ service, store, pool }) => {
+    for (let index = 0; index < 4; index++) await service.createBackupAsync('household');
+    await pool.query("INSERT INTO budgets (id,storage_key,display_name,created_at,updated_at) VALUES ('other','other','Other synthetic budget',now(),now())");
+    await store.saveBackupArtifact('other', {
+      id: 'other', backup_path: 'postgres-backup:other', backup_timestamp: '2020-01-01', created_at: '2020-01-01', size_bytes: 2, success: true
+    }, '{}');
+    // Portable metadata can contain references whose bytes were not exported.
+    // Even a newer orphan must not cause the last real recovery point to vanish.
+    await pool.query("INSERT INTO backup_metadata (budget_id,id,backup_path,backup_timestamp,success,created_at) VALUES ('household','orphan','postgres-backup:orphan','2099-01-01',true,now())");
+    await pool.query('UPDATE global_options SET backup_max_retention_count = 2');
+    assert.equal((await service.cleanupOperationalDataAsync('household')).backupsDeleted, 2);
+    assert.equal((await store.listPlanningRows('household', 'backup_metadata')).length, 3);
+    assert.equal(Number((await pool.query("SELECT count(*) FROM cashflow_backup_artifacts WHERE budget_id='household'")).rows[0].count), 2);
+    await pool.query("UPDATE backup_metadata SET backup_timestamp = '2020-01-01' WHERE budget_id = 'household'");
+    await pool.query('UPDATE global_options SET backup_max_age_days = 1');
+    await service.cleanupOperationalDataAsync('household');
+    assert.equal((await store.listPlanningRows('household', 'backup_metadata')).length, 2);
+    assert.equal(Number((await pool.query("SELECT count(*) FROM cashflow_backup_artifacts WHERE budget_id='household'")).rows[0].count), 1);
+    assert.ok(await store.readBackupArtifact('other', 'other'));
+    const latest = await service.createBackupAsync('household', { deferCleanup: true });
+    assert.ok(await store.readBackupArtifact('household', latest.slice('postgres-backup:'.length)));
+  }));
+
+test('Postgres retention transaction rolls back artifact deletion if metadata deletion fails', gated,
+  async () => fixture(async ({ service, store, pool }) => {
+    await service.createBackupAsync('household'); await service.createBackupAsync('household');
+    await pool.query('UPDATE global_options SET backup_max_retention_count = 1');
+    await pool.query(`CREATE FUNCTION cashflow_test_prune_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected prune metadata failure'; END; $$;
+      CREATE TRIGGER cashflow_test_prune_failure BEFORE DELETE ON backup_metadata
+        FOR EACH ROW EXECUTE FUNCTION cashflow_test_prune_failure()`);
+    try {
+      await assert.rejects(service.cleanupOperationalDataAsync('household'), /injected prune metadata failure/);
+      const rows = await store.listPlanningRows('household', 'backup_metadata');
+      assert.equal(rows.length, 2);
+      for (const row of rows) assert.ok(await store.readBackupArtifact('household', row.id));
+    } finally {
+      await pool.query('DROP TRIGGER cashflow_test_prune_failure ON backup_metadata; DROP FUNCTION cashflow_test_prune_failure()');
+    }
+  }));
+
+test('Postgres pruning protects a running restore target and its safety backup', gated,
+  async () => fixture(async ({ service, store, pool, setHook }) => {
+    const selected = await service.createBackupAsync('household');
+    await pool.query('UPDATE global_options SET backup_max_retention_count = 1, backup_max_age_days = 1');
+    let release;
+    const barrier = new Promise(resolve => { release = resolve; });
+    let reached;
+    const ready = new Promise(resolve => { reached = resolve; });
+    setHook(async ({ phase }) => {
+      if (phase === 'before_restore_apply') { reached(); await barrier; }
+    });
+    const restore = service.restoreBackupAsync('household', selected.slice('postgres-backup:'.length));
+    try {
+      await ready;
+      assert.equal((await service.cleanupOperationalDataAsync('household')).skipped, true);
+      assert.ok(await store.readBackupArtifact('household', selected.slice('postgres-backup:'.length)));
+    } finally { release(); }
+    const result = await restore;
+    assert.ok(await store.readBackupArtifact('household', result.safetyBackup.slice('postgres-backup:'.length)));
+  }));

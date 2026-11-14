@@ -1,3 +1,4 @@
+import { recordSqliteFinancialChange } from "./cashflow-financial-journal.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
 import {
@@ -13,6 +14,20 @@ export function createCashflowPendingTransitionService({
   recalculatePlanningRunningBalances,
   withProjectionStatus
 }) {
+  /** Preserve manual pending intent and regeneration under the owning lock. */
+  async function transitionWithProjection(userId, work, options = {}) {
+    return budgetStore.transaction(async writer => {
+      await writer.lockBudgetLedger(userId);
+      const result = await work(writer);
+      const projected = await withProjectionStatus(userId, result, {
+        store: writer,
+        preservePending: Boolean(options.preservePending)
+      });
+      await writer.recordFinancialChange(userId, "pending");
+      return projected;
+    });
+  }
+
   async function recalculatePlanningRunningBalancesWithBudgetStore(writer, userId) {
     const settingsRows = await writer.listPlanningRows(userId, "settings");
     const pendingRows = await writer.listPlanningRows(userId, "pending_transactions");
@@ -109,7 +124,8 @@ export function createCashflowPendingTransitionService({
       }
       await writer.deletePlanningRowsById(userId, "future_transactions", futureIds);
       await recalculatePlanningRunningBalancesWithBudgetStore(writer, userId);
-
+      // Scheduled transitions alter accepted pending state even without a source edit.
+      await writer.recordFinancialChange(userId, "pending");
       return pendingRows.length;
     });
   }
@@ -177,6 +193,7 @@ export function createCashflowPendingTransitionService({
         }
 
         recalculatePlanningRunningBalances(db, userId);
+        if (futureTxns.length) recordSqliteFinancialChange(db, userId, "pending");
       })();
 
       return inserted;
@@ -190,7 +207,7 @@ export function createCashflowPendingTransitionService({
       ? options.occurrenceKey.trim()
       : "";
 
-    const result = await budgetStore.transaction(async writer => {
+    const result = await transitionWithProjection(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -260,9 +277,9 @@ export function createCashflowPendingTransitionService({
         futureTransactionId: tx.id,
         occurrenceKey
       };
-    });
+    }, options);
 
-    return await withProjectionStatus(userId, result);
+    return result;
   }
 
   async function moveFutureTransactionToPending(userId, futureTransactionId, options = {}) {
@@ -275,6 +292,7 @@ export function createCashflowPendingTransitionService({
     const requestedOccurrenceKey = typeof options.occurrenceKey === "string"
       ? options.occurrenceKey.trim()
       : "";
+    const preservePending = Boolean(options.preservePending);
 
     try {
       let tx = db.prepare(`
@@ -312,7 +330,7 @@ export function createCashflowPendingTransitionService({
               occurrenceKey: requestedOccurrenceKey
             };
 
-            return withProjectionStatus(userId, result);
+            return withProjectionStatus(userId, result, { preservePending });
           }
         }
 
@@ -353,15 +371,16 @@ export function createCashflowPendingTransitionService({
           if (pending) {
             db.prepare("DELETE FROM future_transactions WHERE id = ?").run(tx.id);
             recalculatePlanningRunningBalances(db, userId);
+            recordSqliteFinancialChange(db, userId, "pending");
 
-            return {
+            return withProjectionStatus(userId, {
               ok: true,
               moved: false,
               alreadyPending: true,
               futureTransactionId: tx.id,
               pendingTransactionId: pending.id,
               occurrenceKey
-            };
+            }, { db, preservePending });
           }
         }
 
@@ -392,18 +411,19 @@ export function createCashflowPendingTransitionService({
         db.prepare("DELETE FROM future_transactions WHERE id = ?").run(tx.id);
         recalculatePlanningRunningBalances(db, userId);
 
-        return {
+        recordSqliteFinancialChange(db, userId, "pending");
+        return withProjectionStatus(userId, {
           ok: true,
           moved: info.changes > 0,
           futureTransactionId: tx.id,
           occurrenceKey
-        };
+        }, { db, preservePending });
       })();
     } finally {
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   return {

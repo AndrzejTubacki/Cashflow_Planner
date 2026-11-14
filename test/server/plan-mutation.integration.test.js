@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 
@@ -23,6 +24,67 @@ async function configure(harness) {
     }
   });
 }
+
+test("SQLite web planner revisions commit with sources and fail closed on journal errors", async () => withHarness(async harness => {
+  await configure(harness);
+  const epoch = randomUUID();
+  let db = harness.openPlanningDb();
+  try {
+    db.prepare("INSERT INTO cashflow_sync_heads (budget_id, epoch, revision) VALUES (?, ?, 0)").run(harness.userId, epoch);
+  } finally { db.close(); }
+  const body = { name: "Revision source", currency: "PLN", amount: 15, type: "income", date: "2026-06-10" };
+  await harness.api("/api/one-off", { method: "POST", body });
+  db = harness.openPlanningDb();
+  try {
+    assert.equal(db.prepare("SELECT revision FROM cashflow_sync_heads").get().revision, 1);
+    assert.equal(JSON.parse(db.prepare("SELECT operation_json FROM cashflow_sync_operations").get().operation_json).kind, "budget.invalidate");
+    db.exec("CREATE TRIGGER reject_sync_record BEFORE INSERT ON cashflow_sync_operations BEGIN SELECT RAISE(ABORT, 'Injected journal failure'); END");
+  } finally { db.close(); }
+  const rejected = await harness.request("/api/one-off", { method: "POST", body: { ...body, name: "Must roll back" } });
+  assert.equal(rejected.response.status, 500);
+  db = harness.openPlanningDb();
+  try {
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM one_off_transactions WHERE name = 'Must roll back'").get().count, 0);
+    assert.equal(db.prepare("SELECT revision FROM cashflow_sync_heads").get().revision, 1);
+    db.exec("DROP TRIGGER reject_sync_record");
+  } finally { db.close(); }
+  await harness.api("/api/settings", { method: "PUT", body: { future_periods: 3 } });
+  db = harness.openPlanningDb();
+  try {
+    assert.equal(db.prepare("SELECT revision FROM cashflow_sync_heads").get().revision, 2);
+    assert.equal(JSON.parse(db.prepare("SELECT operation_json FROM cashflow_sync_operations WHERE revision = 2").get().operation_json).payload.reason, "settings");
+  } finally { db.close(); }
+  await harness.api("/api/regenerate-projections", { method: "POST", body: {} });
+  db = harness.openPlanningDb();
+  try {
+    assert.equal(db.prepare("SELECT revision FROM cashflow_sync_heads").get().revision, 3);
+    assert.equal(JSON.parse(db.prepare("SELECT operation_json FROM cashflow_sync_operations WHERE revision = 3").get().operation_json).payload.reason, "projection");
+  } finally { db.close(); }
+}));
+
+test("SQLite setup rolls opening inputs back when revision recording fails", async () => withHarness(async harness => {
+  let db = harness.openPlanningDb();
+  try {
+    db.prepare("INSERT INTO cashflow_sync_heads (budget_id, epoch, revision) VALUES (?, ?, 0)").run(harness.userId, randomUUID());
+    db.exec("CREATE TRIGGER reject_setup_revision BEFORE INSERT ON cashflow_sync_operations BEGIN SELECT RAISE(ABORT, 'Setup revision failure'); END");
+  } finally { db.close(); }
+  const body = { currency: "PLN", opening_balance: 100, income_enabled: true,
+    income_amount: 50, income_anchor_day: 15, income_name: "Setup source" };
+  const rejected = await harness.request("/api/setup", { method: "POST", body });
+  assert.equal(rejected.response.status, 500);
+  db = harness.openPlanningDb();
+  try {
+    assert.equal(db.prepare("SELECT setup_completed FROM settings").get().setup_completed, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM recurring_incomes").get().count, 0);
+    db.exec("DROP TRIGGER reject_setup_revision");
+  } finally { db.close(); }
+  await harness.api("/api/setup", { method: "POST", body });
+  db = harness.openPlanningDb();
+  try {
+    assert.equal(db.prepare("SELECT setup_completed FROM settings").get().setup_completed, 1);
+    assert.ok(db.prepare("SELECT revision FROM cashflow_sync_heads").get().revision >= 1);
+  } finally { db.close(); }
+}));
 
 function insertPendingWithSource(harness, row) {
   const db = harness.openPlanningDb();
@@ -112,6 +174,8 @@ test("goals with partial or complete confirmed funding retain their currency", a
   const unfunded = await harness.api("/api/goals", { method: "POST", body: {
     name: "Unfunded", currency: "PLN", amount: 10, due_date: "2026-06-01", priority: 2
   } });
+  // Currency edits now require a successful projection in the same transaction.
+  await harness.api("/api/settings", { method: "PUT", body: { manual_fx_rates: { EUR: 4 } } });
   assert.equal((await harness.api(`/api/goals/${unfunded.id}`, { method: "PUT", body: { currency: "EUR" } })).currency, "EUR");
 }, { userId: "review_goal" }));
 
@@ -185,7 +249,7 @@ test("planning-only mutations do not create safety backups", async () => withHar
   assert.equal(backupCount(harness), before);
 }));
 
-test("confirmed goal and flex sources cannot be deleted while confirmed one-offs can be edited or uncoupled", async () => withHarness(async harness => {
+test("confirmed goal and flex deletion remains protected while deleting a one-off preserves payment attribution", async () => withHarness(async harness => {
   await configure(harness);
   await seedConfirmedIncome(harness);
 
@@ -302,7 +366,7 @@ test("confirmed goal and flex sources cannot be deleted while confirmed one-offs
     const ledgerDb = harness.openLedgerDb("2026");
     try {
       const row = ledgerDb.prepare("SELECT source_one_off_id FROM confirmed_transactions WHERE name = ?").get("Confirmed one-off source");
-      assert.equal(row.source_one_off_id, null);
+      assert.equal(row.source_one_off_id, oneOff.id);
     } finally {
       ledgerDb.close();
     }
@@ -313,7 +377,7 @@ test("confirmed goal and flex sources cannot be deleted while confirmed one-offs
   assert.match(deleteFlex.body.error, /confirmed flex/i);
 }));
 
-test("fully funded confirmed goals can be deleted after detaching ledger history", async () => withHarness(async harness => {
+test("fully funded confirmed goals can be deleted while preserving ledger attribution", async () => withHarness(async harness => {
   await configure(harness);
   await seedConfirmedIncome(harness);
 
@@ -358,7 +422,7 @@ test("fully funded confirmed goals can be deleted after detaching ledger history
   const ledgerDb = harness.openLedgerDb("2026");
   try {
     const row = ledgerDb.prepare("SELECT source_goal_id FROM confirmed_transactions WHERE id = ?").get("pend-goal-reached");
-    assert.equal(row.source_goal_id, null);
+    assert.equal(row.source_goal_id, goal.id);
   } finally {
     ledgerDb.close();
   }

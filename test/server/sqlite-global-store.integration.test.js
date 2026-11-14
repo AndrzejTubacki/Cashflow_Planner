@@ -15,8 +15,9 @@ test("SQLite global store replaceRows bypasses guard triggers", async (t) => {
 
   store.initialize();
   
-  // Create an account and budget, which establishes a 'legacy-admin' as the 'owner'
+  // Explicit fixture accounts own their matching compatibility budgets.
   store.withRepository((repo, db) => {
+    repo.accounts.insert({ id: "test-budget", displayName: "Test budget" });
     ensureLegacyBudget(db, { budgetId: "test-budget" });
   });
 
@@ -31,7 +32,7 @@ test("SQLite global store replaceRows bypasses guard triggers", async (t) => {
   // It should drop the guard triggers, do the replace, and recreate them.
   await store.replaceRows("budget_memberships", [{
     budget_id: "test-budget",
-    account_id: "legacy-admin",
+    account_id: "test-budget",
     role: "viewer", // Demoted to viewer! This would fail without dropping the trigger.
     invited_by_account_id: null,
     created_at: new Date().toISOString(),

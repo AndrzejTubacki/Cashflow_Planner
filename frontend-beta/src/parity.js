@@ -39,8 +39,19 @@ export function sortFundingEntries(entries = []) {
   return [...entries].sort((a, b) => {
     const aDate = a.item?.funded_by_date || "";
     const bDate = b.item?.funded_by_date || "";
-    if (Boolean(aDate) !== Boolean(bDate)) return aDate ? 1 : -1;
-    return aDate.localeCompare(bDate) || String(a.name || "").localeCompare(String(b.name || ""))
+    // Match the legacy funding comparator, including dated shortfalls and FX gaps.
+    const missing = entry => {
+      const item = entry.item || {};
+      const target = Number(item.target_ledger_amount ?? item.amount ?? 0);
+      const planned = Number(item.already_funded_ledger ?? item.already_funded ?? 0)
+        + Number(item.pending_allocated_ledger ?? item.pending_allocated ?? 0)
+        + Number(item.future_allocated_ledger ?? item.future_allocated ?? 0);
+      const remaining = Number(item.remaining_ledger ?? item.remaining ?? Math.max(0, target - planned));
+      return Boolean(item.fx_missing) || remaining > 0.0001 || !item.funded_by_date;
+    };
+    const missingCompare = Number(missing(b)) - Number(missing(a));
+    if (missingCompare) return missingCompare;
+    return aDate.localeCompare(bDate) || String(a.label || a.name || "").localeCompare(String(b.label || b.name || ""))
       || String(a.item?.id || "").localeCompare(String(b.item?.id || ""));
   });
 }

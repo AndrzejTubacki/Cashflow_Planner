@@ -1,11 +1,13 @@
 import Database from "better-sqlite3";
 import fs from "fs";
+import path from "path";
 import {
-  initializeLedgerSchema,
-  initializePlanningSchema,
+  LEDGER_COLUMNS,
+  ledgerYearViewSql,
   LEDGER_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION
 } from "./cashflow-schema.js";
+import { initializePlanningSchema } from "./cashflow-schema.js";
 import {
   applyLedgerMigrations,
   applyPlanningMigrations
@@ -123,8 +125,10 @@ export function createCashflowDbService({
     try {
       if (isNew) {
         initializePlanningSchema(db);
+        mergeLegacyLedgerFiles(userId, db, { fresh: true });
       } else {
         applyPlanningMigrations(db);
+        mergeLegacyLedgerFiles(userId, db);
         completeMigrationRecovery(userId);
       }
     } catch (error) {
@@ -135,54 +139,72 @@ export function createCashflowDbService({
     return db;
   }
 
+  /** Legacy ledger_YYYY.sqlite files are imported into planning.sqlite once, in
+   * one transaction behind ledger_merge_state; afterwards they are renamed to
+   * *.merged (kept as a recovery copy, never read again). Very old rows with
+   * no confirmed_date get their scheduled date, the fallback every ledger
+   * reader already applied. A crash after the
+   * commit only leaves files to rename on the next open. */
+  function legacyLedgerFiles(userId) {
+    const dir = userDataDir(userId, { create: false });
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir).map(name => ({ name, match: name.match(/^ledger_(\d{4})\.sqlite$/) }))
+      .filter(entry => entry.match).map(entry => ({ year: Number(entry.match[1]), file: path.join(dir, entry.name) }));
+  }
+
+  function mergeLegacyLedgerFiles(userId, db, { fresh = false } = {}) {
+    const files = legacyLedgerFiles(userId);
+    if (fresh && !files.length) return;
+    // A brand-new planning file starts merged, unless ledger-only legacy files
+    // already sit beside it (a confirmed-only user).
+    if (fresh) db.prepare("DELETE FROM ledger_merge_state").run();
+    const merged = Boolean(db.prepare("SELECT 1 FROM ledger_merge_state WHERE id = 1").get());
+    if (!merged) {
+      const insert = db.prepare(`INSERT INTO ledger_transactions (${LEDGER_COLUMNS.join(", ")}, ledger_year)
+        VALUES (${LEDGER_COLUMNS.map(() => "?").join(", ")}, ?)`);
+      const rowsByYear = files.map(({ year, file }) => {
+        const ledger = new Database(file);
+        try {
+          initPragmas(ledger);
+          applyLedgerMigrations(ledger, { occurrenceKeyFromRow });
+          return { year, rows: ledger.prepare("SELECT * FROM confirmed_transactions").all() };
+        } finally { ledger.close(); }
+      });
+      db.transaction(() => {
+        for (const { year, rows } of rowsByYear) for (const row of rows) insert.run(...LEDGER_COLUMNS.map(column => (column === "confirmed_date" ? row.confirmed_date || row.date : row[column]) ?? null), year);
+        db.prepare("INSERT INTO ledger_merge_state (id, merged_at) VALUES (1, datetime('now'))").run();
+      }).immediate();
+      if (files.length) logServerEvent("cashflow_ledger_merged_into_planning", { userId, files: files.length });
+    }
+    for (const { file } of files) {
+      for (const suffix of ["", "-wal", "-shm"]) if (fs.existsSync(file + suffix)) fs.renameSync(file + suffix, `${file}${suffix}.merged`);
+    }
+  }
+
+  /** A planning.sqlite connection whose `confirmed_transactions` view shows one
+   * ledger year (see ledgerYearViewSql). */
   function openLedgerDb(userId, year, options = {}) {
     assertNotPostgresBackend("ledger", { userId, year });
-    const { create = true } = options;
-    const dbPath = ledgerDbPath(userId, year, { create });
-    const isNew = !fs.existsSync(dbPath);
-    if (!create && isNew) {
-      throw userNotFoundError(userId);
-    }
-    if (!isNew) {
-      const sourceVersion = schemaVersion(dbPath);
-      if (sourceVersion < LEDGER_SCHEMA_VERSION) {
-        ensureMigrationRecovery(userId, {
-          kind: "ledger",
-          file: `ledger_${year}.sqlite`,
-          sourceVersion,
-          targetVersion: LEDGER_SCHEMA_VERSION
-        });
-      }
-    }
-    const db = new Database(dbPath);
-    initPragmas(db);
-
+    const viewSql = ledgerYearViewSql(year);
+    const db = openPlanningDb(userId, { create: options.create !== false });
     try {
-      if (isNew) {
-        initializeLedgerSchema(db);
-      } else {
-        applyLedgerMigrations(db, { occurrenceKeyFromRow });
-        completeMigrationRecovery(userId);
-      }
-    } catch (error) {
-      db.close();
-      throw error;
-    }
-
+      db.exec(viewSql);
+    } catch (error) { db.close(); throw error; }
     return db;
   }
 
+  /** Ledger years that hold rows (merging any legacy files first). */
   function listLedgerYears(userId) {
     const dir = userDataDir(userId, { create: false });
     if (!fs.existsSync(dir)) return [];
-
-    return fs.readdirSync(dir)
-      .map(name => {
-        const match = name.match(/^ledger_(\d{4})\.sqlite$/);
-        return match ? match[1] : null;
-      })
-      .filter(Boolean)
-      .sort();
+    if (!fs.existsSync(planningDbPath(userId, { create: false }))) {
+      // Not opened since the merge shipped: the legacy files name the years.
+      return legacyLedgerFiles(userId).map(entry => String(entry.year)).sort();
+    }
+    const db = openPlanningDb(userId, { create: false });
+    try {
+      return db.prepare("SELECT DISTINCT ledger_year FROM ledger_transactions ORDER BY ledger_year").all().map(row => String(row.ledger_year));
+    } finally { db.close(); }
   }
 
   return {

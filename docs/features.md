@@ -27,7 +27,7 @@ The core workflow is:
 
 ## Feature List
 
-- local self-hosted storage
+- local self-hosted storage, with planning and ledger history in each budget's SQLite database
 - recurring income and recurring expenses
 - one-off transactions
 - savings goals
@@ -39,16 +39,20 @@ The core workflow is:
 - account and budget selection for separate planner datasets
 - first-run setup for currency, locale, timezone, non-negative opening balance,
   recurring income, and projection horizon
-- admin tab for global defaults applied to newly created users
+- admin settings for global defaults applied to newly created budgets
 - admin-managed internal email/password login with one-time setup/reset tokens
 - trusted reverse-proxy/SSO login using stable subject headers
-- browser-local display preferences for theme, density, and default landing tab
+- browser-local display preferences for theme, density, and default landing page
 - FX conversion with disabled, manual, NBP, and Frankfurter provider options
-- ntfy and Discord webhook notifications scheduled with the daily ledger check
+- ntfy and Discord webhook notifications scheduled with the daily ledger check,
+  with multiple channels enabled together
+- device pairing with explicit budget grants and a versioned financial sync API
+- standalone-budget transfer into a new server budget
+- ledger corrections with immutable accepted originals and retained audit history
 - Docker support
 - backup and restore support for self-hosted installs
-- optional confirmed-ledger history compaction, disabled by default
-- full JSON export/import for current user data
+- optional historical payment summaries, disabled by default; individual financial facts are retained
+- full JSON export/import for the selected budget
 - CSV import for one-off transactions
 - CSV export for confirmed ledger rows
 - downloadable and loadable anonymized sample dataset
@@ -70,10 +74,12 @@ allocated money and what still needs to be confirmed.
 | Goal | A target amount due by a date | Creates goal allocation rows from eligible periods before the due date; partial funding is allowed |
 | Flex transaction | Optional or adjustable spending | Funded after goals and non-necessary recurring expenses according to priority; split behavior controls whether partial funding is allowed |
 
-Deleting a fully funded goal removes it from the planning list and detaches its
-confirmed ledger rows from the deleted goal. The historical ledger rows remain
-in place. Goals with confirmed history that has not reached the target stay
-protected from deletion.
+Deleting a fully funded goal or a paid one-off removes its planning source and
+generated allocations. Accepted payments keep their original source IDs, amounts,
+dates and timestamps, including payments from earlier years. A deleted source ID
+is a historical reference; its source no longer needs to exist in current planning.
+Goals with confirmed history that has not reached the target stay protected from
+deletion.
 
 ### Generated Rows
 
@@ -112,7 +118,7 @@ and creates a visible pending opening-balance conversion row. Confirm that row
 to carry the current confirmed balance into the new ledger currency. Existing
 confirmed history keeps the ledger currency it was originally recorded with.
 
-The Settings tab includes an FX provider selector:
+Settings → Budget includes an FX provider selector:
 
 | Provider | Behavior |
 | --- | --- |
@@ -125,6 +131,42 @@ The used-currencies selector has Available and Used lists: move currencies into
 Used currencies, then save settings. Cashflow also observes currencies already
 present in transactions so existing foreign-currency rows can be refreshed
 automatically.
+
+Provider cache rates more than **14 days older than the requested date** are
+stale. Opening a budget and regenerating projections continue to use the last
+known rate. The React UI, including the Ledger page, warns which relevant pairs
+are out of date and shows their age. **Refresh FX rates** fetches current rates,
+regenerates projections, and reloads the budget; it keeps the existing
+`budget:maintain` permission requirement on both SQLite and PostgreSQL.
+
+Recording actual money with a stale cached rate is refused with HTTP `409` and
+`details.code: stale_fx_rate`. The error names the pair and age and asks you to
+refresh exchange rates. This applies to pending confirmations and cached-rate
+ledger-currency conversions, including financial operations that use those
+services. Standalone payments and currency conversions also refuse stale stored
+provider observations. An explicitly entered actual payment rate does not use
+the cache. Manual-provider rates never expire, and same-currency transactions
+continue to use rate `1`. Corrections retaining a payment's already recorded
+actual rate do not consult the current provider cache.
+
+## Paired Devices And Financial History
+
+Settings → Account manages companion-device pairing and budget grants. A paired
+device uses scoped bearer credentials, with separate read and financial-write
+grants, rather than browser cookies. Financial sync negotiates compatible data
+and engine versions, downloads a consistent snapshot, and exchanges revisioned
+operations with replayable receipts. The companion Android app is not public yet.
+
+Confirmed payments retain their accepted facts and source evidence. Authorized
+corrections record audit events and update the effective ledger and balances;
+originals and earlier corrections remain available for audit and supported
+backup/export/transfer operations. Historical payment summaries do not delete
+accepted payments or their correction identities.
+
+A standalone budget can be reviewed and transferred from the companion client
+into a new server budget, including supported ledger and correction history.
+Transfer result lookup supports recovery after a lost response. It does not
+merge arbitrary storage snapshots into an existing live budget.
 
 ## Current Limitations
 

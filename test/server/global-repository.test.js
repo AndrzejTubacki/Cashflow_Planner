@@ -6,14 +6,17 @@ import test from "node:test";
 import { CAPABILITIES, capabilitiesFor } from "../../src/server/cashflow-authorization.js";
 import { createSqliteGlobalRepository } from "../../src/server/cashflow-global-repository.js";
 import {
-  initializeGlobalSchema,
-  LEGACY_ADMIN_ACCOUNT_ID
+  initializeGlobalSchema
 } from "../../src/server/cashflow-global-schema.js";
 
 function withGlobalRepository(fn) {
   const db = new Database(":memory:");
   try {
-    initializeGlobalSchema(db, { storageProfileIds: ["legacy_budget"] });
+    initializeGlobalSchema(db);
+    db.exec("INSERT INTO accounts (id, display_name, created_at, updated_at) VALUES ('fixture_owner', 'Fixture owner', datetime('now'), datetime('now')); INSERT INTO account_global_roles (account_id, role, created_at) VALUES ('fixture_owner', 'system_admin', datetime('now'))");
+    const fixtureRepo = createSqliteGlobalRepository(db);
+    fixtureRepo.budgets.insert({ id: 'legacy_budget', displayName: 'Legacy budget', createdByAccountId: 'fixture_owner' });
+    fixtureRepo.memberships.insertOwner({ budgetId: 'legacy_budget', accountId: 'fixture_owner' });
     const repo = createSqliteGlobalRepository(db, {
       generateAuditId: () => "audit_test",
       nowMs: () => Date.parse("2026-01-03T04:05:06Z")
@@ -57,22 +60,22 @@ test("SQLite global repository covers global options, users, budgets, membership
     repo.budgets.markActive("legacy_budget");
     assert.equal(repo.budgets.get("legacy_budget").status, "active");
     assert.equal(repo.budgets.get("legacy_budget").archived_at, null);
-    assert.equal(repo.memberships.ownerAccountId("legacy_budget"), LEGACY_ADMIN_ACCOUNT_ID);
+    assert.equal(repo.memberships.ownerAccountId("legacy_budget"), "fixture_owner");
     assert.equal(
       repo.memberships.getRole({
-        accountId: LEGACY_ADMIN_ACCOUNT_ID,
+        accountId: "fixture_owner",
         budgetId: "legacy_budget"
       }).role,
       "owner"
     );
 
-    const globalRoles = repo.roles.listForAccount(LEGACY_ADMIN_ACCOUNT_ID);
+    const globalRoles = repo.roles.listForAccount("fixture_owner");
     assert.ok(globalRoles.includes("system_admin"));
     assert.ok(capabilitiesFor({ globalRoles }).includes(CAPABILITIES.SYSTEM_ADMIN));
 
     repo.audit.insertSecurityEvent({
       action: "repository_contract_test",
-      actorAccountId: LEGACY_ADMIN_ACCOUNT_ID,
+      actorAccountId: "fixture_owner",
       details: { changed: true },
       targetId: "legacy_budget",
       targetType: "budget"
@@ -83,7 +86,7 @@ test("SQLite global repository covers global options, users, budgets, membership
       WHERE id = 'audit_test'
     `).get();
     assert.equal(auditRow.action, "repository_contract_test");
-    assert.equal(auditRow.actor_account_id, LEGACY_ADMIN_ACCOUNT_ID);
+    assert.equal(auditRow.actor_account_id, "fixture_owner");
     assert.equal(auditRow.target_type, "budget");
     assert.equal(auditRow.target_id, "legacy_budget");
     assert.deepEqual(JSON.parse(auditRow.details_json), { changed: true });
@@ -110,7 +113,7 @@ test("SQLite global repository exposes account and session state without leaking
     });
     repo.roles.insertSystemAdmin({
       accountId: "alice",
-      grantedByAccountId: LEGACY_ADMIN_ACCOUNT_ID
+      grantedByAccountId: "fixture_owner"
     });
     db.prepare(`
       INSERT INTO auth_sessions (
@@ -282,7 +285,7 @@ test("SQLite global repository covers provider, OAuth, invitation, and credentia
       budgetId: "legacy_budget",
       expiresAt: "2026-01-04T04:00:00Z",
       id: "invite_test",
-      invitedByAccountId: LEGACY_ADMIN_ACCOUNT_ID,
+      invitedByAccountId: "fixture_owner",
       role: "editor",
       targetEmail: "alice@example.com",
       tokenHash: "invite_hash"
@@ -301,7 +304,7 @@ test("SQLite global repository covers provider, OAuth, invitation, and credentia
     repo.memberships.upsertFromInvitation({
       accountId: "alice",
       budgetId: "legacy_budget",
-      invitedByAccountId: LEGACY_ADMIN_ACCOUNT_ID,
+      invitedByAccountId: "fixture_owner",
       role: "editor"
     });
     assert.equal(
@@ -314,7 +317,7 @@ test("SQLite global repository covers provider, OAuth, invitation, and credentia
       budgetId: "legacy_budget",
       expiresAt: "2026-01-04T04:00:00Z",
       id: "invite_revoke",
-      invitedByAccountId: LEGACY_ADMIN_ACCOUNT_ID,
+      invitedByAccountId: "fixture_owner",
       role: "viewer",
       targetEmail: "revoke@example.com",
       tokenHash: "invite_revoke_hash"
@@ -326,7 +329,7 @@ test("SQLite global repository covers provider, OAuth, invitation, and credentia
       budgetId: "legacy_budget",
       expiresAt: "2026-01-01T00:00:00Z",
       id: "invite_expired",
-      invitedByAccountId: LEGACY_ADMIN_ACCOUNT_ID,
+      invitedByAccountId: "fixture_owner",
       role: "viewer",
       targetEmail: "late@example.com",
       tokenHash: "invite_expired_hash"

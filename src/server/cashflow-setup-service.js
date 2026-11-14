@@ -4,6 +4,7 @@ import { generateId } from "./cashflow-id-utils.js";
 import { hasOwn, requireBoolean, requireMoneyAmount, requireNumber } from "./cashflow-input-validation.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 import { badRequest } from "./cashflow-user-utils.js";
+import { recordSqliteFinancialChange } from "./cashflow-financial-journal.js";
 
 function monthKey(dateString) {
   return String(dateString || "").slice(0, 7);
@@ -75,7 +76,10 @@ export function createCashflowSetupService({
     return true;
   }
 
-  async function completeSetup(userId, input = {}) {
+  /** Validate setup without allocating metadata or storage. Device creation uses
+   * the same validators before creating a budget, so rejected input leaves no
+   * orphan budget. completeSetup repeats validation at the write boundary. */
+  function validateSetupInput(input = {}) {
     const setupSettings = validateAndNormalizeSettings({
       ledger_currency: input.ledger_currency ?? input.currency ?? "PLN",
       locale: input.locale ?? "en",
@@ -108,21 +112,17 @@ export function createCashflowSetupService({
     const incomeAnchorDay = hasOwn(input, "income_anchor_day")
       ? requireNumber(input.income_anchor_day, "income_anchor_day", { min: 1, max: 31, integer: true })
       : 1;
+    return { futurePeriods, holidayCountry, incomeAmount, incomeAnchorDay, incomeEnabled,
+      incomeName, ledgerCurrency, locale, openingBalance, timezone, today };
+  }
 
+  /** Apply validated first-run setup using the selected backend's transaction. */
+  async function completeSetup(userId, input = {}) {
+    const values = validateSetupInput(input);
+    const { futurePeriods, holidayCountry, incomeAmount, incomeAnchorDay, incomeEnabled,
+      incomeName, ledgerCurrency, locale, openingBalance, timezone, today } = values;
     if (usesPostgresBudgetStore()) {
-      return await completeSetupWithBudgetStore(userId, {
-        futurePeriods,
-        holidayCountry,
-        incomeAmount,
-        incomeAnchorDay,
-        incomeEnabled,
-        incomeName,
-        ledgerCurrency,
-        locale,
-        openingBalance,
-        timezone,
-        today
-      });
+      return await completeSetupWithBudgetStore(userId, values);
     }
 
     const db = openPlanningDb(userId);
@@ -203,6 +203,9 @@ export function createCashflowSetupService({
           created.incomeId = id;
         }
 
+        // Setup commits authoritative opening balance/source/settings before its
+        // separate projection attempt; invalidate device baselines at that commit.
+        recordSqliteFinancialChange(db, userId, "settings");
         return db.prepare("SELECT * FROM settings WHERE id = 1").get();
       })();
     } finally {
@@ -308,6 +311,7 @@ export function createCashflowSetupService({
       }
 
       result = (await writer.listPlanningRows(userId, "settings"))?.[0] || null;
+      await writer.recordFinancialChange(userId, "settings");
     });
 
     const projection = typeof regenerateProjectionsAfterMutationAsync === "function"
@@ -323,6 +327,7 @@ export function createCashflowSetupService({
 
   return {
     completeSetup,
+    validateSetupInput,
     setupRequired,
     setupRequiredAsync
   };

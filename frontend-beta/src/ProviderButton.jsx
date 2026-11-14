@@ -1,3 +1,4 @@
+import { formatMessage } from "./i18n.js";
 // Sign-in buttons styled after each provider's own branding: Google's "Sign in with Google"
 // guidelines (white/dark fill, #747775 outline, Roboto Medium, multicolour G), Facebook's
 // blue Login button and GitHub's dark button with the Invertocat mark.
@@ -47,13 +48,15 @@ const STYLES = {
 export default function ProviderButton({ provider, disabled, onClick, verb }) {
   const style = STYLES[provider.kind] || { className: "beta-provider-btn beta-provider-btn--generic", Mark: KeyMark, verb: "Continue with" };
   const { Mark } = style;
-  const label = provider.kind in STYLES
-    ? { google: "Google", facebook: "Facebook", github: "GitHub" }[provider.kind]
-    : provider.displayName || provider.id;
+  const label = provider.displayName || provider.id;
+  const action = verb === "Link" ? formatMessage("Link {provider}", { provider: label })
+    : verb === "Continue with" || (!verb && style.verb === "Continue with")
+      ? formatMessage("Continue with {provider}", { provider: label })
+      : formatMessage("Sign in with {provider}", { provider: label });
   return (
     <button type="button" className={style.className} disabled={disabled} onClick={onClick}>
       <span className="beta-provider-btn-mark"><Mark /></span>
-      <span className="beta-provider-btn-label">{verb || style.verb} {label}</span>
+      <span className="beta-provider-btn-label">{action}</span>
     </button>
   );
 }

@@ -1,46 +1,26 @@
-﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
+import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { calculateNextDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { fetchWithTimeout, notificationFetchTimeoutMs } from "./cashflow-fetch-utils.js";
 import { sendToNotificationDestination, pinnedNotificationRequest } from "./cashflow-notification-destination.js";
 
+import {
+  buildNotificationQueueRow as buildNotificationIntent,
+  notificationDedupeSuffix as notificationDedupeSuffixForDate,
+  notificationEnabled, notificationPriority
+} from "../engine/cashflow-notification-intents.js";
+export { notificationEnabled, notificationPriority };
+
+// Server adapters retain historical clock defaults; the core requires explicit time.
 export function notificationDedupeSuffix(settings, type) {
-  if (type !== "necessary_underfunded") {
-    return todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE);
-  }
-
-  const repeatDays = Math.max(1, Number(settings?.necessary_underfunded_repeat_days || 1));
-  const today = new Date(`${todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE)}T00:00:00Z`);
-  const epochDay = Math.floor(today.getTime() / 86_400_000);
-  const bucket = Math.floor(epochDay / repeatDays);
-
-  return `bucket-${bucket}`;
+  return notificationDedupeSuffixForDate(settings, type, todayInTimezone(settings?.timezone || DEFAULT_TIMEZONE));
 }
 
-export function buildNotificationQueueRow({
-  dedupeKey,
-  entityId = null,
-  generateId,
-  message,
-  priority = "default",
-  queuedAt = new Date().toISOString(),
-  settings = null,
-  title,
-  type
-} = {}) {
-  if (typeof generateId !== "function") {
-    throw new Error("generateId is required to build notification rows");
-  }
-  const suffix = settings ? notificationDedupeSuffix(settings, type) : todayInTimezone();
-  return {
-    dedupe_key: `${dedupeKey}:${suffix}`,
-    entity_id: entityId || null,
-    id: generateId("notif"),
-    message,
-    notification_type: type,
-    priority: priority || "default",
-    queued_at: queuedAt,
-    title
-  };
+export function buildNotificationQueueRow(options = {}) {
+  return buildNotificationIntent({
+    ...options,
+    queuedAt: options.queuedAt ?? new Date().toISOString(),
+    today: options.today ?? todayInTimezone(options.settings?.timezone || DEFAULT_TIMEZONE)
+  });
 }
 
 /**
@@ -105,34 +85,6 @@ export function ntfyAuthorizationHeader(settings) {
   return null;
 }
 
-export function notificationEnabled(settings, type) {
-  const map = {
-    goal_impossible: "notify_goal_impossible",
-    necessary_underfunded: "notify_necessary_underfunded",
-    funding_shortfall: "notify_funding_shortfall",
-    income_missing: "notify_income_missing",
-    pending_summary: "notify_pending_summary",
-    goal_funded: "notify_goal_funded",
-    fx_changed: "notify_fx_changed"
-  };
-
-  return Number(settings?.[map[type]]) === 1;
-}
-
-export function notificationPriority(settings, type) {
-  const map = {
-    goal_impossible: "ntfy_priority_goal_impossible",
-    necessary_underfunded: "ntfy_priority_necessary_underfunded",
-    funding_shortfall: "ntfy_priority_funding_shortfall",
-    income_missing: "ntfy_priority_income_missing",
-    pending_summary: "ntfy_priority_pending_summary",
-    goal_funded: "ntfy_priority_goal_funded",
-    fx_changed: "ntfy_priority_fx_changed"
-  };
-
-  return settings?.[map[type]] || "default";
-}
-
 export function createCashflowNotificationService({
   budgetStore = null,
   fetchImpl = fetch,
@@ -194,7 +146,8 @@ export function createCashflowNotificationService({
       let sent = 0;
 
       for (const notification of pending) {
-        await sendNotification(settings, notification);
+        await sendNotification(settings, notification, channels => db.prepare(
+          "UPDATE notification_queue SET sent_channels = ? WHERE id = ?").run(channels.join(","), notification.id));
 
         db.prepare(`
           UPDATE notification_queue
@@ -229,11 +182,19 @@ export function createCashflowNotificationService({
         const notification = pending[0] || null;
         if (!notification) return false;
 
-        await sendNotification(settings, notification);
+        try {
+          await sendNotification(settings, notification, async channels => {
+            if (typeof writer.recordNotificationChannelsSent === "function") await writer.recordNotificationChannelsSent(userId, notification.id, channels);
+          });
+        } catch (error) {
+          // Commit the channels that did receive it; the next run retries only the rest.
+          return { error };
+        }
         await writer.markNotificationsSent(userId, [notification.id]);
         return true;
       });
 
+      if (delivered?.error) throw delivered.error;
       if (!delivered) break;
       sent += 1;
     }
@@ -246,21 +207,34 @@ export function createCashflowNotificationService({
     return channel === "discord" ? "discord" : "ntfy";
   }
 
-  function notificationDestinationConfigured(settings) {
-    return notificationChannel(settings) === "discord"
-      ? Boolean(settings?.discord_webhook_url)
-      : Boolean(settings?.ntfy_url);
+  /** Every chosen channel with a destination: notification_channels (any combination),
+   * else the single notification_channel. */
+  function notificationChannels(settings) {
+    const chosen = settings?.notification_channels
+      ? String(settings.notification_channels).split(",").map(item => item.trim()).filter(item => ["ntfy", "discord"].includes(item))
+      : [notificationChannel(settings)];
+    return chosen.filter(channel => channel === "discord" ? Boolean(settings?.discord_webhook_url) : Boolean(settings?.ntfy_url));
   }
 
-  async function sendNotification(settings, notification) {
-    try {
-      return await (notificationChannel(settings) === "discord"
-        ? sendDiscordNotification(settings, notification)
-        : sendNtfyNotification(settings, notification));
-    } catch (error) {
-      // Never log the destination, credentials, or financial notification body.
-      logError("cashflow_notification_delivery_failed", { channel: notificationChannel(settings) });
-      throw error;
+  function notificationDestinationConfigured(settings) {
+    return notificationChannels(settings).length > 0;
+  }
+
+  /** Sends to each chosen channel that has not received it yet; [recordSent] persists
+   * progress after each one, so a failure does not repeat earlier deliveries. */
+  async function sendNotification(settings, notification, recordSent = async () => {}) {
+    const sent = String(notification.sent_channels || "").split(",").filter(Boolean);
+    for (const channel of notificationChannels(settings)) {
+      if (sent.includes(channel)) continue;
+      try {
+        await (channel === "discord" ? sendDiscordNotification(settings, notification) : sendNtfyNotification(settings, notification));
+      } catch (error) {
+        // Never log the destination, credentials, or financial notification body.
+        logError("cashflow_notification_delivery_failed", { channel });
+        throw error;
+      }
+      sent.push(channel);
+      await recordSent(sent);
     }
   }
 

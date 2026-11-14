@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import path from "node:path";
+import Database from "better-sqlite3";
 import test from "node:test";
 
 import { createCashflowTestHarness, ledgerDbPath } from "../helpers/cashflow-test-harness.js";
@@ -82,6 +84,16 @@ async function createConfirmedLedgerScenario(harness) {
   };
 }
 
+/** Fixture for a server upgraded from before automatic confirmation capture.
+ * Only this synthetic setup removes evidence; real audited imports never may. */
+async function createLegacyLedgerScenario(harness) {
+  const result = await createConfirmedLedgerScenario(harness);
+  const db = harness.openPlanningDb();
+  try { db.prepare('DELETE FROM cashflow_ledger_audit_state WHERE budget_id = ?').run(harness.userId); }
+  finally { db.close(); }
+  return result;
+}
+
 function backupCount(harness) {
   const db = harness.openPlanningDb();
   try {
@@ -119,7 +131,8 @@ test("full export includes functional planning data and confirmed ledger rows", 
   const exported = await harness.api("/api/export/full");
 
   assert.equal(exported.format, "cashflow-full-export");
-  assert.equal(exported.version, 1);
+  assert.equal(exported.version, 2);
+  assert.equal(exported.ledgerAudit.originals.length, 1);
   assert.equal(exported.planning.one_off_transactions.some(row => row.id === oneOff.id), true);
   assert.equal(Array.isArray(exported.planning.future_transactions), false);
   assert.equal(Array.isArray(exported.planning.backup_metadata), false);
@@ -188,6 +201,13 @@ test("full replace import restores exported data and creates a safety backup", a
   assert.equal(imported.import.ok, true);
   assert.equal(imported.import.mode, "replace");
   assert.equal(backupCount(harness), beforeBackups + 1);
+  assert.equal(typeof imported.import.safetyBackup, 'string');
+  const safety = new Database(path.join(imported.import.safetyBackup, 'planning.sqlite'), { readonly: true });
+  try {
+    assert.ok(safety.prepare('SELECT id FROM one_off_transactions WHERE id = ?').get(extra.id));
+    assert.equal(safety.prepare('SELECT count(*) AS n FROM cashflow_ledger_originals').get().n, 1);
+    assert.equal(safety.prepare('SELECT baseline_complete FROM cashflow_ledger_audit_state').get().baseline_complete, 1);
+  } finally { safety.close(); }
   assert.equal(imported.oneOffs.some(row => row.id === oneOff.id), true);
   assert.equal(imported.oneOffs.some(row => row.id === extra.id), false);
   assert.equal(imported.confirmedTransactions.some(row => row.source_one_off_id === oneOff.id), true);
@@ -577,7 +597,7 @@ test("full merge conflicts do not create imported ledger files before the safety
 }));
 
 test("full merge detects confirmed IDs that already exist in another ledger year", async () => withHarness(async harness => {
-  await createConfirmedLedgerScenario(harness);
+  await createLegacyLedgerScenario(harness);
   const exported = await harness.api("/api/export/full");
   const existingRow = exported.ledgers["2026"][0];
   delete exported.ledgers["2026"];
@@ -609,7 +629,7 @@ test("full merge detects confirmed IDs that already exist in another ledger year
 test("full merge ignores target settings validation but rejects occurrence-key conflicts", async () => {
   let sourceExport;
   await withHarness(async source => {
-    await createConfirmedLedgerScenario(source);
+    await createLegacyLedgerScenario(source);
     sourceExport = await source.api("/api/export/full");
   }, { userId: "merge-source" });
 
@@ -930,7 +950,7 @@ test("full import validates table-specific values and relationships before backu
 }));
 
 test("full import validates ledger relationships and occurrence uniqueness before backup", async () => withHarness(async harness => {
-  await createConfirmedLedgerScenario(harness);
+  await createLegacyLedgerScenario(harness);
   const exported = await harness.api("/api/export/full");
   const beforeBackups = backupCount(harness);
   const cases = [

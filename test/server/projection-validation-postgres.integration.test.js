@@ -11,7 +11,6 @@ import { createCashflowBackupService } from "../../src/server/cashflow-backup-se
 import { createCashflowPlanMutationService } from "../../src/server/cashflow-plan-mutation-service.js";
 import { createPostgresBudgetStore, createSqliteBudgetStore } from "../../src/server/cashflow-budget-store.js";
 import { createPostgresGlobalStore } from "../../src/server/cashflow-postgres-global-store.js";
-import { initializeLedgerSchema } from "../../src/server/cashflow-schema.js";
 import { computeProjectionPlan, buildProjectionFundingState, makeProjectionConverter,
   applyProjectionGenerationPlanToBudgetStore } from "../../src/server/cashflow-projection-engine-service.js";
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
@@ -39,8 +38,10 @@ test("Postgres single pending regeneration deletes only the selected budget row 
       openPlanningDb: () => { throw new Error("Postgres must not open SQLite"); },
       withProjectionStatus: async (budgetId, result, options) => {
         assert.equal(budgetId, "firma_test");
-        assert.deepEqual(options, { preservePending: true });
-        assert.deepEqual((await store.listPlanningRows(budgetId, "pending_transactions")).map(row => row.id), ["other"]);
+        assert.equal(options.preservePending, true);
+        assert.equal(options.store.transactionBound, true);
+        assert.deepEqual(options.recoverPendingRows.map(row => row.id), ["selected"]);
+        assert.deepEqual((await options.store.listPlanningRows(budgetId, "pending_transactions")).map(row => row.id), ["other"]);
         regenerationCalls++;
         return result;
       }
@@ -152,7 +153,7 @@ test("Postgres validation preserves SQLite warnings, ledger checks, audit events
       await store.insertConfirmedTransactions("firma_test", [ledger]);
       const ledgerDb = harness.openLedgerDb(2026);
       try {
-        initializeLedgerSchema(ledgerDb);
+        // The planning database already holds the ledger (schema 22+).
         const { ledger_year, ...row } = ledger;
         const columns = Object.keys(row);
         ledgerDb.prepare(`INSERT INTO confirmed_transactions (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`).run(...Object.values(row));
@@ -176,7 +177,7 @@ test("Postgres validation preserves SQLite warnings, ledger checks, audit events
       assert.deepEqual(await service.validateCashflowDataAsync("other_test"), { ok: true, warnings: [] });
 
       cashflow = await createCashflowModule({ dataDir: root,
-        localeDir: path.resolve(import.meta.dirname, "../../public/app/cashflow/locales"),
+        localeDir: path.resolve(import.meta.dirname, "../../public-legacy/app/cashflow/locales"),
         databaseConfig: { backend: "postgres", databaseUrlConfigured: true, external: true, supported: true },
         env: { CASHFLOW_DATABASE_URL: databaseUrl } });
       const app = express();

@@ -189,3 +189,13 @@ test("projection state async helpers read through the budget-store facade", asyn
     ]
   );
 });
+
+test('synchronous cutoff balance retains explicit legacy ledger amounts without a cached total', () => {
+  // Old accepted rows may carry an explicit ledger amount without enough FX
+  // fields to reconstruct it. Reading a cutoff must preserve that stored fact.
+  const db = { prepare: sql => ({ get: () => sql.includes('sqlite_master') ? undefined : { ledger_currency: 'PLN' } }) };
+  const service = createCashflowProjectionStateService({ loadAllConfirmedTransactions: () => [{
+    id: 'legacy-amount', amount: 10, ledger_amount: 17, type: 'income', ledger_currency: 'PLN', date: '2026-01-01'
+  }] });
+  assert.equal(service.confirmedBalanceAsOf(db, 'legacy-budget', '2026-01-02'), 17);
+});

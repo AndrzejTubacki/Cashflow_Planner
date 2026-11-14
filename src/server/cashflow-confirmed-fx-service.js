@@ -1,3 +1,4 @@
+import { assertSnapshotFxRateFresh } from "../engine/cashflow-fx-freshness.js";
 import {
   getFxRateForCurrency,
   normalizeCurrency
@@ -45,6 +46,10 @@ export function createCashflowConfirmedFxService({
 
     if (typeof getFxSnapshotForDate === "function") {
       const snapshot = await getFxSnapshotForDate(confirmedDate);
+      // Host-provided snapshots are planning reads too; validate the selected rate before recording money.
+      if (settings?.fx_provider !== FX_PROVIDER_MANUAL) {
+        assertSnapshotFxRateFresh(snapshot, confirmedDate, normalizedCurrency, ledgerCurrency);
+      }
       const raw = getFxRateForCurrency(normalizedCurrency, settings, snapshot);
 
       return {

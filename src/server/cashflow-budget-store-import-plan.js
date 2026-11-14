@@ -222,6 +222,7 @@ export async function applyBudgetStoreImportPlan({
   mode = "append",
   preserveBackupMetadata = false,
   onBatch = () => {},
+  beforeApply = async () => {},
   plan,
   payload
 } = {}) {
@@ -253,7 +254,12 @@ export async function applyBudgetStoreImportPlan({
       }
     }
 
+    // Recheck caller preconditions under the same lock as replacement.
+    await beforeApply(writer);
     const appliedBatches = [];
+    if (typeof writer.rotateSyncEpoch === "function") {
+      for (const budgetId of importPlan.budgetIds) await writer.rotateSyncEpoch(budgetId);
+    }
     const replacedPlanningBudgets = new Set();
     for (const batch of importPlan.writeBatches) {
       // SQLite needs a single planning transaction; ledger files remain separate.

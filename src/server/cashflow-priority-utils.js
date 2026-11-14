@@ -1,9 +1,7 @@
 import { notFound } from "./cashflow-user-utils.js";
 
-export function normalizePriority(value) {
-  const n = Number(value);
-  return Number.isInteger(n) && n > 0 ? n : 1;
-}
+import { normalizePriority } from "../engine/cashflow-priority.js";
+export { normalizePriority };
 
 export function priorityColumnForDomain(domain) {
   return domain === "goal" ? "goal_priority" : "operating_priority";

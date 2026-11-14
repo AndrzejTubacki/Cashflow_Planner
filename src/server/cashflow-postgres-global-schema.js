@@ -1,3 +1,5 @@
+import { DEVICE_SCHEMA_SQL, DEVICE_TABLE_COLUMNS } from "./cashflow-device-schema.js";
+import { STANDALONE_TRANSFER_JOURNAL_SCHEMA, STANDALONE_TRANSFER_TABLE_COLUMNS } from './cashflow-standalone-transfer-schema.js';
 import {
   GLOBAL_SCHEMA_VERSION,
   GLOBAL_TABLE_NAMES
@@ -28,6 +30,11 @@ export const POSTGRES_GLOBAL_COLUMNS = {
     "fx_provider",
     "fx_buffer_percent",
     "ntfy_allowed_private_hosts",
+    "backup_max_retention_count",
+    "backup_max_age_days",
+    "device_access_minutes",
+    "device_renewal_idle_days",
+    "device_absolute_days",
     "updated_at"
   ],
   accounts: [
@@ -56,7 +63,8 @@ export const POSTGRES_GLOBAL_COLUMNS = {
     "created_at",
     "updated_at",
     "archived_at",
-    "deleted_at"
+    "deleted_at",
+    "revision"
   ],
   budget_memberships: [
     "budget_id",
@@ -174,7 +182,9 @@ export const POSTGRES_GLOBAL_COLUMNS = {
     "outcome",
     "details_json",
     "created_at"
-  ]
+  ],
+  ...DEVICE_TABLE_COLUMNS,
+  ...STANDALONE_TRANSFER_TABLE_COLUMNS
 };
 
 const POSTGRES_GLOBAL_SCHEMA_BODY = `
@@ -223,6 +233,11 @@ CREATE TABLE IF NOT EXISTS global_options (
   fx_provider TEXT NOT NULL DEFAULT 'nbp',
   fx_buffer_percent DOUBLE PRECISION NOT NULL DEFAULT 0,
   ntfy_allowed_private_hosts JSONB NOT NULL DEFAULT '[]'::jsonb,
+  backup_max_retention_count INTEGER NOT NULL DEFAULT 0 CHECK (backup_max_retention_count BETWEEN 0 AND 2147483647),
+  backup_max_age_days INTEGER NOT NULL DEFAULT 0 CHECK (backup_max_age_days BETWEEN 0 AND 2147483647),
+  device_access_minutes INTEGER NOT NULL DEFAULT 15 CHECK (device_access_minutes BETWEEN 1 AND 1440),
+  device_renewal_idle_days INTEGER NOT NULL DEFAULT 90 CHECK (device_renewal_idle_days BETWEEN 1 AND 3650),
+  device_absolute_days INTEGER NOT NULL DEFAULT 365 CHECK (device_absolute_days BETWEEN 1 AND 3650),
   updated_at TIMESTAMPTZ NOT NULL
 );
 
@@ -261,7 +276,8 @@ CREATE TABLE IF NOT EXISTS budgets (
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   archived_at TIMESTAMPTZ,
-  deleted_at TIMESTAMPTZ
+  deleted_at TIMESTAMPTZ,
+  revision INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS budget_memberships (
@@ -419,6 +435,9 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_account
   ON password_reset_tokens(account_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_security_audit_created
   ON security_audit_log(created_at);
+
+${DEVICE_SCHEMA_SQL}
+${STANDALONE_TRANSFER_JOURNAL_SCHEMA}
 
 CREATE OR REPLACE FUNCTION cashflow_prevent_last_system_admin_delete()
 RETURNS trigger AS $$

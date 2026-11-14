@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { ENGINE_AUDIT_HOST_OPTIONS } from "../src/engine/engine-host-capabilities.js";
+
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,6 +33,8 @@ async function loadPgModule() {
   }
 }
 
+/** Validate or apply with a host-selected audit codec; payload fields cannot
+ * enable support for an origin that the executing host does not understand. */
 export async function importBudgetStorageCli(options = parseArgs()) {
   if (options.help) {
     return {
@@ -40,11 +44,14 @@ export async function importBudgetStorageCli(options = parseArgs()) {
 
   const payload = JSON.parse(fs.readFileSync(path.resolve(options.input), "utf8"));
   if (options.dryRun) {
-    const plan = createBudgetStoreImportPlan(payload);
     const result = await importSqliteBudgetStorageToPostgres({
       dryRun: true,
+      allowStandaloneOrigins: options.allowStandaloneOrigins ?? false,
       payload
     });
+    // Validation above includes the complete audit replay before previewing
+    // the underlying planning/ledger batches of a v2 migration artifact.
+    const plan = createBudgetStoreImportPlan(payload.format === 'cashflow-budget-store-snapshot' ? payload.payload : payload);
     return {
       ...result,
       budgetCount: plan.budgetCount,
@@ -78,6 +85,7 @@ export async function importBudgetStorageCli(options = parseArgs()) {
     return await importSqliteBudgetStorageToPostgres({
       client,
       dryRun: false,
+      allowStandaloneOrigins: options.allowStandaloneOrigins ?? false,
       payload
     });
   } finally {
@@ -91,6 +99,8 @@ async function main() {
     string: ["--input"],
     boolean: ["--apply","--pretty"],
     defaults: {
+    // The installed CLI supports the same financial format as engine 0.4.
+    ...ENGINE_AUDIT_HOST_OPTIONS,
     apply: false,
     databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
     dryRun: true,

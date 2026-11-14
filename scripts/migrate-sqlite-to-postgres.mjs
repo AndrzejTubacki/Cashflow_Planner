@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { ENGINE_AUDIT_HOST_OPTIONS } from "../src/engine/engine-host-capabilities.js";
+
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,12 +65,15 @@ function compactSummary(globalResult, budgetResult, {
   };
 }
 
+/** Migrate an explicitly stopped-app snapshot on one owning target connection.
+ * Origin capability propagates only from the host through every adapter. */
 export async function migrateSqliteToPostgres({
   databaseUrl = process.env.CASHFLOW_DATABASE_URL || "",
   dataDir = process.env.DATA_DIR || path.resolve("data"),
   dryRun = true,
   outputDir = path.resolve("external-database-exports"),
   pgModule = null,
+  allowStandaloneOrigins = false,
   sourceIsSnapshot = false
 } = {}) {
   if (!dryRun && !sourceIsSnapshot) {
@@ -76,7 +81,7 @@ export async function migrateSqliteToPostgres({
   }
 
   const globalResult = createSqliteGlobalMetadataExport({ dataDir, outputDir });
-  const budgetResult = await createSqliteBudgetStorageExport({ dataDir, outputDir });
+  const budgetResult = await createSqliteBudgetStorageExport({ dataDir, outputDir, allowStandaloneOrigins });
   const globalPayload = readJson(globalResult.exportPath);
   const budgetPayload = readJson(budgetResult.exportPath);
 
@@ -86,6 +91,7 @@ export async function migrateSqliteToPostgres({
   });
   const budgetDryRun = await importSqliteBudgetStorageToPostgres({
     dryRun: true,
+    allowStandaloneOrigins,
     payload: budgetPayload
   });
 
@@ -122,6 +128,7 @@ export async function migrateSqliteToPostgres({
       client,
       dryRun: false,
       manageTransaction: false,
+      allowStandaloneOrigins,
       payload: budgetPayload
     });
     await client.query("COMMIT");
@@ -160,9 +167,11 @@ export async function migrateSqliteToPostgresCli(options = parseArgs()) {
 
 async function main() {
   const options = parseCliArgs(process.argv.slice(2), {
-    string: ["--data-dir","--output-dir"],
+    string: ["--database-url","--data-dir","--output-dir"],
     boolean: ["--source-is-snapshot","--apply","--pretty"],
     defaults: {
+    // The installed CLI supports the same financial format as engine 0.4.
+    ...ENGINE_AUDIT_HOST_OPTIONS,
     apply: false,
     databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
     dataDir: process.env.DATA_DIR || path.resolve("data"),
@@ -176,6 +185,8 @@ async function main() {
     console.log(usage());
     return;
   }
+  // --apply is the documented switch; without this the run stays a dry run.
+  options.dryRun = !options.apply;
 
   const result = await migrateSqliteToPostgresCli(options);
   console.log(JSON.stringify(result, null, options.pretty ? 2 : 0));

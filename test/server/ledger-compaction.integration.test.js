@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
+
+import Database from "better-sqlite3";
 
 import { createCashflowTestHarness } from "../helpers/cashflow-test-harness.js";
 import { initializeLedgerSchema } from "../../src/server/cashflow-schema.js";
@@ -17,7 +20,11 @@ function ensureLedgerSchema(db) {
   const exists = db.prepare(`
     SELECT 1 AS exists_flag
     FROM sqlite_master
-    WHERE type = 'table' AND name = 'confirmed_transactions'
+    WHERE type IN ('table', 'view') AND name = 'confirmed_transactions'
+    UNION ALL
+    SELECT 1 AS exists_flag
+    FROM sqlite_temp_master
+    WHERE type IN ('table', 'view') AND name = 'confirmed_transactions'
   `).get();
   if (!exists) initializeLedgerSchema(db);
 }
@@ -117,7 +124,7 @@ test("ledger history compaction is disabled by default", async () => withHarness
   assert.equal(backupCount(harness), 0);
 }));
 
-test("ledger history compaction replaces old confirmed rows with balance rows per ledger currency", async () => withHarness(async harness => {
+test("ledger history summaries retain original confirmed rows and source links", async () => withHarness(async harness => {
   insertConfirmed(harness, "2024", {
     id: "old-income",
     name: "Old income",
@@ -150,19 +157,12 @@ test("ledger history compaction replaces old confirmed rows with balance rows pe
   assert.equal(result.cutoffDate, "2025-05-20");
   assert.equal(result.compactedRows, 2);
   assert.equal(result.createdRows, 1);
-  assert.equal(confirmedRows(harness, "2024").length, 0);
-
-  const compacted = confirmedRows(harness, "2025");
-  assert.equal(compacted.length, 1);
-  assert.equal(compacted[0].name, "Historical ledger balance before 2025-05-20 (PLN)");
-  assert.equal(compacted[0].currency, "PLN");
-  assert.equal(compacted[0].ledger_currency, "PLN");
-  assert.equal(compacted[0].amount, 750);
-  assert.equal(compacted[0].type, "income");
-  assert.equal(compacted[0].ledger_amount, 750);
-  assert.equal(compacted[0].running_balance_pln, 750);
-  assert.equal(compacted[0].source_goal_id, null);
-  assert.equal(compacted[0].occurrence_key, "ledger_history_compaction:PLN:2025-05-20");
+  assert.equal(result.detailsRetained, true);
+  assert.equal(confirmedRows(harness, "2024").length, 2);
+  assert.equal(confirmedRows(harness, "2024")[1].source_goal_id, "deleted-goal");
+  assert.equal(confirmedRows(harness, "2025").length, 0);
+  assert.deepEqual(result.summaries, [{ ledgerCurrency: "PLN", count: 2,
+    incomeTotal: 1000, expenseTotal: 250, netAmount: 750 }]);
 
   const recent = confirmedRows(harness, "2026");
   assert.equal(recent.length, 1);
@@ -176,15 +176,22 @@ test("ledger history compaction replaces old confirmed rows with balance rows pe
   });
   assert.equal(repeated.needsCompaction, false);
   assert.equal(repeated.compactedRows, 0);
-  assert.equal(confirmedRows(harness, "2025").length, 1);
+  assert.equal(confirmedRows(harness, "2025").length, 0);
   assert.equal(backupCount(harness), 1);
 }));
 
-test("ledger history compaction deletes explicit IDs so legacy rows with null confirmed_date are not double-counted", async () => withHarness(async harness => {
-  const db = harness.openLedgerDb("2024");
+test("ledger history summaries retain normalized legacy dates without double-counting", async () => withHarness(async harness => {
+  // A pre-merge ledger_2024.sqlite whose table predates the NOT NULL
+  // constraint; the merge runs again once the marker is cleared.
+  const planning = harness.openPlanningDb();
   try {
-    // Create the table without the NOT NULL constraint to simulate legacy database
-    db.exec(`
+    planning.prepare("DELETE FROM ledger_merge_state").run();
+  } finally {
+    planning.close();
+  }
+  const legacy = new Database(path.join(harness.dataDir, harness.userId, "ledger_2024.sqlite"));
+  try {
+    legacy.exec(`
       CREATE TABLE confirmed_transactions (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -207,30 +214,53 @@ test("ledger history compaction deletes explicit IDs so legacy rows with null co
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      INSERT INTO confirmed_transactions (id, name, currency, amount, type, date, confirmed_date, fx_rate,
+        buffered_fx_rate, ledger_currency, running_balance_pln, ledger_amount, created_at, updated_at)
+      VALUES ('legacy-null-date', 'Legacy income', 'PLN', 100, 'income', '2024-01-10', NULL, 1, 1, 'PLN', 0, 100,
+        '2024-01-10T00:00:00.000Z', '2024-01-10T00:00:00.000Z');
     `);
   } finally {
-    db.close();
+    legacy.close();
   }
-
-  insertConfirmed(harness, "2024", {
-    id: "legacy-null-date",
-    name: "Legacy income",
-    amount: 100,
-    type: "income",
-    date: "2024-01-10",
-    confirmedDate: null
-  });
+  assert.equal(confirmedRows(harness, "2024")[0].confirmed_date, "2024-01-10");
 
   const result = await harness.cashflow.compactLedgerHistory(harness.userId, { months: 12, today: "2026-05-21" });
   
   assert.equal(result.compactedRows, 1);
   assert.equal(result.createdRows, 1);
   
-  // The old 2024 row should be gone
-  assert.equal(confirmedRows(harness, "2024").length, 0);
-  
-  // The total should be 100 in the new 2025 compacted row
-  const compacted = confirmedRows(harness, "2025");
-  assert.equal(compacted.length, 1);
-  assert.equal(compacted[0].amount, 100);
+  assert.equal(confirmedRows(harness, "2024").length, 1);
+  assert.equal(confirmedRows(harness, "2025").length, 0);
+  assert.equal(result.summaries[0].netAmount, 100);
+}));
+
+// Changed facts and corrupt caches must be rebuilt without touching originals.
+test("history summaries rebuild changed facts and corrupt metadata, with atomic failures", async () => withHarness(async harness => {
+  insertConfirmed(harness, "2024", { id: "retained", name: "Retained", amount: 100,
+    type: "income", date: "2024-01-10", confirmedDate: "2024-01-10" });
+  await harness.cashflow.compactLedgerHistory(harness.userId, { months: 12 });
+  const db = harness.openPlanningDb();
+  try {
+    db.prepare("UPDATE ledger_transactions SET amount = 150, ledger_amount = 150 WHERE id = 'retained'").run();
+  } finally { db.close(); }
+  const changed = await harness.cashflow.compactLedgerHistory(harness.userId, { months: 12 });
+  assert.equal(changed.summaries[0].netAmount, 150);
+  const corrupt = harness.openPlanningDb();
+  try { corrupt.prepare("UPDATE cashflow_ledger_summary_cache SET cache_json = 'broken'").run(); }
+  finally { corrupt.close(); }
+  const repaired = await harness.cashflow.compactLedgerHistory(harness.userId, { months: 12 });
+  assert.equal(repaired.summaries[0].netAmount, 150);
+  assert.equal(confirmedRows(harness, "2024")[0].id, "retained");
+  const failing = harness.openPlanningDb();
+  try {
+    failing.prepare("INSERT INTO cashflow_sync_heads (budget_id, epoch, revision) VALUES (?, 'summary-failure-epoch', 0) ON CONFLICT (budget_id) DO NOTHING").run(harness.userId);
+    failing.exec("UPDATE cashflow_ledger_summary_cache SET cache_json = 'broken'; CREATE TRIGGER fail_summary BEFORE UPDATE ON cashflow_ledger_summary_cache BEGIN SELECT RAISE(ABORT, 'Injected summary write failure'); END;");
+  } finally { failing.close(); }
+  await assert.rejects(harness.cashflow.compactLedgerHistory(harness.userId, { months: 12 }), /Injected summary write failure/);
+  assert.equal(confirmedRows(harness, "2024")[0].amount, 150);
+  const afterFailure = harness.openPlanningDb();
+  try {
+    assert.equal(afterFailure.prepare("SELECT epoch FROM cashflow_sync_heads WHERE budget_id = ?").get(harness.userId).epoch, 'summary-failure-epoch');
+    assert.equal(afterFailure.prepare("SELECT cache_json FROM cashflow_ledger_summary_cache").get().cache_json, 'broken');
+  } finally { afterFailure.close(); }
 }));

@@ -118,6 +118,22 @@ test("server runtime rate-limits internal authentication attempts", async () => 
 
     assert.equal(statuses.slice(0, 20).every(status => status !== 429), true);
     assert.equal(statuses[20], 429);
+    // These failures happen before route handlers: malformed JSON and limiter rejection.
+    const malformed = await fetch(`${baseUrl}/api/device/pairings`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{"
+    });
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.headers.get("cache-control"), "no-store");
+    await malformed.text();
+    for (let index = 0; index < 21; index++) {
+      const response = await fetch(`${baseUrl}/api/device/pairings`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}"
+      });
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+      if (index === 20) assert.equal(response.status, 429);
+      await response.text();
+    }
   } finally {
     await stopServer(child);
     await rm(runtimeRoot, { recursive: true, force: true });
@@ -247,11 +263,9 @@ test("server refuses an unrecognized external database backend before listening"
     assert.match(output, /Unsupported CASHFLOW_DB_BACKEND "oracle"/);
     assert.doesNotMatch(output, /do-not-print/);
     assert.doesNotMatch(output, /example\.invalid/);
-
-    await assert.rejects(
-      () => fetch(`${baseUrl}/healthz`, { cache: "no-store" }),
-      /fetch failed/
-    );
+    // After exit the released ephemeral port can belong to another test/process.
+    // Observe this child's lifecycle instead of probing an unrelated new owner.
+    assert.doesNotMatch(output, /Cashflow listening on/);
 
     const errorLog = await readFile(path.join(runtimeRoot, "logs", "error.log"), "utf8");
     assert.match(errorLog, /cashflow_database_backend_unsupported/);
@@ -293,11 +307,7 @@ test("server refuses Postgres backend without a database URL before listening", 
     const exit = await waitForExit(child);
     assert.notEqual(exit.code, 0);
     assert.match(output, /CASHFLOW_DATABASE_URL/);
-
-    await assert.rejects(
-      () => fetch(`${baseUrl}/healthz`, { cache: "no-store" }),
-      /fetch failed/
-    );
+    assert.doesNotMatch(output, /Cashflow listening on/);
 
     const errorLog = await readFile(path.join(runtimeRoot, "logs", "error.log"), "utf8");
     assert.match(errorLog, /cashflow_database_backend_unsupported/);

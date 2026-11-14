@@ -9,6 +9,7 @@ test("projection coordinator pending helpers use the budget-store transaction su
     { id: "pending-b" }
   ];
   let transactionCount = 0;
+  let revisions = 0;
 
   const budgetStore = {
     backend: "postgres",
@@ -20,6 +21,11 @@ test("projection coordinator pending helpers use the budget-store transaction su
     async transaction(work) {
       transactionCount += 1;
       return await work({
+        async recordFinancialChange(budgetId, reason) {
+          assert.equal(budgetId, "budget-1");
+          assert.equal(reason, "pending");
+          revisions++;
+        },
         async listPlanningRows(budgetId, tableName) {
           assert.equal(budgetId, "budget-1");
           assert.equal(tableName, "pending_transactions");
@@ -47,6 +53,9 @@ test("projection coordinator pending helpers use the budget-store transaction su
   assert.equal(await service.clearPendingTransactions("budget-1"), 2);
   assert.equal(transactionCount, 1);
   assert.equal(await service.countPendingTransactions("budget-1"), 0);
+  assert.equal(revisions, 1);
+  assert.equal(await service.clearPendingTransactions("budget-1"), 0);
+  assert.equal(revisions, 1);
 });
 
 test("projection failure recorder uses budget-store rows without opening SQLite", async () => {
@@ -326,6 +335,47 @@ function postgresBudgetStoreStub() {
     }
   };
 }
+
+test("atomic projection status uses only its bound writer and propagates failures", async () => {
+  const writer = postgresBudgetStoreStub();
+  const defaults = { backend: "postgres",
+    listPlanningRows: throwIfCalled("default read"),
+    deletePlanningRowsById: throwIfCalled("default delete"),
+    transaction: throwIfCalled("default transaction") };
+  let runs = 0;
+  let fail = false;
+  const logs = [];
+  const service = createCashflowProjectionCoordinatorService({ budgetStore: defaults,
+    openPlanningDb: throwIfCalled("openPlanningDb"),
+    regenerateProjections: throwIfCalled("sync engine"),
+    confirmedBalanceAsOfAsync: async (_id, _date, _settings, reader) => {
+      assert.equal(reader, writer); return 0;
+    },
+    pendingNetBalanceAsync: async (_id, _settings, reader) => {
+      assert.equal(reader, writer); return 0;
+    },
+    regenerateProjectionsAsync: async (id, reader) => {
+      assert.equal(id, "budget-1"); assert.equal(reader, writer); runs++;
+      if (fail) throw new Error("atomic projection failure");
+    }, logCashflowError: kind => logs.push(kind), logServerEvent: () => {} });
+  const result = await service.withProjectionStatus("budget-1", { id: "source" }, { store: writer });
+  assert.equal(result._projection.projection_ok, true);
+  fail = true;
+  await assert.rejects(() => service.withProjectionStatus("budget-1", {}, { store: writer }), /atomic projection failure/);
+  assert.equal(runs, 2);
+  assert.deepEqual(logs, ["cashflow_atomic_projection_failed"]);
+});
+
+test("atomic SQLite projection borrows its connection and throws instead of recording a committed failure", () => {
+  const db = {};
+  const failure = new Error("SQLite atomic projection failure");
+  const service = createCashflowProjectionCoordinatorService({
+    openPlanningDb: throwIfCalled("default planning connection"),
+    regenerateProjections: (id, connection) => {
+      assert.equal(id, "budget-1"); assert.equal(connection, db); throw failure;
+    }, logCashflowError: () => {} });
+  assert.throws(() => service.withProjectionStatus("budget-1", {}, { db, preservePending: true }), error => error === failure);
+});
 
 test("regenerateProjectionsWithFxRefresh uses the async projection engine for a Postgres budget store", async () => {
   let asyncRuns = 0;

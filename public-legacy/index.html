@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cashflow</title>
+<script>
+  // The beta UI is the default. Staying on legacy needs an explicit choice:
+  // ?ui=legacy for this visit, or the stored preference the beta's
+  // "legacy" links set.
+  (function () {
+    var preferred = null;
+    try {
+      preferred = localStorage.getItem("cashflow_preferred_ui");
+    } catch (err) {
+      // Storage can be unavailable in private contexts; fall through to the default.
+    }
+    var override = new URLSearchParams(window.location.search).get("ui");
+    if (override === "legacy" || (override !== "beta" && preferred === "legacy")) return;
+    // Keep the query and hash: provider sign-in returns with ?cashflow_auth=…#account.
+    window.location.replace("/" + window.location.search + window.location.hash);
+  })();
+</script>
+<link rel="icon" type="image/png" href="/legacy/favicon.png">
+<link rel="stylesheet" href="/legacy/styles/base.css">
+<link rel="stylesheet" href="/legacy/styles/cashflow.css">
+<!--
+  Fonts load non-blocking: the app must paint with its fallback stack
+  immediately, not wait on a round-trip to Google's CDN, which is exactly
+  what a plain <link rel="stylesheet"> to fonts.googleapis.com forces (it's
+  render-blocking by default). preload fetches it in parallel; the
+  media="print" + onload swap applies it once it arrives without blocking
+  first paint. <noscript> covers browsers with JS disabled.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"></noscript>
+</head>
+<body>
+  <div class="page-shell">
+    <div class="page">
+      <main class="page-content" id="cashflowRoot">
+        <div class="empty-state app-loading" aria-live="polite">
+          <div class="app-loading__mark" aria-hidden="true">
+            <span></span>
+          </div>
+          <div class="app-loading__copy">
+            <h2>Cashflow</h2>
+            <p>Starting planner...</p>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script type="module" src="/legacy/app.js"></script>
+</body>
+</html>

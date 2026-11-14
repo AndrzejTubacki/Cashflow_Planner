@@ -1,9 +1,14 @@
 node_modules/
+.sandbox-runtime/
+dist-engine/
 .stfolder/
 .stignore
 *.sync-conflict-*
 AGENTS.md
 AGENTS.override.md
+.agents/
+.codex/
+.gemini/
 data/
 logs/
 backups/

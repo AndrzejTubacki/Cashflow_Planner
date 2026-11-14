@@ -2,13 +2,14 @@ import crypto from 'node:crypto';
 
 // Atomic DB-time windows make the same IP budget apply across all replicas.
 // Only hashed keys are persisted; a store error propagates to fail-closed HTTP.
-export function createPostgresAuthRateLimitStore({ withClient }) {
+export function createPostgresAuthRateLimitStore({ withClient, namespace = "internal-auth" }) {
+  if (!/^[a-z0-9-]{1,64}$/.test(namespace)) throw new Error("Invalid authentication limiter namespace");
   let windowMs = 15 * 60 * 1000;
   let nextCleanup = 0;
-  const digest = key => crypto.createHash('sha256').update(String(key)).digest('hex');
+  const digest = key => crypto.createHash('sha256').update(`${namespace}:${String(key)}`).digest('hex');
   return {
     localKeys: false,
-    prefix: 'cashflow-internal-auth',
+    prefix: `cashflow-${namespace}`,
     init(options) { windowMs = options.windowMs; },
     async increment(key) {
       return withClient(async client => {

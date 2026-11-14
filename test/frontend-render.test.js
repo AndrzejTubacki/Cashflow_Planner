@@ -2,34 +2,34 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { renderCashflowModalFields } from "../public/app/cashflow/modal-fields.js";
-import { normalizeCashflowNumericInput } from "../public/app/cashflow/modal.js";
-import { SUPPORTED_FX_CURRENCIES as FRONTEND_CURRENCIES } from "../public/app/cashflow/constants.js";
-import { renderFundingOverview } from "../public/app/cashflow/funding.js";
-import { renderLedgerTab } from "../public/app/cashflow/ledger-tab.js";
-import { renderOneOffTab } from "../public/app/cashflow/one-off-tab.js";
-import { renderPriorityTab } from "../public/app/cashflow/priority-tab.js";
-import { renderCashflowPage } from "../public/app/cashflow/page.js";
-import { renderAdminTab } from "../public/app/cashflow/admin-tab.js";
-import { renderBudgetManagerTab } from "../public/app/cashflow/budget-manager-tab.js";
+import { renderCashflowModalFields } from "../public-legacy/app/cashflow/modal-fields.js";
+import { normalizeCashflowNumericInput } from "../public-legacy/app/cashflow/modal.js";
+import { SUPPORTED_FX_CURRENCIES as FRONTEND_CURRENCIES } from "../public-legacy/app/cashflow/constants.js";
+import { renderFundingOverview } from "../public-legacy/app/cashflow/funding.js";
+import { renderLedgerTab } from "../public-legacy/app/cashflow/ledger-tab.js";
+import { renderOneOffTab } from "../public-legacy/app/cashflow/one-off-tab.js";
+import { renderPriorityTab } from "../public-legacy/app/cashflow/priority-tab.js";
+import { renderCashflowPage } from "../public-legacy/app/cashflow/page.js";
+import { renderAdminTab } from "../public-legacy/app/cashflow/admin-tab.js";
+import { renderBudgetManagerTab } from "../public-legacy/app/cashflow/budget-manager-tab.js";
 import {
   renderRecurringExpensesTab,
   renderRecurringIncomeTab
-} from "../public/app/cashflow/recurring-tabs.js";
-import { renderSettingsTab } from "../public/app/cashflow/settings-tab.js";
-import { hasCapability, loadLocale, todayForCashflow } from "../public/app/cashflow/shared.js";
+} from "../public-legacy/app/cashflow/recurring-tabs.js";
+import { renderSettingsTab } from "../public-legacy/app/cashflow/settings-tab.js";
+import { hasCapability, loadLocale, todayForCashflow } from "../public-legacy/app/cashflow/shared.js";
 import {
   renderBudgetSelectionPage,
   renderSetupPage,
   renderUserSelectionPage
-} from "../public/app/cashflow/session-pages.js";
-import { renderGoalsTab } from "../public/app/cashflow/target-tabs.js";
-import { renderTransactionTable } from "../public/app/cashflow/transactions.js";
+} from "../public-legacy/app/cashflow/session-pages.js";
+import { renderGoalsTab } from "../public-legacy/app/cashflow/target-tabs.js";
+import { renderTransactionTable } from "../public-legacy/app/cashflow/transactions.js";
 import { SUPPORTED_FX_CURRENCIES as SERVER_CURRENCIES } from "../src/server/cashflow-fx-provider-utils.js";
 import {
   applyUiPreferences,
   normalizeUiPreferences
-} from "../public/app/cashflow/ui-preferences.js";
+} from "../public-legacy/app/cashflow/ui-preferences.js";
 
 function assertNoMojibake(html) {
   assert.equal(/[\u00c4\u0102\u0139\u00e2\u00c2]/u.test(html), false, html);
@@ -72,8 +72,8 @@ test("priority, funding, ledger summaries and goal notes escape currency once", 
 });
 
 test("app background is rendered by a fixed root layer for expanded pages", async () => {
-  const css = await readFile(new URL("../public/styles/base.css", import.meta.url), "utf8");
-  const index = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public-legacy/styles/base.css", import.meta.url), "utf8");
+  const index = await readFile(new URL("../public-legacy/index.html", import.meta.url), "utf8");
 
   assert.match(css, /--app-background:/);
   assert.match(css, /body\s*{[^}]*min-height:\s*100dvh/s);
@@ -86,8 +86,8 @@ test("app background is rendered by a fixed root layer for expanded pages", asyn
 });
 
 test("help popovers dismiss on outside interaction and layer above nearby triggers", async () => {
-  const handlers = await readFile(new URL("../public/app/cashflow/handlers.js", import.meta.url), "utf8");
-  const css = await readFile(new URL("../public/styles/cashflow.css", import.meta.url), "utf8");
+  const handlers = await readFile(new URL("../public-legacy/app/cashflow/handlers.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public-legacy/styles/cashflow.css", import.meta.url), "utf8");
 
   assert.match(handlers, /function closeHelpPopovers/);
   assert.match(handlers, /document\.addEventListener\("click"/);
@@ -851,7 +851,7 @@ test("transaction table renders localized labels and ledger-currency equivalents
   assert.doesNotMatch(compactHtml, /<th>Status<\/th>/);
   assert.doesNotMatch(compactHtml, /<th>Ledger amount<\/th>/);
 
-  const css = await readFile(new URL("../public/styles/cashflow.css", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public-legacy/styles/cashflow.css", import.meta.url), "utf8");
   assert.match(css, /table\.cashflow-table\.cashflow-table--ledger-compact,\s*\.cashflow-group-content table\.cashflow-table--ledger-compact\s*{[^}]*width:\s*100%\s*!important;[^}]*min-width:\s*0\s*!important;[^}]*table-layout:\s*fixed\s*!important;/s);
 });
 

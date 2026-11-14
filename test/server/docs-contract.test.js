@@ -5,30 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import en from "../../public/app/cashflow/locales/en.js";
-import pl from "../../public/app/cashflow/locales/pl.js";
-import * as sharedUtilities from "../../public/app/utils.js";
+import en from "../../public-legacy/app/cashflow/locales/en.js";
+import pl from "../../public-legacy/app/cashflow/locales/pl.js";
+import * as sharedUtilities from "../../public-legacy/app/utils.js";
 import { bumpProjectVersion, resolveNextVersion } from "../../scripts/bump-version.mjs";
 import { buildReleaseNotes } from "../../scripts/generate-release-notes.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const publishedRouteFiles = [
-  path.join(repoRoot, "server.mjs"),
-  path.join(repoRoot, "src/server/cashflow-routes.js")
-];
-// dev/ holds the technical/developer docs (API reference, OpenAPI spec,
-// architecture notes) and is gitignored — private working reference, not
-// part of the published repository. These contract checks only run when it
-// exists locally (skip gracefully on a fresh checkout that never had it).
-const devDocsDir = path.join(repoRoot, "dev");
-const devDocsPresent = fs.existsSync(devDocsDir);
-const devDocsSkipReason = "dev/ is gitignored and not present in this checkout";
-const openApiPath = path.join(devDocsDir, "openapi.yaml");
-const privateRoutes = [
-  "POST /api/restart",
-  "POST /api/local/tests/run",
-  "GET /api/local/tests/latest"
-];
 const obsoleteLocaleKeys = [
   "Fixed ledger currency - backend does not allow changing it.",
   "Only PLN transactions can project without supplied rates.",
@@ -36,106 +19,20 @@ const obsoleteLocaleKeys = [
   "Only PLN ledger currency is supported"
 ];
 
-function expressRoutes(files) {
-  const routes = new Set();
-  const routePattern = /app\.(get|post|put|delete|patch)\("([^"]+)"/g;
-
-  for (const file of files) {
-    const source = fs.readFileSync(file, "utf8");
-    for (const match of source.matchAll(routePattern)) {
-      const route = match[2].replace(/:([A-Za-z0-9_]+)/g, "{$1}");
-      routes.add(`${match[1].toUpperCase()} ${route}`);
-    }
-  }
-
-  return routes;
-}
-
-function openApiOperations(source) {
-  const lines = source.split(/\r?\n/);
-  const operations = new Map();
-  let currentPath = null;
-  let currentOperation = null;
-
-  for (const line of lines) {
-    const pathMatch = line.match(/^  (\/[^:]+(?:\{[^}]+\}[^:]*)?):$/);
-    if (pathMatch) {
-      currentPath = pathMatch[1];
-      currentOperation = null;
-      continue;
-    }
-
-    const methodMatch = line.match(/^    (get|post|put|delete|patch):$/);
-    if (currentPath && methodMatch) {
-      currentOperation = `${methodMatch[1].toUpperCase()} ${currentPath}`;
-      operations.set(currentOperation, "");
-      continue;
-    }
-
-    if (currentOperation && /^      /.test(line)) {
-      operations.set(currentOperation, `${operations.get(currentOperation)}\n${line}`);
-    } else if (currentOperation && line.trim()) {
-      currentOperation = null;
-    }
-  }
-
-  return operations;
-}
-
-test("OpenAPI covers every published route with scope metadata", { skip: devDocsPresent ? false : devDocsSkipReason }, () => {
-  const published = expressRoutes(publishedRouteFiles);
-  const source = fs.readFileSync(openApiPath, "utf8");
-  const operations = openApiOperations(source);
-
-  assert.deepEqual([...operations.keys()].sort(), [...published].sort());
-
-  for (const [operation, block] of operations) {
-    assert.match(block, /x-cashflow-scope: (global-unscoped|user-scoped|admin-user-scoped|admin-global)/, operation);
-    assert.match(block, /x-cashflow-mutating: (true|false)/, operation);
-    assert.match(block, /x-cashflow-download-only: (true|false)/, operation);
-  }
-
-  for (const route of privateRoutes) {
-    assert.equal(operations.has(route), false, route);
-  }
-});
-
-test("OpenAPI version follows package.json", { skip: devDocsPresent ? false : devDocsSkipReason }, () => {
-  const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-  const source = fs.readFileSync(openApiPath, "utf8");
-  const version = source.match(/^  version: ([^\s]+)$/m)?.[1];
-
-  assert.equal(version, packageJson.version);
-});
-
-test("private deployment routes are documented outside the published contract", { skip: devDocsPresent ? false : devDocsSkipReason }, () => {
-  const apiGuide = fs.readFileSync(path.join(devDocsDir, "api.md"), "utf8");
-
-  for (const route of privateRoutes) {
-    assert.match(apiGuide, new RegExp(route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  }
-});
-
 test("documentation links resolve", () => {
   const markdownFiles = [
     path.join(repoRoot, "README.md"),
     ...fs.readdirSync(path.join(repoRoot, "docs"))
       .filter(name => name.endsWith(".md") && !name.includes("sync-conflict"))
-      .map(name => path.join(repoRoot, "docs", name)),
-    // dev/ is gitignored and may not exist in every checkout, but check its
-    // own internal links too whenever it is present locally.
-    ...(devDocsPresent
-      ? fs.readdirSync(devDocsDir)
-        .filter(name => name.endsWith(".md") && !name.includes("sync-conflict"))
-        .map(name => path.join(devDocsDir, name))
-      : [])
+      .map(name => path.join(repoRoot, "docs", name))
   ];
   const missing = [];
 
   for (const file of markdownFiles) {
     const source = fs.readFileSync(file, "utf8");
     for (const match of source.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)) {
-      const target = match[1].split("#")[0].trim();
+      // Angle brackets delimit valid Markdown destinations containing spaces.
+      const target = match[1].replace(/^<(.+)>$/, "$1").split("#")[0].trim();
       if (!target || /^(https?:|mailto:)/.test(target)) continue;
       const resolved = path.resolve(path.dirname(file), target);
       if (!fs.existsSync(resolved)) missing.push(`${path.relative(repoRoot, file)} -> ${target}`);

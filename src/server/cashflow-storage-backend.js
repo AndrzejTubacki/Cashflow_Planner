@@ -87,7 +87,10 @@ export function describeCashflowStorageBackend(config = resolveCashflowDbConfig(
   };
 }
 
+/** Construct storage with host-selected financial capabilities. Neither runtime
+ * environment values nor imported/request data enable origin support. */
 export async function createCashflowStorageBackend({
+  allowStandaloneOrigins = false,
   beforeGlobalMigrationStep = () => {},
   databaseConfig = resolveCashflowDbConfig(),
   dataDir,
@@ -114,6 +117,7 @@ export async function createCashflowStorageBackend({
       ...description,
       config: resolvedConfig,
       budgetStore: createSqliteBudgetStore({
+        allowStandaloneOrigins,
         listLedgerYears,
         openLedgerDb,
         openPlanningDb
@@ -138,7 +142,7 @@ export async function createCashflowStorageBackend({
 
   const [globalStore, budgetStore] = await Promise.all([
     createPostgresGlobalStore({ databaseUrl, logError, logServerEvent }),
-    createPostgresBudgetStore({ databaseUrl, logError, logServerEvent })
+    createPostgresBudgetStore({ databaseUrl, logError, logServerEvent, allowStandaloneOrigins })
   ]);
 
   return {

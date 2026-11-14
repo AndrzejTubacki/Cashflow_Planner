@@ -1,3 +1,5 @@
+import { ledgerConversionBalances } from "../engine/ledger-currency-change.js";
+import { recordSqliteFinancialChange } from "./cashflow-financial-journal.js";
 ﻿import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { todayInTimezone } from "./cashflow-date-utils.js";
 import {
@@ -7,7 +9,8 @@ import {
 } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { latestBalanceFromConfirmedRows } from "./cashflow-ledger-balance-utils.js";
-import { multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
+import { budgetLedgerOpeningBalance, firstRunOpeningRows } from "./cashflow-ledger-opening.js";
+import { addMoneyAmounts, multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
 import { normalizeNtfyAllowedPrivateHosts, normalizeNtfyHost, ntfyHostIsAllowed } from "./cashflow-ntfy-private-hosts.js";
 import { validateAndNormalizeSettings } from "./cashflow-settings-validation.js";
 
@@ -80,7 +83,8 @@ export function createCashflowSettingsService({
   normalizeLocale = value => String(value || "en"),
   openPlanningDb,
   recalculatePlanningRunningBalances = null,
-  recalculatePlanningRunningBalancesAsync = null
+  recalculatePlanningRunningBalancesAsync = null,
+  withProjectionStatus = null
 }) {
   async function assertExternalNotificationUrls(safeUpdates) {
     // Save-time feedback complements delivery-time DNS validation and pinning.
@@ -116,6 +120,13 @@ export function createCashflowSettingsService({
     }
 
     return getSettings(userId);
+  }
+
+  // Include setup's declared opening exactly once, while it is still staged.
+  // Consuming these rows and writing their conversion share the settings commit.
+  function openingRowsBalance(rows) {
+    return rows.reduce((balance, row) => addMoneyAmounts(balance,
+      (row.type === "expense" ? -1 : 1) * Number(row.ledger_amount ?? row.amount)), 0);
   }
 
   async function updateSettings(userId, updates) {
@@ -187,9 +198,9 @@ export function createCashflowSettingsService({
           }
         }
 
-        const oldBalance = typeof latestConfirmedBalance === "function"
-          ? Number(latestConfirmedBalance(userId) || 0)
-          : 0;
+        const openingRows = firstRunOpeningRows(db.prepare("SELECT * FROM pending_transactions").all(), previousLedgerCurrency);
+        const oldBalance = addMoneyAmounts(typeof latestConfirmedBalance === "function"
+          ? Number(latestConfirmedBalance(userId) || 0) : 0, openingRowsBalance(openingRows));
 
         if ((!Number.isFinite(rate) || rate <= 0) && typeof fetchProviderRate === "function") {
           const provider = normalizeFxProvider(safeUpdates.fx_provider || currentSettings?.fx_provider);
@@ -219,15 +230,18 @@ export function createCashflowSettingsService({
         ledgerSwitch = {
           oldCurrency: previousLedgerCurrency,
           newCurrency: nextLedgerCurrency,
-          oldBalance: roundMoneyAmount(oldBalance),
-          convertedOpeningBalance: multiplyMoney(oldBalance, rate),
+          ...ledgerConversionBalances(oldBalance, rate),
           rate,
           rateDate,
           source
         };
       }
 
-      db.transaction(() => {
+      const result = db.transaction(() => {
+        // DNS/FX preparation awaited outside this synchronous write boundary.
+        // Reject stale settings instead of applying a decision to another view.
+        const fresh = db.prepare("SELECT * FROM settings WHERE id = 1").get();
+        if (JSON.stringify(fresh) !== JSON.stringify(currentSettings)) throw conflict("Settings changed; retry update");
         if (ledgerSwitch) {
           const unresolvedConversion = db.prepare(`
             SELECT id, ledger_currency
@@ -245,9 +259,14 @@ export function createCashflowSettingsService({
             }]);
           }
 
-          const freshOldBalance = typeof latestConfirmedBalance === "function"
-            ? Number(latestConfirmedBalance(userId) || 0)
-            : 0;
+          const openingRows = firstRunOpeningRows(db.prepare("SELECT * FROM pending_transactions").all(), ledgerSwitch.oldCurrency);
+          const freshOldBalance = addMoneyAmounts(typeof latestConfirmedBalance === "function"
+            ? Number(latestConfirmedBalance(userId) || 0) : 0, openingRowsBalance(openingRows));
+          if (ledgerSwitch.source === "zero-balance" && Math.abs(freshOldBalance) >= 0.0001) {
+            throw conflict("Ledger balance changed; retry currency conversion");
+          }
+          ledgerSwitch.openingRows = openingRows;
+          for (const row of openingRows) db.prepare("DELETE FROM pending_transactions WHERE id = ?").run(row.id);
           ledgerSwitch.oldBalance = roundMoneyAmount(freshOldBalance);
           ledgerSwitch.convertedOpeningBalance = multiplyMoney(freshOldBalance, ledgerSwitch.rate);
         }
@@ -268,10 +287,19 @@ export function createCashflowSettingsService({
 
         if (ledgerSwitch) {
           const conversionId = generateId("pending-ledger-currency");
+          const eventId = generateId("ledger-currency");
+          // Ordering capture needs the sequence watermark, not a complete audit:
+          // legacy accepted rows may never have had original evidence retained.
+          const sequence = db.prepare("SELECT last_sequence FROM cashflow_ledger_audit_state WHERE budget_id = ?").get(userId)?.last_sequence;
+          const acceptanceOrder = captureCurrencyAcceptanceOrder(eventId, conversionId, sequence,
+            [...new Set([...db.prepare("SELECT payment_id FROM cashflow_ledger_originals WHERE budget_id = ?").all(userId).map(row => row.payment_id),
+              ...db.prepare("SELECT id FROM ledger_transactions").all().map(row => row.id)])],
+            db.prepare("SELECT id FROM ledger_currency_events").all().map(row => row.id));
           const convertedAmount = roundMoneyAmount(Math.abs(ledgerSwitch.convertedOpeningBalance));
           const conversionType = ledgerSwitch.convertedOpeningBalance >= 0 ? "income" : "expense";
           const note = JSON.stringify({
             kind: "ledger_currency_conversion",
+            acceptanceOrder,
             old_currency: ledgerSwitch.oldCurrency,
             new_currency: ledgerSwitch.newCurrency,
             old_balance: ledgerSwitch.oldBalance,
@@ -287,7 +315,7 @@ export function createCashflowSettingsService({
               fx_rate, rate_date, source, details, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
           `).run(
-            generateId("ledger-currency"),
+            eventId,
             ledgerSwitch.oldCurrency,
             ledgerSwitch.newCurrency,
             ledgerSwitch.oldBalance,
@@ -295,7 +323,7 @@ export function createCashflowSettingsService({
             ledgerSwitch.rate,
             ledgerSwitch.rateDate,
             ledgerSwitch.source,
-            JSON.stringify({ reason: "settings-update" })
+            JSON.stringify({ reason: "settings-update", acceptanceOrder, ...(ledgerSwitch.openingRows?.length ? { firstRunOpeningRows: ledgerSwitch.openingRows } : {}) })
           );
 
           // The ledger-currency switch is intentionally represented as a visible pending row.
@@ -334,9 +362,15 @@ export function createCashflowSettingsService({
         if (ledgerSwitch && typeof recalculatePlanningRunningBalances === "function") {
           recalculatePlanningRunningBalances(db, userId);
         }
+        const updated = db.prepare("SELECT * FROM settings WHERE id = 1").get() || currentSettings || {};
+        const projected = withProjectionStatus ? withProjectionStatus(userId, updated, { db }) : updated;
+        // Settings can change allocation, FX or ledger currency: fence old cursors
+        // in the same planning transaction even when projection is disabled.
+        recordSqliteFinancialChange(db, userId, "settings");
+        return projected;
       })();
 
-      const result = db.prepare("SELECT * FROM settings WHERE id = 1").get() || currentSettings || {};
+      if (ledgerSwitch) logServerEvent("cashflow_currency_order_captured", { backend: "sqlite" });
       if (allowedPrivateHost) {
         logServerEvent("cashflow_ntfy_private_host_allowed", { host: allowedPrivateHost });
       }
@@ -357,6 +391,14 @@ export function createCashflowSettingsService({
   }
 
   async function confirmedBalanceForSettings(userId, settings) {
+    const openingRows = firstRunOpeningRows(await budgetStore.listPlanningRows(userId, "pending_transactions"),
+      normalizeSupportedCurrency(settings?.ledger_currency || "PLN"));
+    return addMoneyAmounts(await confirmedLedgerBalanceForSettings(userId, settings), openingRowsBalance(openingRows));
+  }
+
+  // Confirmed payments and verified standalone origins remain distinct from
+  // the first-run pending opening that the conversion replaces.
+  async function confirmedLedgerBalanceForSettings(userId, settings) {
     const ledgerCurrency = normalizeSupportedCurrency(settings?.ledger_currency || "PLN");
     if (typeof latestConfirmedBalanceAsync === "function") {
       return Number(await latestConfirmedBalanceAsync(userId, {
@@ -367,7 +409,7 @@ export function createCashflowSettingsService({
     if (budgetStore && typeof budgetStore.listConfirmedTransactions === "function") {
       const rows = (await budgetStore.listConfirmedTransactions(userId))
         .filter(row => String(row.ledger_currency || "PLN") === ledgerCurrency);
-      return latestBalanceFromConfirmedRows(rows, { openingBalance: 0 });
+      return latestBalanceFromConfirmedRows(rows, { openingBalance: await budgetLedgerOpeningBalance(budgetStore, userId, ledgerCurrency) });
     }
     if (typeof latestConfirmedBalance === "function") {
       return Number(latestConfirmedBalance(userId) || 0);
@@ -458,8 +500,7 @@ export function createCashflowSettingsService({
     return {
       oldCurrency: previousLedgerCurrency,
       newCurrency: nextLedgerCurrency,
-      oldBalance: roundMoneyAmount(oldBalance),
-      convertedOpeningBalance: multiplyMoney(oldBalance, rate),
+      ...ledgerConversionBalances(oldBalance, rate),
       rate,
       rateDate,
       source
@@ -480,6 +521,8 @@ export function createCashflowSettingsService({
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
+      const fresh = (await writer.listPlanningRows(userId, "settings"))?.[0] || null;
+      if (JSON.stringify(fresh) !== JSON.stringify(currentSettings)) throw conflict("Settings changed; retry update");
       if (safeUpdates.budget_period_income_id) {
         const income = (await writer.listPlanningRows(userId, "recurring_incomes"))
           .find(row => row.id === safeUpdates.budget_period_income_id) || null;
@@ -494,7 +537,20 @@ export function createCashflowSettingsService({
       }
 
       if (ledgerSwitch) {
-        const freshOldBalance = await confirmedBalanceForSettings(userId, currentSettings);
+        const ledgerRows = (await writer.listConfirmedTransactions(userId))
+          .filter(row => String(row.ledger_currency || "PLN") === ledgerSwitch.oldCurrency);
+        // Currency conversion uses this writer's verified historical offset,
+        // including empty signed histories, before creating the new-currency
+        // conversion payment. The offset itself remains in its old currency.
+        const openingRows = firstRunOpeningRows(await writer.listPlanningRows(userId, "pending_transactions"), ledgerSwitch.oldCurrency);
+        const freshOldBalance = addMoneyAmounts(latestBalanceFromConfirmedRows(ledgerRows, {
+          openingBalance: await budgetLedgerOpeningBalance(writer, userId, ledgerSwitch.oldCurrency)
+        }), openingRowsBalance(openingRows));
+        if (ledgerSwitch.source === "zero-balance" && Math.abs(freshOldBalance) >= 0.0001) {
+          throw conflict("Ledger balance changed; retry currency conversion");
+        }
+        ledgerSwitch.openingRows = openingRows;
+        await writer.deletePlanningRowsById(userId, "pending_transactions", openingRows.map(row => row.id));
         ledgerSwitch.oldBalance = roundMoneyAmount(freshOldBalance);
         ledgerSwitch.convertedOpeningBalance = multiplyMoney(freshOldBalance, ledgerSwitch.rate);
 
@@ -522,11 +578,17 @@ export function createCashflowSettingsService({
 
       if (ledgerSwitch) {
         const conversionId = generateId("pending-ledger-currency");
+        const eventId = generateId("ledger-currency");
+        const acceptanceOrder = captureCurrencyAcceptanceOrder(eventId, conversionId, await writer.ledgerAuditSequence(userId),
+          [...new Set([...await writer.ledgerAuditPaymentIds(userId),
+            ...(await writer.listConfirmedTransactions(userId)).map(row => row.id)])],
+          (await writer.listPlanningRows(userId, "ledger_currency_events")).map(row => row.id));
         const convertedAmount = roundMoneyAmount(Math.abs(ledgerSwitch.convertedOpeningBalance));
         const conversionType = ledgerSwitch.convertedOpeningBalance >= 0 ? "income" : "expense";
         const timestamp = new Date().toISOString();
         const note = JSON.stringify({
           kind: "ledger_currency_conversion",
+          acceptanceOrder,
           old_currency: ledgerSwitch.oldCurrency,
           new_currency: ledgerSwitch.newCurrency,
           old_balance: ledgerSwitch.oldBalance,
@@ -539,9 +601,9 @@ export function createCashflowSettingsService({
         await writer.insertPlanningRows(userId, "ledger_currency_events", [{
           converted_opening_balance: ledgerSwitch.convertedOpeningBalance,
           created_at: timestamp,
-          details: JSON.stringify({ reason: "settings-update" }),
+          details: JSON.stringify({ reason: "settings-update", acceptanceOrder, ...(ledgerSwitch.openingRows?.length ? { firstRunOpeningRows: ledgerSwitch.openingRows } : {}) }),
           fx_rate: ledgerSwitch.rate,
-          id: generateId("ledger-currency"),
+          id: eventId,
           new_currency: ledgerSwitch.newCurrency,
           old_balance: ledgerSwitch.oldBalance,
           old_currency: ledgerSwitch.oldCurrency,
@@ -585,10 +647,14 @@ export function createCashflowSettingsService({
         await recalculatePlanningRunningBalancesAsync(userId, writer);
       }
 
-      return (await writer.listPlanningRows(userId, "settings"))
+      const updated = (await writer.listPlanningRows(userId, "settings"))
         .find(row => Number(row.id) === 1) || currentSettings || {};
+      const projected = withProjectionStatus ? await withProjectionStatus(userId, updated, { store: writer }) : updated;
+      await writer.recordFinancialChange(userId, "settings");
+      return projected;
     });
 
+    if (ledgerSwitch) logServerEvent("cashflow_currency_order_captured", { backend: budgetStore.backend });
     if (allowedPrivateHost) {
       logServerEvent("cashflow_ntfy_private_host_allowed", { host: allowedPrivateHost });
     }
@@ -600,4 +666,12 @@ export function createCashflowSettingsService({
     getSettingsAsync,
     updateSettings
   };
+}
+
+/** Captured under the settings transaction/ledger lock without requiring or
+ * inventing original evidence for legacy payments. Exact IDs also cover rows
+ * not yet baselined; full audit verification remains at correction/export gates. */
+export function captureCurrencyAcceptanceOrder(eventId, conversionId, sequence, paymentIds, previousEventIds) {
+  return { version: 1, eventId, conversionId, afterSequence: Number(sequence ?? 0),
+    paymentIds: [...paymentIds].sort(), previousEventIds: [...previousEventIds].sort() };
 }

@@ -2,6 +2,7 @@ import { formatMessage, t } from "./i18n.js";
 import { useState } from "react";
 import { formatMoney } from "./format.js";
 import { apiFetch } from "./api.js";
+import { FundingOverview } from "./LedgerView.jsx";
 import EditModal from "./EditModal.jsx";
 
 function fundedFraction(row) {
@@ -20,7 +21,7 @@ function StatusPill({ row }) {
   return <span className={`beta-pill beta-pill-${status === "funded" ? "confirmed" : "pending"}`}>{t(status)}</span>;
 }
 
-function TargetTable({ rows, kind, adding, onStopAdding, onChanged, today, usedPriorities }) {
+function TargetTable({ rows, kind, adding, onStopAdding, onChanged, today, usedPriorities, ledgerCurrency }) {
   const isGoal = kind === "goal";
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState("");
@@ -49,6 +50,9 @@ function TargetTable({ rows, kind, adding, onStopAdding, onChanged, today, usedP
           <tr>
             <th>{t("Name")}</th>
             <th className="beta-num">{t("Target")}</th>
+            <th className="beta-num">{t("Target in ledger currency")}</th>
+            <th className="beta-num">{t("Remaining")}</th>
+            <th>{t("Priority")}</th>
             <th>{t("Progress")}</th>
             <th>{t("Status")}</th>
             <th></th>
@@ -63,9 +67,15 @@ function TargetTable({ rows, kind, adding, onStopAdding, onChanged, today, usedP
                 <td>
                   <div className="beta-tx-name">{row.name || t("Unnamed")}</div>
                   {isGoal && row.due_date ? <span className="beta-pill beta-pill-muted">{t("Due")} {row.due_date}</span> : null}
-                  {!isGoal && row.allow_split ? <span className="beta-pill beta-pill-muted">{t("Splittable")}</span> : null}
+                  {!isGoal ? <>
+                    <span className="beta-pill beta-pill-muted">{Number(row.allow_split) ? t("Splittable") : t("Full only")}</span>
+                    <div className="beta-tx-detail">{row.funded_by_date ? formatMessage("Funded by {date}", { date: row.funded_by_date }) : t("No funding date")}</div>
+                  </> : null}
                 </td>
                 <td className="beta-num">{formatMoney(row.amount, row.currency)}</td>
+                <td className="beta-num">{row.target_ledger_amount == null ? "-" : formatMoney(row.target_ledger_amount, row.ledger_currency || ledgerCurrency)}</td>
+                <td className="beta-num">{row.remaining_ledger == null ? "-" : formatMoney(row.remaining_ledger, row.ledger_currency || ledgerCurrency)}</td>
+                <td>{row.priority ?? "-"}</td>
                 <td>
                   <div className="beta-progress">
                     <div className="beta-progress-bar" style={{ width: `${pct}%` }} />
@@ -86,7 +96,7 @@ function TargetTable({ rows, kind, adding, onStopAdding, onChanged, today, usedP
               </tr>
             );
           }) : (
-            <tr><td colSpan={5} className="beta-empty">{t("Nothing here yet.")}</td></tr>
+            <tr><td colSpan={8} className="beta-empty">{t("Nothing here yet.")}</td></tr>
           )}
         </tbody>
       </table>
@@ -117,6 +127,7 @@ export default function TargetsView({ snapshot, onRefresh }) {
   const [addingKind, setAddingKind] = useState(null);
   const goals = snapshot?.goals || [];
   const flex = snapshot?.flexTransactions || [];
+  const ledgerCurrency = snapshot?.settings?.ledger_currency || "PLN";
 
   return (
     <section className="beta-view">
@@ -125,6 +136,7 @@ export default function TargetsView({ snapshot, onRefresh }) {
         <p>{t("Goals and flex spending funded once recurring expenses and income are covered.")}</p>
       </div>
 
+      <FundingOverview snapshot={snapshot} ledgerCurrency={ledgerCurrency} showFullyConfirmed />
       <div className="beta-panel">
         <div className="beta-panel-head">
           <h3>{t("Goals")}</h3>
@@ -136,6 +148,7 @@ export default function TargetsView({ snapshot, onRefresh }) {
           adding={addingKind === "goal"}
           onStopAdding={() => setAddingKind(null)}
           onChanged={onRefresh}
+          ledgerCurrency={ledgerCurrency}
           today={snapshot?.today}
           usedPriorities={goals}
         />
@@ -152,6 +165,7 @@ export default function TargetsView({ snapshot, onRefresh }) {
           adding={addingKind === "flex"}
           onStopAdding={() => setAddingKind(null)}
           onChanged={onRefresh}
+          ledgerCurrency={ledgerCurrency}
           today={snapshot?.today}
           usedPriorities={[...(snapshot?.recurringExpenses || []), ...flex]}
         />

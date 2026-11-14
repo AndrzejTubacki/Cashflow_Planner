@@ -103,13 +103,17 @@ test("migration creates one full recovery snapshot and existing restore flow con
   harness.dbService.openPlanningDb(harness.userId).close();
   harness.dbService.openPlanningDb(harness.userId).close();
 
-  let folders = recoveryFolders(harness.userDir);
+  // Opening planning migrates it and merges ledger_2026.sqlite into it, so the
+  // one snapshot completes at once and still holds the pre-merge ledger file.
+  const folders = recoveryFolders(harness.userDir);
   assert.equal(folders.length, 1);
   assert.equal(fs.existsSync(path.join(folders[0], "planning.sqlite")), true);
   assert.equal(fs.existsSync(path.join(folders[0], "ledger_2026.sqlite")), true);
+  assert.equal(fs.existsSync(path.join(harness.userDir, "ledger_2026.sqlite")), false);
+  assert.equal(fs.existsSync(path.join(harness.userDir, "ledger_2026.sqlite.merged")), true);
 
-  let manifest = JSON.parse(fs.readFileSync(path.join(folders[0], "manifest.json"), "utf8"));
-  assert.equal(manifest.status, "pending");
+  const manifest = JSON.parse(fs.readFileSync(path.join(folders[0], "manifest.json"), "utf8"));
+  assert.equal(manifest.status, "completed");
   assert.equal(manifest.trigger.kind, "planning");
   assert.deepEqual(
     manifest.databases.map(item => [item.file, item.sourceVersion, item.targetVersion]),
@@ -118,13 +122,6 @@ test("migration creates one full recovery snapshot and existing restore flow con
       ["planning.sqlite", 8, PLANNING_SCHEMA_VERSION]
     ]
   );
-
-  harness.dbService.openLedgerDb(harness.userId, "2026").close();
-  folders = recoveryFolders(harness.userDir);
-  assert.equal(folders.length, 1);
-
-  manifest = JSON.parse(fs.readFileSync(path.join(folders[0], "manifest.json"), "utf8"));
-  assert.equal(manifest.status, "completed");
 
   const currentPlanning = harness.dbService.openPlanningDb(harness.userId);
   currentPlanning.prepare("DELETE FROM one_off_transactions WHERE id = 'recovery-one-off'").run();

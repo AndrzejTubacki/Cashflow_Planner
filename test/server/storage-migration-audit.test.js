@@ -7,6 +7,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { auditSqliteStorage } from "../../scripts/storage-migration-audit.mjs";
+import { createCashflowDbService } from "../../src/server/cashflow-db-service.js";
+import { createCashflowStoragePaths } from "../../src/server/cashflow-storage-utils.js";
 import { initializeGlobalSchema } from "../../src/server/cashflow-global-schema.js";
 import {
   initializeLedgerSchema,
@@ -29,6 +31,8 @@ function createAuditedStorage(dataDir) {
   const planning = new Database(path.join(budgetDir, "planning.sqlite"));
   try {
     initializePlanningSchema(planning);
+    // Not merged yet: the ledger below is still a yearly file.
+    planning.prepare("DELETE FROM ledger_merge_state").run();
   } finally {
     planning.close();
   }
@@ -54,6 +58,8 @@ function createAuditedStorage(dataDir) {
 
   const global = new Database(path.join(dataDir, "cashflow-global.sqlite"));
   try {
+    initializeGlobalSchema(global);
+    global.exec("INSERT INTO accounts (id, display_name, created_at, updated_at) VALUES ('household', 'Household', datetime('now'), datetime('now'))");
     initializeGlobalSchema(global, { storageProfileIds: ["household"] });
   } finally {
     global.close();
@@ -88,6 +94,18 @@ test("SQLite storage migration audit reports counts without row values or identi
     assert.doesNotMatch(json, /Private row value/);
     assert.doesNotMatch(json, /tx-secret-id/);
     assert.doesNotMatch(json, /private-occurrence-key/);
+  });
+});
+
+test("SQLite storage migration audit counts ledger rows merged into planning.sqlite", async () => {
+  await withTempStorage(async dataDir => {
+    createAuditedStorage(dataDir);
+    createCashflowDbService(createCashflowStoragePaths(dataDir)).openPlanningDb("household").close();
+
+    const report = auditSqliteStorage({ dataDir, now: new Date("2026-01-03T04:05:06Z") });
+    assert.equal(report.totals.ledgerDbs, 0);
+    assert.equal(report.totals.confirmedRows, 1);
+    assert.equal(report.budgets[0].planning.tables.ledger_transactions, 1);
   });
 });
 

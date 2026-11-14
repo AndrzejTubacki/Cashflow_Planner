@@ -386,7 +386,7 @@ export function createCashflowBackgroundJobs({
                 localTime: local.time,
                 scheduledTime: "03:30",
                 work: async () => {
-                  cleanupOperationalData(userId, "daily_maintenance");
+                  await cleanupOperationalData(userId, "daily_maintenance");
                   const compaction = typeof compactLedgerHistory === "function"
                     ? await compactLedgerHistory(userId)
                     : null;

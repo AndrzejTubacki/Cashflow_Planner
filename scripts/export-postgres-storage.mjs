@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { ENGINE_AUDIT_HOST_OPTIONS } from "../src/engine/engine-host-capabilities.js";
+
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -21,10 +23,13 @@ Omit --budget-ids to export every budget found in the database.
 The command prints only a summary; the generated file contains real rows.`;
 }
 
+/** Export through complete storage snapshots. Origin capability is an internal
+ * host option while CLI/runtime readers await the new format integration. */
 export async function exportPostgresStorage({
   budgetIds = "",
   databaseUrl = process.env.CASHFLOW_DATABASE_URL || "",
   now = new Date(),
+  allowStandaloneOrigins = false,
   outputDir = path.resolve("external-database-exports")
 } = {}) {
   if (!String(databaseUrl || "").trim()) {
@@ -34,7 +39,7 @@ export async function exportPostgresStorage({
   const targetRoot = path.resolve(outputDir);
   fs.mkdirSync(targetRoot, { recursive: true });
 
-  const budgetStore = await createPostgresBudgetStore({ databaseUrl });
+  const budgetStore = await createPostgresBudgetStore({ databaseUrl, allowStandaloneOrigins });
   const globalStore = await createPostgresGlobalStore({ databaseUrl });
   try {
     const requestedIds = String(budgetIds || "").split(",").map(id => id.trim()).filter(Boolean);
@@ -46,6 +51,7 @@ export async function exportPostgresStorage({
       budgetIds: resolvedBudgetIds,
       budgetStore,
       globalStore,
+      allowStandaloneOrigins,
       now,
       reason: "postgres_to_sqlite_migration"
     });
@@ -95,6 +101,8 @@ async function main() {
     string: ["--budget-ids","--output-dir"],
     boolean: ["--pretty"],
     defaults: {
+    // The installed CLI supports the same financial format as engine 0.4.
+    ...ENGINE_AUDIT_HOST_OPTIONS,
     budgetIds: "",
     databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
     outputDir: path.resolve("external-database-exports"),

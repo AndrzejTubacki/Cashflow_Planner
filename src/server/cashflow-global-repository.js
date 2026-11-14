@@ -31,7 +31,7 @@ export function createSqliteGlobalRepository(db, {
     const normalizedId = normalizeUserId(budgetId);
     return db.prepare(`
       SELECT id, storage_key, display_name, status, created_by_account_id,
-        created_at, updated_at, archived_at, deleted_at
+        created_at, updated_at, archived_at, deleted_at, revision
       FROM budgets
       WHERE id = ?
     `).get(normalizedId);
@@ -247,6 +247,10 @@ export function createSqliteGlobalRepository(db, {
         return db.prepare("SELECT active_mode, draft_config_json FROM auth_config WHERE id = 1").get() || {};
       },
       activateDraft() {
+        // Switching authentication configuration is a security boundary. Never
+        // allow grants issued under the prior configuration to revive later.
+        db.prepare("UPDATE app_devices SET revoked_ms = ? WHERE revoked_ms IS NULL").run(Date.now());
+        db.prepare("UPDATE app_device_pairings SET status = 'denied' WHERE status IN ('pending', 'approved')").run();
         db.prepare(`
           UPDATE auth_config
           SET active_mode = draft_mode,
@@ -374,15 +378,19 @@ export function createSqliteGlobalRepository(db, {
           ORDER BY id
         `).all();
       },
-      updateDisplayName(id, displayName) {
-        db.prepare(`
-          UPDATE budgets
-          SET display_name = ?,
-              updated_at = datetime('now')
-          WHERE id = ?
-        `).run(displayName, normalizeUserId(id));
+      // A transaction-bound metadata host uses the same revision CAS contract
+      // on both backends; older callers may omit the expected revision.
+      updateDisplayName(id, displayName, expectedRevision = null) {
+        return db.prepare(`
+          UPDATE budgets SET display_name = ?, revision = revision + 1,
+            updated_at = datetime('now')
+          WHERE id = ? AND (? IS NULL OR revision = ?)
+          RETURNING *
+        `).get(displayName, normalizeUserId(id), expectedRevision, expectedRevision) || null;
       },
       markArchived(id) {
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id IN (SELECT account_id FROM budget_memberships WHERE budget_id = ?)")
+          .run(nowMs(), normalizeUserId(id));
         db.prepare(`
           UPDATE budgets
           SET status = 'archived',
@@ -425,6 +433,11 @@ export function createSqliteGlobalRepository(db, {
               fx_provider = ?,
               fx_buffer_percent = ?,
               ntfy_allowed_private_hosts = ?,
+              backup_max_retention_count = ?,
+              backup_max_age_days = ?,
+              device_access_minutes = ?,
+              device_renewal_idle_days = ?,
+              device_absolute_days = ?,
               updated_at = datetime('now')
           WHERE id = 1
         `).run(
@@ -435,7 +448,12 @@ export function createSqliteGlobalRepository(db, {
           settings.future_periods,
           settings.fx_provider,
           settings.fx_buffer_percent,
-          JSON.stringify(settings.ntfy_allowed_private_hosts || [])
+          JSON.stringify(settings.ntfy_allowed_private_hosts || []),
+          settings.backup_max_retention_count ?? 0,
+          settings.backup_max_age_days ?? 0,
+          settings.device_access_minutes ?? 15,
+          settings.device_renewal_idle_days ?? 90,
+          settings.device_absolute_days ?? 365
         );
       }
     },
@@ -451,8 +469,14 @@ export function createSqliteGlobalRepository(db, {
         db.prepare("DELETE FROM auth_identities WHERE account_id = ?").run(normalizeUserId(accountId));
       },
       deleteForAccountById(accountId, identityId) {
-        return db.prepare("DELETE FROM auth_identities WHERE account_id = ? AND id = ?")
-          .run(normalizeUserId(accountId), String(identityId || "")).changes;
+        const normalizedAccountId = normalizeUserId(accountId);
+        const changes = db.prepare("DELETE FROM auth_identities WHERE account_id = ? AND id = ?")
+          .run(normalizedAccountId, String(identityId || "")).changes;
+        if (changes > 0) {
+          db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+            .run(nowMs(), normalizedAccountId);
+        }
+        return changes;
       },
       listForAccount(accountId) {
         return db.prepare(`
@@ -800,6 +824,10 @@ export function createSqliteGlobalRepository(db, {
         );
       },
       delete({ accountId, budgetId }) {
+        // Conservative scope: losing any budget membership requires re-pairing
+        // this account's devices, even if membership is immediately restored.
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+          .run(nowMs(), normalizeUserId(accountId));
         db.prepare(`
           DELETE FROM budget_memberships
           WHERE budget_id = ? AND account_id = ?
@@ -821,7 +849,7 @@ export function createSqliteGlobalRepository(db, {
       listBudgetsForAccount(accountId, { includeArchived = true } = {}) {
         return db.prepare(`
           SELECT b.id, b.display_name, b.status, b.created_at, b.updated_at,
-            b.archived_at, bm.role
+            b.archived_at, bm.role, b.revision
           FROM budget_memberships bm
           JOIN budgets b ON b.id = bm.budget_id
           WHERE bm.account_id = ?
@@ -846,7 +874,10 @@ export function createSqliteGlobalRepository(db, {
     },
     passwordCredentials: {
       deleteForAccount(accountId) {
-        db.prepare("DELETE FROM password_credentials WHERE account_id = ?").run(normalizeUserId(accountId));
+        const normalizedAccountId = normalizeUserId(accountId);
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+          .run(nowMs(), normalizedAccountId);
+        db.prepare("DELETE FROM password_credentials WHERE account_id = ?").run(normalizedAccountId);
       },
       existsForAccount(accountId) {
         return Boolean(db.prepare(`
@@ -1100,15 +1131,20 @@ export function createSqliteGlobalRepository(db, {
         `).run(normalizeUserId(accountId));
       },
       revokeOthersForAccount(accountId, keepSessionId) {
+        const normalizedAccountId = normalizeUserId(accountId);
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+          .run(nowMs(), normalizedAccountId);
         db.prepare(`
           UPDATE auth_sessions
           SET revoked_at = COALESCE(revoked_at, datetime('now'))
           WHERE account_id = ?
             AND id <> ?
             AND revoked_at IS NULL
-        `).run(normalizeUserId(accountId), String(keepSessionId || ""));
+        `).run(normalizedAccountId, String(keepSessionId || ""));
       },
       revokeForAccountBudget(accountId, budgetId) {
+        db.prepare("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, ?) WHERE account_id = ?")
+          .run(nowMs(), normalizeUserId(accountId));
         db.prepare(`
           UPDATE auth_sessions
           SET selected_budget_id = NULL,

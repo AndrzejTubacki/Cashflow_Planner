@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 
+import { ENGINE_AUDIT_HOST_OPTIONS } from "../src/engine/engine-host-capabilities.js";
+
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from 'node:util';
+import { normalizeBudgetStoreSnapshot } from '../src/server/cashflow-budget-store-snapshot.js';
+import { createLedgerAuditStore } from '../src/server/cashflow-ledger-audit-store.js';
+import { normalizeLedgerAuditFact } from '../src/server/cashflow-ledger-correction-service.js';
 
 import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
 
@@ -26,8 +32,8 @@ import {
 function usage() {
   return `Usage: npm run db:postgres:verify -- --global-export PATH --budget-export PATH [--pretty]
 
-Compares sensitive SQLite-to-Postgres export artifacts with row counts in a Postgres destination.
-The command reads only schema versions and table counts from Postgres and does not print row values.`;
+Compares sensitive SQLite-to-Postgres export artifacts with row counts and retained audit evidence.
+The command is read-only and does not print row values or audit contents.`;
 }
 
 function readJson(filePath) {
@@ -133,10 +139,13 @@ async function postgresCounts(client, {
   };
 }
 
+/** Compare retained financial proof as well as counts. Origin semantics are a
+ * calling-host policy and cannot be requested by imported artifact fields. */
 export async function verifyPostgresMigration({
   budgetExportPath,
   databaseUrl = process.env.CASHFLOW_DATABASE_URL || "",
   globalExportPath,
+  allowStandaloneOrigins = false,
   pgModule = null
 } = {}) {
   if (!globalExportPath) throw new Error("--global-export is required");
@@ -146,7 +155,9 @@ export async function verifyPostgresMigration({
   }
 
   const globalExport = normalizeSqliteGlobalMetadataExport(readJson(globalExportPath));
-  const budgetExport = normalizeSqliteBudgetStorageExport(readJson(budgetExportPath));
+  const artifact = readJson(budgetExportPath);
+  const snapshot = artifact.format === 'cashflow-budget-store-snapshot' ? normalizeBudgetStoreSnapshot(artifact, { allowStandaloneOrigins }) : null;
+  const budgetExport = snapshot?.payload || normalizeSqliteBudgetStorageExport(artifact);
   const budgetIds = budgetIdsForExport(budgetExport);
 
   const pg = await loadPgModule(pgModule);
@@ -186,6 +197,27 @@ export async function verifyPostgresMigration({
     for (const table of POSTGRES_BUDGET_TABLES) {
       compareCount(mismatches, "budget", table, budgetExport.rowCounts[table], actual.budget[table]);
     }
+    // Counts cannot reveal a missing original, changed review or blocked event.
+    // Verify the complete chain against actual destination facts without
+    // returning financial rows or historical actor identities in summaries.
+    for (const budgetId of snapshot?.budgetIds || []) {
+      const expected = (snapshot.ledgerAudits || []).find(audit => audit.budgetId === budgetId) || null;
+      const query = async (sql, values = []) => {
+        let index = 0;
+        return (await client.query(sql.replace(/\?/g, () => `$${++index}`), values)).rows;
+      };
+      try {
+        const state = await query('SELECT budget_id FROM cashflow_ledger_audit_state WHERE budget_id = ?', [budgetId]);
+        const retained = state.length ? await createLedgerAuditStore({ budgetId, query, allowStandaloneOrigins,
+          loadEffectiveRows: async () => (await query('SELECT *, date::text AS date, confirmed_date::text AS confirmed_date FROM confirmed_transactions WHERE budget_id = ?', [budgetId]))
+            .map(row => normalizeLedgerAuditFact(row, budgetId)) }).exportSnapshot() : null;
+        if (!isDeepStrictEqual(retained, expected)) {
+          mismatches.push({ scope: 'ledger-audit', budgetId, reason: 'retained_evidence_differs' });
+        }
+      } catch {
+        mismatches.push({ scope: 'ledger-audit', budgetId, reason: 'invalid_retained_evidence' });
+      }
+    }
 
     return {
       ok: mismatches.length === 0,
@@ -206,11 +238,15 @@ export async function verifyPostgresMigration({
   }
 }
 
+/** Map documented CLI names to the programmatic path options. Keep direct
+ * callers' explicit paths intact and preserve verification's read-only scope. */
 export async function verifyPostgresMigrationCli(options = parseArgs()) {
   if (options.help) {
     return { help: usage() };
   }
-  return await verifyPostgresMigration(options);
+  return await verifyPostgresMigration({ ...options,
+    globalExportPath: options.globalExportPath || options.globalExport,
+    budgetExportPath: options.budgetExportPath || options.budgetExport });
 }
 
 async function main() {
@@ -218,6 +254,8 @@ async function main() {
     string: ["--global-export","--budget-export"],
     boolean: ["--pretty"],
     defaults: {
+    // The installed CLI supports the same financial format as engine 0.4.
+    ...ENGINE_AUDIT_HOST_OPTIONS,
     budgetExportPath: "",
     databaseUrl: process.env.CASHFLOW_DATABASE_URL || "",
     globalExportPath: "",

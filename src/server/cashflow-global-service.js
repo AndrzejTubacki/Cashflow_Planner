@@ -1,3 +1,4 @@
+import { browserBoundOAuthState, verifyOAuthBrowserBinding } from "./cashflow-oauth-browser-binding.js";
 import argon2 from "argon2";
 import crypto from "crypto";
 import fs from "fs";
@@ -6,9 +7,6 @@ import path from "path";
 import { capabilitiesFor, CAPABILITIES } from "./cashflow-authorization.js";
 import { createCashflowGlobalDbService } from "./cashflow-global-db-service.js";
 import { createSqliteGlobalRepository } from "./cashflow-global-repository.js";
-import {
-  LEGACY_ADMIN_ACCOUNT_ID
-} from "./cashflow-global-schema.js";
 import {
   DEFAULT_FUTURE_PERIODS,
   DEFAULT_FX_BUFFER_PERCENT,
@@ -32,6 +30,8 @@ import {
   userNotFoundError
 } from "./cashflow-user-utils.js";
 
+import { DEVICE_TOKEN_POLICY_FIELDS, normalizeDeviceTokenPolicy } from "./cashflow-device-token-policy.js";
+
 const GLOBAL_OPTIONS_KEYS = new Set([
   "ledger_currency",
   "locale",
@@ -40,7 +40,9 @@ const GLOBAL_OPTIONS_KEYS = new Set([
   "future_periods",
   "fx_provider",
   "fx_buffer_percent",
-  "ntfy_allowed_private_hosts"
+  "ntfy_allowed_private_hosts",
+  "backup_max_retention_count",
+  "backup_max_age_days"
 ]);
 
 const AUTH_MODES = new Set(["none", "external", "internal"]);
@@ -603,6 +605,15 @@ export function createCashflowGlobalService({
 
   function normalizeGlobalOptionsUpdate(updates, current) {
     const settingsUpdates = { ...(updates || {}) };
+    const policy = {};
+    for (const key of Object.keys(DEVICE_TOKEN_POLICY_FIELDS)) {
+      if (Object.prototype.hasOwnProperty.call(settingsUpdates, key)) {
+        policy[key] = settingsUpdates[key];
+        delete settingsUpdates[key];
+      }
+    }
+    const normalizedPolicy = normalizeDeviceTokenPolicy(policy, current,
+      (message, field) => badRequest(message, [{ field, reason: "invalid_device_token_policy" }]));
     const hasAllowedHosts = Object.prototype.hasOwnProperty.call(settingsUpdates, "ntfy_allowed_private_hosts");
     const allowedHosts = settingsUpdates.ntfy_allowed_private_hosts;
     delete settingsUpdates.ntfy_allowed_private_hosts;
@@ -617,7 +628,7 @@ export function createCashflowGlobalService({
         invalid: message => badRequest(message, [{ field: "ntfy_allowed_private_hosts", reason: "invalid_host" }])
       });
     }
-    return normalized;
+    return { ...normalized, ...normalizedPolicy };
   }
 
   function ensureUserMetadata(db, userId, displayName = "") {
@@ -777,15 +788,20 @@ export function createCashflowGlobalService({
       const ids = new Set(listCashflowUserIds());
       db.transaction(() => {
         for (const userId of ids) {
+          // Folder discovery may adopt an active account's budget, never claim an unknown user.
+          if (globalRepository(db).accounts.get(userId)?.status !== "active") continue;
           ensureUserMetadata(db, userId);
           ensureCompatibilityBudget(db, userId, metadataUser(db, userId)?.display_name);
         }
       })();
 
-      return globalRepository(db).users.listMetadata().map(row => ({
-        ...row,
-        permissions: normalizePermissions(row.permissions)
-      }));
+      // Also hide stale metadata left by earlier implicit folder discovery.
+      return globalRepository(db).users.listMetadata()
+        .filter(row => globalRepository(db).accounts.get(row.id)?.status === "active")
+        .map(row => ({
+          ...row,
+          permissions: normalizePermissions(row.permissions)
+        }));
     } finally {
       db.close();
     }
@@ -801,12 +817,18 @@ export function createCashflowGlobalService({
     return await withGlobalRepository(async repo => {
       const ids = new Set(listCashflowUserIds());
       for (const userId of ids) {
+        // Folder discovery may adopt an active account's budget, never claim an unknown user.
+        if ((await repo.accounts.get(userId))?.status !== "active") continue;
         await repo.users.ensureMetadata(userId);
         const metadata = await repo.users.getMetadata(userId);
         await ensureCompatibilityBudgetForRepo(repo, userId, metadata?.display_name);
       }
 
-      const rows = await repo.users.listMetadata();
+      // Also hide stale metadata left by earlier implicit folder discovery.
+      const rows = [];
+      for (const row of await repo.users.listMetadata()) {
+        if ((await repo.accounts.get(row.id))?.status === "active") rows.push(row);
+      }
       return rows.map(row => ({
         ...row,
         permissions: normalizePermissions(row.permissions)
@@ -1589,12 +1611,10 @@ export function createCashflowGlobalService({
     return await withGlobalRepository(async repo => {
       await syncExistingStorageBudgetsForRepo(repo);
       const rows = await repo.budgets.listActiveStorage();
-      return rows
-        .filter(row =>
-          typeof cashflowUserStorageExists !== "function"
-          || cashflowUserStorageExists(row.storage_key)
-        )
-        .map(row => row.id);
+      // PostgreSQL budgets keep their data in the database, never in a
+      // per-budget SQLite folder; filtering on folders would hide every
+      // budget from background jobs (FX refresh, ledger checks, backups).
+      return rows.map(row => row.id);
     });
   }
 
@@ -1625,15 +1645,18 @@ export function createCashflowGlobalService({
     const email = Object.prototype.hasOwnProperty.call(input, "email")
       ? normalizeAccountEmail(input.email, "email")
       : null;
+    // Explicit user creation may claim existing storage, but discovery cannot.
+    const adoptingStorage = typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId);
     const options = getGlobalOptions();
     const db = openGlobalDb();
     try {
       const repo = globalRepository(db);
       db.transaction(() => {
         syncExistingStorageBudgets(db);
+        const metadata = repo.users.getMetadata(userId);
         if (
-          repo.identity.legacyUserAccountOrBudgetExists(userId)
-          || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId))
+          repo.accounts.get(userId) || repo.budgets.get(userId)
+          || (metadata && !adoptingStorage)
         ) {
           throw conflict("User already exists");
         }
@@ -1644,7 +1667,8 @@ export function createCashflowGlobalService({
           }]);
         }
 
-        repo.users.insertNew({ id: userId, displayName });
+        if (metadata) repo.users.ensureMetadata(userId, displayName, { permissions: "[]" });
+        else repo.users.insertNew({ id: userId, displayName });
       })();
     } finally {
       db.close();
@@ -1652,7 +1676,7 @@ export function createCashflowGlobalService({
 
     try {
       openPlanningDb(userId).close();
-      applyDefaultsToUser(userId, options);
+      if (!adoptingStorage) applyDefaultsToUser(userId, options);
       const metadataDb = openGlobalDb();
       try {
         metadataDb.transaction(() => {
@@ -1689,7 +1713,7 @@ export function createCashflowGlobalService({
       } finally {
         cleanupDb.close();
       }
-      if (typeof deleteCashflowUserStorage === "function") {
+      if (!adoptingStorage && typeof deleteCashflowUserStorage === "function") {
         try {
           deleteCashflowUserStorage(userId);
         } catch (cleanupError) {
@@ -1739,7 +1763,6 @@ export function createCashflowGlobalService({
       await syncExistingStorageBudgetsForRepo(repo);
       if (
         await repo.identity.legacyUserAccountOrBudgetExists(userId)
-        || (typeof cashflowUserStorageExists === "function" && cashflowUserStorageExists(userId))
       ) {
         throw conflict("User already exists");
       }
@@ -1823,9 +1846,8 @@ export function createCashflowGlobalService({
       repo.users.touchSelection(normalizedId);
       openPlanningDb(normalizedId).close();
       ensureCompatibilityBudget(db, normalizedId, metadataUser(db, normalizedId)?.display_name);
-      const ownerAccountId = repo.memberships.ownerAccountId(normalizedId);
       return resolveBudgetContext(normalizedId, {
-        accountId: ownerAccountId || LEGACY_ADMIN_ACCOUNT_ID
+        accountId: normalizedId
       }).session;
     } finally {
       db.close();
@@ -1850,16 +1872,15 @@ export function createCashflowGlobalService({
       throw userNotFoundError(normalizedId);
     }
 
-    const ownerAccountId = await globalStore.transaction(async repo => {
+    await globalStore.transaction(async repo => {
       await repo.users.ensureMetadata(normalizedId);
       await repo.users.touchSelection(normalizedId);
       const metadata = await repo.users.getMetadata(normalizedId);
       await ensureCompatibilityBudgetForRepo(repo, normalizedId, metadata?.display_name);
-      return await repo.memberships.ownerAccountId(normalizedId);
     });
 
     return (await resolveBudgetContextAsync(normalizedId, {
-      accountId: ownerAccountId || LEGACY_ADMIN_ACCOUNT_ID
+      accountId: normalizedId
     })).session;
   }
 
@@ -1873,7 +1894,7 @@ export function createCashflowGlobalService({
       };
     }
 
-    return resolveBudgetContext(userId).session;
+    return resolveBudgetContext(userId, { accountId: userId }).session;
   }
 
   async function resolveSessionAsync(userId = "") {
@@ -1886,7 +1907,7 @@ export function createCashflowGlobalService({
       };
     }
 
-    return (await resolveBudgetContextAsync(userId)).session;
+    return (await resolveBudgetContextAsync(userId, { accountId: userId })).session;
   }
 
   function resolveAccountContext(accountId = "") {
@@ -1975,10 +1996,12 @@ export function createCashflowGlobalService({
     });
   }
 
+  // Callers must supply their actor; budget ownership never establishes identity.
   function resolveBudgetContext(budgetId = "", {
-    accountId = LEGACY_ADMIN_ACCOUNT_ID,
+    accountId = "",
     skipStorageExistenceCheck = false
   } = {}) {
+    if (!accountId) throw unauthorized("An account is required for budget access");
     const normalizedId = normalizeUserId(budgetId);
     const db = openGlobalDb();
     try {
@@ -2040,7 +2063,8 @@ export function createCashflowGlobalService({
           displayName: budget.display_name,
           role: membership?.role || "",
           status: budget.status,
-          storageKey: budget.storage_key
+          storageKey: budget.storage_key,
+          revision: budget.revision
         },
         capabilities,
         globalRoles,
@@ -2067,9 +2091,10 @@ export function createCashflowGlobalService({
 
   async function resolveBudgetContextAsync(budgetId = "", options = {}) {
     const {
-      accountId = LEGACY_ADMIN_ACCOUNT_ID,
+      accountId = "",
       skipStorageExistenceCheck = false
     } = options;
+    if (!accountId) throw unauthorized("An account is required for budget access");
     const normalizedId = normalizeUserId(budgetId);
     return await withGlobalRepository(async repo => {
       let budget = await repo.budgets.get(normalizedId);
@@ -2137,7 +2162,8 @@ export function createCashflowGlobalService({
           displayName: budget.display_name,
           role: membership?.role || "",
           status: budget.status,
-          storageKey: budget.storage_key
+          storageKey: budget.storage_key,
+          revision: budget.revision
         },
         capabilities,
         globalRoles,
@@ -2765,7 +2791,7 @@ export function createCashflowGlobalService({
     return provider;
   }
 
-  async function startAuthProviderLoginSqlite(providerId) {
+  async function startAuthProviderLoginSqlite(providerId, browserBinding = {}) {
     const db = openGlobalDb();
     try {
       let stateRow;
@@ -2777,7 +2803,7 @@ export function createCashflowGlobalService({
           throw forbidden("Provider login is available only in internal authentication mode");
         }
         provider = authProviderForUse(db, providerId);
-        const state = oidcClient.randomState();
+        const state = browserBoundOAuthState(browserBinding);
         const codeVerifier = oidcClient.randomPKCECodeVerifier();
         const nonce = oidcClient.randomNonce();
         const expiresAt = addMinutesIso(OAUTH_STATE_TTL_MINUTES);
@@ -2812,7 +2838,7 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function startAuthProviderLogin(providerId) {
+  async function startAuthProviderLogin(providerId, browserBinding = {}) {
     const id = normalizeAuthProviderId(providerId);
     const prepared = await withExternalGlobalTransaction(async repo => {
       const config = await repo.authConfig.getActiveMode();
@@ -2821,7 +2847,7 @@ export function createCashflowGlobalService({
       }
       const providerRow = await authProviderRowForRepo(repo, id);
       const provider = providerForUseRow(providerRow);
-      const state = oidcClient.randomState();
+      const state = browserBoundOAuthState(browserBinding);
       const codeVerifier = oidcClient.randomPKCECodeVerifier();
       const nonce = oidcClient.randomNonce();
       const expiresAt = addMinutesIso(OAUTH_STATE_TTL_MINUTES);
@@ -2849,7 +2875,7 @@ export function createCashflowGlobalService({
       };
     }, () => null);
 
-    if (!prepared) return await startAuthProviderLoginSqlite(providerId);
+    if (!prepared) return await startAuthProviderLoginSqlite(providerId, browserBinding);
 
     return {
       authorizationUrl: await authorizationUrlForProvider(prepared.provider, {
@@ -2862,7 +2888,7 @@ export function createCashflowGlobalService({
     };
   }
 
-  async function startAuthProviderLinkSqlite(actorAccountId, providerId) {
+  async function startAuthProviderLinkSqlite(actorAccountId, providerId, browserBinding = {}) {
     const accountId = normalizeUserId(actorAccountId);
     const db = openGlobalDb();
     try {
@@ -2877,7 +2903,7 @@ export function createCashflowGlobalService({
         const account = accountExistsRow(db, accountId);
         if (account.status !== "active") throw conflict("Only active accounts can link authentication providers");
         provider = authProviderForUse(db, providerId);
-        const state = oidcClient.randomState();
+        const state = browserBoundOAuthState(browserBinding);
         const codeVerifier = oidcClient.randomPKCECodeVerifier();
         const nonce = oidcClient.randomNonce();
         const expiresAt = addMinutesIso(OAUTH_STATE_TTL_MINUTES);
@@ -2913,7 +2939,7 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function startAuthProviderLink(actorAccountId, providerId) {
+  async function startAuthProviderLink(actorAccountId, providerId, browserBinding = {}) {
     const accountId = normalizeUserId(actorAccountId);
     const id = normalizeAuthProviderId(providerId);
     const prepared = await withExternalGlobalTransaction(async repo => {
@@ -2925,7 +2951,7 @@ export function createCashflowGlobalService({
       if (account.status !== "active") throw conflict("Only active accounts can link authentication providers");
       const providerRow = await authProviderRowForRepo(repo, id);
       const provider = providerForUseRow(providerRow);
-      const state = oidcClient.randomState();
+      const state = browserBoundOAuthState(browserBinding);
       const codeVerifier = oidcClient.randomPKCECodeVerifier();
       const nonce = oidcClient.randomNonce();
       const expiresAt = addMinutesIso(OAUTH_STATE_TTL_MINUTES);
@@ -2954,7 +2980,7 @@ export function createCashflowGlobalService({
       };
     }, () => null);
 
-    if (!prepared) return await startAuthProviderLinkSqlite(actorAccountId, providerId);
+    if (!prepared) return await startAuthProviderLinkSqlite(actorAccountId, providerId, browserBinding);
 
     return {
       authorizationUrl: await authorizationUrlForProvider(prepared.provider, {
@@ -2967,7 +2993,17 @@ export function createCashflowGlobalService({
     };
   }
 
-  async function completeAuthProviderCallbackSqlite(providerId, callbackUrl) {
+  /** Linking must still own the exact active initiating session when its
+   * identity association commits, including after a slow provider exchange. */
+  function assertOAuthLinkSession(stateRow, session) {
+    if (!session || session.account_id !== stateRow.account_id || session.revoked_at
+      || Date.parse(session.idle_expires_at) <= Date.now()
+      || Date.parse(session.absolute_expires_at) <= Date.now()) {
+      throw unauthorized('Initiating browser session is no longer active');
+    }
+  }
+
+  async function completeAuthProviderCallbackSqlite(providerId, callbackUrl, browserBinding) {
     const id = normalizeAuthProviderId(providerId);
     const currentUrl = new URL(callbackUrl);
     const state = String(currentUrl.searchParams.get("state") || "");
@@ -3007,6 +3043,7 @@ export function createCashflowGlobalService({
         const existing = repo.identities.findWithAccountByProviderSubject(provider.id, subject);
 
         if (freshState.purpose === "link") {
+          assertOAuthLinkSession(freshState, repo.sessions.getByTokenHash(authTokenHash(browserBinding.session)));
           if (!freshState.account_id) throw unauthorized("Authentication state is invalid or expired");
           assertLinkableProviderEmail(provider, email, emailVerified);
           if (existing && existing.account_id !== freshState.account_id) {
@@ -3078,9 +3115,10 @@ export function createCashflowGlobalService({
     }
   }
 
-  async function completeAuthProviderCallback(providerId, callbackUrl) {
+  async function completeAuthProviderCallback(providerId, callbackUrl, browserBinding = {}) {
+    verifyOAuthBrowserBinding(new URL(callbackUrl).searchParams.get("state"), browserBinding);
     if (!globalStore || globalStore.backend === "sqlite") {
-      return await completeAuthProviderCallbackSqlite(providerId, callbackUrl);
+      return await completeAuthProviderCallbackSqlite(providerId, callbackUrl, browserBinding);
     }
 
     // Backend dispatch is complete above; both transaction phases are external-store-only.
@@ -3131,6 +3169,7 @@ export function createCashflowGlobalService({
 
       let result;
       if (freshState.purpose === "link") {
+        assertOAuthLinkSession(freshState, await repo.sessions.getByTokenHash(authTokenHash(browserBinding.session), { forShare: true }));
         if (!freshState.account_id) throw unauthorized("Authentication state is invalid or expired");
         assertLinkableProviderEmail(prepared.provider, email, emailVerified);
         if (existing && existing.account_id !== freshState.account_id) {
@@ -3734,7 +3773,8 @@ export function createCashflowGlobalService({
         targetType: "account"
       });
       return {
-        accountId: row.account_id
+        accountId: row.account_id,
+        credentialProof: authTokenHash(row.password_hash)
       };
     } finally {
       updateDb.close();
@@ -3814,7 +3854,8 @@ export function createCashflowGlobalService({
         targetType: "account"
       });
       return {
-        accountId: row.account_id
+        accountId: row.account_id,
+        credentialProof: authTokenHash(row.password_hash)
       };
     });
   }

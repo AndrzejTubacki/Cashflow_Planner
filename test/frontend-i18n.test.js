@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import en from "../public/app/cashflow/locales/en.js";
-import pl from "../public/app/cashflow/locales/pl.js";
+import en from "../public-legacy/app/cashflow/locales/en.js";
+import pl from "../public-legacy/app/cashflow/locales/pl.js";
 import { createElement } from "../frontend-beta/node_modules/react/index.js";
 import { formatParts, setLocale } from "../frontend-beta/src/i18n.js";
 
@@ -37,7 +37,7 @@ test("beta translation keys are complete labels or sentences, not concatenated f
 });
 
 test("every beta translation has Polish copy unless it is a name or technical term", () => {
-  const unchangedTerms = new Set(["Cashflow", "BETA", "Discord", "ntfy", "2026-05"]);
+  const unchangedTerms = new Set(["Cashflow", "Discord", "ntfy", "2026-05"]);
   for (const key of betaTranslationKeys()) {
     if (unchangedTerms.has(key)) continue;
     assert.notEqual(pl.strings[key], en.strings[key], `Polish translation is still English: ${key}`);
@@ -60,7 +60,7 @@ test("beta JSX does not bypass translation for visible text or string attributes
   const sourceDir = path.resolve("frontend-beta/src");
   const files = fs.readdirSync(sourceDir).filter(name => name.endsWith(".jsx") && !name.includes(".sync-conflict-"));
   const allowed = new Set([
-    "Cashflow", "BETA", "ntfy", "Discord", "RBAC", "&times;", "i.isConfirmed || i.date",
+    "Cashflow", "ntfy", "Discord", "RBAC", "&times;", "i.isConfirmed || i.date",
     "example.com, example.org", "admins, ops", "external",
     "https://auth.example.com/application/o/cashflow/", "https://ntfy.example.com/topic",
     "tk_...", "https://discord.com/api/webhooks/..."

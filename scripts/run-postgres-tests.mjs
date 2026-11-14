@@ -12,6 +12,12 @@ function fail(message) {
   process.exit(1);
 }
 
+// A named repository-owned subset permits fast diagnostics without accepting
+// arbitrary paths, commands, database URLs or weaker fixture/cleanup rules.
+const options = process.argv.slice(2);
+if (options.length > 1 || options.some(value => value !== '--standalone-transfers')) fail('Unsupported PostgreSQL test selection');
+const standaloneTransfers = options.includes('--standalone-transfers');
+
 if (process.env.CASHFLOW_ENABLE_POSTGRES_TESTS !== "1") {
   fail("Refusing to run Postgres tests: set CASHFLOW_ENABLE_POSTGRES_TESTS=1 for the disposable test database.");
 }
@@ -30,9 +36,11 @@ if (!String(process.env.CASHFLOW_DATABASE_URL || "").trim()) {
 const testDirectory = new URL("../test/server/", import.meta.url);
 const POSTGRES_TEST_FILES = readdirSync(testDirectory)
   .filter(name => name.endsWith(".test.js"))
+  .filter(name => !standaloneTransfers || name.startsWith('standalone-'))
   .filter(name => readFileSync(new URL(name, testDirectory), "utf8").includes("postgresRuntimeTestsEnabled"))
   .sort()
   .map(name => `test/server/${name}`);
+if (standaloneTransfers) console.log('Targeted standalone transfer checks only; this is not the full PostgreSQL suite.');
 
 async function runFile(file) {
   return await new Promise((resolve, reject) => {

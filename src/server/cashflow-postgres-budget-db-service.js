@@ -97,6 +97,8 @@ export async function createPostgresBudgetDbService({
       );
       // Check additive operational schema without applying migrations at boot.
       await client.query("SELECT 1 FROM cashflow_backup_artifacts LIMIT 0");
+      await client.query("SELECT 1 FROM cashflow_sync_heads LIMIT 0");
+      await client.query("SELECT 1 FROM cashflow_sync_operations LIMIT 0");
       const planningVersion = Number(result?.rows?.[0]?.planning_version);
       const ledgerVersion = Number(result?.rows?.[0]?.ledger_version);
       if (

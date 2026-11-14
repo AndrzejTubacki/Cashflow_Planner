@@ -1,3 +1,4 @@
+import { requireMoneyAmount } from "./cashflow-input-validation.js";
 import { requireHolidayCountry, requireIsoDate, requireIsoMonth } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { roundMoneyAmount } from "./cashflow-money-utils.js";
@@ -19,7 +20,7 @@ const TABLE_COLUMNS = {
     "minimum_reserve_enabled", "minimum_reserve_amount", "ledger_history_compaction_months", "budget_period_income_id",
     "fx_buffer_percent", "fx_provider", "fx_used_currencies", "manual_fx_rates",
     "auto_backup_enabled", "backup_interval_minutes", "backup_retention_count", "backup_location",
-    "notification_channel", "ntfy_url", "ntfy_auth_token", "discord_webhook_url", "notification_delivery_time", "notify_goal_impossible",
+    "notification_channel", "notification_channels", "ntfy_url", "ntfy_auth_token", "discord_webhook_url", "notification_delivery_time", "notify_goal_impossible",
     "notify_necessary_underfunded", "notify_funding_shortfall", "notify_income_missing",
     "notify_pending_summary", "notify_goal_funded", "notify_fx_changed",
     "ntfy_priority_goal_impossible", "ntfy_priority_necessary_underfunded",
@@ -179,7 +180,19 @@ function requireNumber(details, table, index, row, field, options = {}) {
     details.push(detail(table, index, row, field, exclusiveMin ? "must_be_positive" : "below_minimum"));
   }
   if (max !== null && number > max) details.push(detail(table, index, row, field, "above_maximum"));
-  const normalized = money ? roundMoneyAmount(number) : number;
+  let normalized = number;
+  if (money) {
+    try {
+      // Historical running balances are aggregate signed totals, not source
+      // amounts. Preserve their range while requiring safe finite cents.
+      if (field === 'running_balance_pln') {
+        normalized = roundMoneyAmount(number);
+        if (!Number.isFinite(normalized) || !Number.isSafeInteger(Math.round(normalized * 100))) throw new Error('unsafe aggregate');
+      } else {
+        normalized = requireMoneyAmount(number, field, { min, max, exclusiveMin });
+      }
+    } catch { details.push(detail(table, index, row, field, 'unsafe_money')); return null; }
+  }
   row[field] = normalized;
   return normalized;
 }

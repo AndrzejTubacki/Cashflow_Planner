@@ -35,7 +35,9 @@ export async function createGlobalStoreExport({
   const tables = {};
 
   for (const tableName of POSTGRES_GLOBAL_TABLES) {
-    tables[tableName] = (await globalStore.listRows(tableName)).map(row => ({ ...row }));
+    // Device grants belong to one running instance, never a portable backup.
+    tables[tableName] = tableName.startsWith("app_device") ? []
+      : (await globalStore.listRows(tableName)).map(row => ({ ...row }));
   }
 
   return {

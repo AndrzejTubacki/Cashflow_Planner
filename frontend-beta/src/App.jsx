@@ -45,7 +45,7 @@ function useHashSection() {
   return [section, select];
 }
 
-// Provider sign-in comes back as /beta/?cashflow_auth=linked or ?cashflow_auth_error=<reason>.
+// Provider sign-in comes back as /?cashflow_auth=linked or ?cashflow_auth_error=<reason>.
 function takeAuthReturnNotice() {
   const params = new URLSearchParams(window.location.search);
   const error = params.get("cashflow_auth_error");
@@ -90,6 +90,9 @@ export default function App() {
     // either app carries over to the other.
     applyUiPreferences(loadUiPreferences(currentPreferenceScope()));
   }, []);
+
+  // Validation belongs to the selected budget, even though its panel spans views.
+  useEffect(() => { setValidationResult(null); }, [session?.budgetId, session?.userId]);
 
   const loadCounter = useRef(0);
   const load = useCallback(async () => {
@@ -176,8 +179,8 @@ export default function App() {
 
   useEffect(() => {
     const installed = snapshot?.app?.version;
-    const isAdmin = (snapshot?.session?.permissions || []).includes("admin");
-    if (!installed || !isAdmin) return undefined;
+    if (!installed) return undefined;
+    setVersionCheck({ status: "checking" });
     let active = true;
     fetch("https://api.github.com/repos/AndrzejTubacki/Cashflow_Planner/releases/latest", {
       cache: "no-store", headers: { accept: "application/vnd.github+json" }
@@ -189,7 +192,7 @@ export default function App() {
         setVersionCheck(newer ? { status: "available", latest, url: release.html_url } : { status: "current" });
       }).catch(() => { if (active) setVersionCheck({ status: "unavailable" }); });
     return () => { active = false; };
-  }, [snapshot?.app?.version, snapshot?.session?.permissions]);
+  }, [snapshot?.app?.version]);
 
   const signOut = useCallback(async () => {
     try {
@@ -222,7 +225,7 @@ export default function App() {
     return (
       <div className="beta-loading">
         <div className="beta-loading-mark" />
-        <p>{t("Starting the beta planner...")}</p>
+        <p>{t("Starting Cashflow...")}</p>
       </div>
     );
   }
@@ -300,7 +303,8 @@ export default function App() {
       ledgerCurrency={ledgerCurrency}
       sections={visibleSections}
       installedVersion={snapshot?.app?.version}
-      updateNotice={canAdmin && versionCheck.status === "available" ? versionCheck : null}
+      versionCheck={versionCheck}
+      updateNotice={versionCheck.status === "available" ? versionCheck : null}
     >
       <header className="beta-topbar">
         <span className="beta-topbar-title">{budgetLabel}</span>
@@ -314,6 +318,10 @@ export default function App() {
       </header>
 
       <ProjectionWarnings snapshot={snapshot} onRefresh={load} />
+      {validationResult ? <div role="status" className={`beta-validation-panel ${validationResult.kind === "error" ? "beta-error" : "beta-success"}`}>
+        <pre>{validationResult.message}</pre>
+        <button type="button" className="beta-btn-small" onClick={() => setValidationResult(null)}>{t("Dismiss")}</button>
+      </div> : null}
       {section === "budget" ? (
         <BudgetView snapshot={snapshot} onRefresh={load} onCurrentBudgetRemoved={returnToBudgetPicker} />
       ) : section === "ledger" ? (

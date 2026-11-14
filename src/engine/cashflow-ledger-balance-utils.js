@@ -1,0 +1,98 @@
+import { compareEngineText } from "./cashflow-ordering.js";
+import {
+  addMoneyAmounts,
+  multiplyMoney,
+  roundMoneyAmount,
+  subtractMoneyAmounts
+} from "./cashflow-money-utils.js";
+
+function dateOnlySortKey(value) {
+  if (value instanceof Date) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  return String(value || "").slice(0, 10);
+}
+
+function timestampSortKey(value) {
+  if (value instanceof Date) return value.toISOString();
+  return String(value || "");
+}
+
+export function computedConfirmedLedgerAmount(row = {}) {
+  return multiplyMoney(row.amount, row.buffered_fx_rate || row.fx_rate || 1);
+}
+
+export function storedOrComputedConfirmedLedgerAmount(row = {}) {
+  if (row.ledger_amount !== null && row.ledger_amount !== undefined) {
+    return roundMoneyAmount(row.ledger_amount);
+  }
+
+  return computedConfirmedLedgerAmount(row);
+}
+
+export function compareConfirmedRowsForBalance(a = {}, b = {}) {
+  const dateCompare = compareEngineText(dateOnlySortKey(a.date), dateOnlySortKey(b.date));
+  if (dateCompare !== 0) return dateCompare;
+
+  const createdCompare = compareEngineText(timestampSortKey(a.created_at), timestampSortKey(b.created_at));
+  if (createdCompare !== 0) return createdCompare;
+
+  return compareEngineText(a.id || "", b.id || "");
+}
+
+export function sortConfirmedRowsForBalance(rows = []) {
+  return [...rows].sort(compareConfirmedRowsForBalance);
+}
+
+export function confirmedRowsWithRunningBalances(rows = [], {
+  openingBalance = 0
+} = {}) {
+  let balance = roundMoneyAmount(openingBalance);
+
+  return sortConfirmedRowsForBalance(rows).map(row => {
+    const ledgerAmount = computedConfirmedLedgerAmount(row);
+    balance = row.type === "income"
+      ? addMoneyAmounts(balance, ledgerAmount)
+      : subtractMoneyAmounts(balance, ledgerAmount);
+
+    return {
+      ...row,
+      ledger_amount: ledgerAmount,
+      running_balance_pln: roundMoneyAmount(balance)
+    };
+  });
+}
+
+export function wouldConfirmedRowsGoNegative(rows = [], {
+  openingBalance = 0
+} = {}) {
+  // Only the final/latest balance matters here, not every historical point in
+  // the sequence: a real ledger can legitimately dip below zero briefly (an
+  // expense landing a few days before the income that covers it) and recover
+  // — that's normal cash flow, not something a future, unrelated confirmation
+  // should be blocked by forever after. Scanning every row would make any
+  // ledger with one resolved historical dip permanently refuse to confirm
+  // anything, including income.
+  const withBalances = confirmedRowsWithRunningBalances(rows, { openingBalance });
+  const last = withBalances.at(-1);
+  return Boolean(last) && last.running_balance_pln < -0.005;
+}
+
+export function latestBalanceFromConfirmedRows(rows = [], {
+  openingBalance = 0
+} = {}) {
+  const sorted = sortConfirmedRowsForBalance(rows);
+  if (!sorted.length) return roundMoneyAmount(openingBalance);
+
+  const last = sorted[sorted.length - 1];
+  if (last.running_balance_pln !== null && last.running_balance_pln !== undefined) {
+    return roundMoneyAmount(last.running_balance_pln);
+  }
+
+  const withBalances = confirmedRowsWithRunningBalances(sorted, { openingBalance });
+  return roundMoneyAmount(withBalances.at(-1)?.running_balance_pln ?? openingBalance);
+}

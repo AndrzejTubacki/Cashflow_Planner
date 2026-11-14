@@ -1,5 +1,5 @@
-import english from "../../public/app/cashflow/locales/en.js";
-import polish from "../../public/app/cashflow/locales/pl.js";
+import english from "../../public-legacy/app/cashflow/locales/en.js";
+import polish from "../../public-legacy/app/cashflow/locales/pl.js";
 import { cloneElement, isValidElement } from "react";
 
 const dictionaries = new Map([[english.id, english], [polish.id, polish]]);

@@ -2,9 +2,9 @@
 
 Cashflow includes or distributes the following third-party software components:
 
-## Frontend Beta Bundle (`public-beta/`)
+## Frontend Beta Bundle (`public/`)
 
-The prebuilt frontend bundle in `public-beta/` incorporates the following
+The prebuilt frontend bundle in `public/` incorporates the following
 packages:
 
 - `react` (`18.3.1`) — MIT License

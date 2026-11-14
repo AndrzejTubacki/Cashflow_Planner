@@ -78,7 +78,7 @@ export function createSqliteGlobalMetadataExport({
     const rowCounts = {};
 
     for (const tableName of POSTGRES_GLOBAL_TABLES) {
-      const rows = rowsForTable(db, tableName);
+      const rows = tableName.startsWith("app_device") ? [] : rowsForTable(db, tableName);
       tables[tableName] = rows;
       rowCounts[tableName] = rows.length;
     }

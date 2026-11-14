@@ -36,13 +36,13 @@ function setLocalRole(harness, role, { systemAdmin = false } = {}) {
     db.prepare(`
       UPDATE budget_memberships
       SET account_id = 'role_test_owner', updated_at = datetime('now')
-      WHERE budget_id = 'local' AND account_id = 'legacy-admin'
+      WHERE budget_id = 'local' AND account_id = 'local'
     `).run();
     db.prepare(`
       INSERT INTO budget_memberships (
         budget_id, account_id, role, invited_by_account_id, created_at, updated_at
       )
-      VALUES ('local', 'legacy-admin', ?, NULL, datetime('now'), datetime('now'))
+      VALUES ('local', 'local', ?, NULL, datetime('now'), datetime('now'))
     `).run(role);
     db.prepare(`
       INSERT OR IGNORE INTO account_global_roles (
@@ -50,11 +50,11 @@ function setLocalRole(harness, role, { systemAdmin = false } = {}) {
       )
       VALUES ('role_test_owner', 'system_admin', NULL, datetime('now'))
     `).run();
-    db.prepare("DELETE FROM account_global_roles WHERE account_id = 'legacy-admin'").run();
+    db.prepare("DELETE FROM account_global_roles WHERE account_id = 'local'").run();
     if (systemAdmin) {
       db.prepare(`
         INSERT INTO account_global_roles (account_id, role, granted_by_account_id, created_at)
-        VALUES ('legacy-admin', 'system_admin', NULL, datetime('now'))
+        VALUES ('local', 'system_admin', NULL, datetime('now'))
       `).run();
     }
   } finally {
@@ -947,6 +947,8 @@ test("route-triggered budget maintenance uses optional budget locks", async () =
       ttlMs: call.options.ttlMs
     })), [
       { name: "budget:local:automatic-backup", ttlMs: 300_000 },
+      // Backup pruning joins the same lock as restore and import.
+      { name: "budget:local:data-portability", ttlMs: 300_000 },
       { name: "budget:local:retention", ttlMs: 120_000 }
     ]);
   }, {

@@ -1,3 +1,4 @@
+import { createLedgerAuditBackupAdapter } from "./cashflow-ledger-audit-backup.js";
 import {
   createPostgresBudgetDbService
 } from "./cashflow-postgres-budget-db-service.js";
@@ -16,6 +17,8 @@ import {
 import {
   normalizeSqliteBindValue
 } from "./cashflow-sqlite-bind-utils.js";
+import { recordFinancialChange, rotateFinancialEpoch } from "./cashflow-financial-journal.js";
+import { ledgerYearViewSql } from "./cashflow-schema.js";
 
 function quoteIdentifier(identifier) {
   return `"${String(identifier).replaceAll('"', '""')}"`;
@@ -167,6 +170,7 @@ const DATE_ONLY_COLUMNS_BY_TABLE = {
   fx_rates_cache: ["rate_date", "effective_date"],
   future_transactions: ["date"],
   goals: ["due_date"],
+  ledger_currency_events: ["rate_date"],
   one_off_transactions: ["date"],
   pending_transactions: ["date"]
 };
@@ -178,7 +182,7 @@ const TIMESTAMP_COLUMNS_BY_TABLE = {
   flex_transactions: ["created_at", "updated_at"],
   future_transactions: ["created_at", "updated_at", "generation_timestamp"],
   goals: ["created_at", "updated_at"],
-  ledger_currency_events: ["changed_at"],
+  ledger_currency_events: ["changed_at", "created_at"],
   notification_queue: ["queued_at", "sent_at"],
   one_off_transactions: ["created_at", "updated_at"],
   pending_transactions: ["created_at", "updated_at"],
@@ -357,6 +361,24 @@ function normalizeFutureSourceFilter(sourceColumn, sourceId, ledgerCurrency) {
     sourceColumn: safeColumn,
     sourceId: normalizedSourceId
   };
+}
+
+/** PostgreSQL cannot update one conflict key twice in a single INSERT. Split
+ * before repeats while preserving SQLite's sequential upsert semantics, including
+ * original identity/type and the last title/message/priority/timestamp. */
+function notificationBatches(rows) {
+  const batches = [];
+  let batch = [];
+  let keys = new Set();
+  for (const row of rows) {
+    if (batch.length === 1000 || (row.dedupe_key !== null && keys.has(row.dedupe_key))) {
+      batches.push(batch); batch = []; keys = new Set();
+    }
+    batch.push(row);
+    if (row.dedupe_key !== null) keys.add(row.dedupe_key);
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
 }
 
 function normalizeNotificationRows(budgetId, rows = []) {
@@ -668,11 +690,16 @@ function orderByForTable(tableName) {
   return "";
 }
 
+/** Storage adapter with a host-owned origin policy. Only callers whose backup,
+ * balance and compatibility paths preserve origin semantics should opt in;
+ * request JSON cannot configure this constructor's policy. */
 export function createSqliteBudgetStore({
   listLedgerYears,
   openLedgerDb,
-  openPlanningDb
+  openPlanningDb,
+  allowStandaloneOrigins = false
 } = {}) {
+  if (typeof allowStandaloneOrigins !== 'boolean') throw new Error('Explicit standalone-origin host policy required');
   if (typeof openPlanningDb !== "function") {
     throw new Error("openPlanningDb is required for SQLite budget storage");
   }
@@ -1283,6 +1310,8 @@ export function createSqliteBudgetStore({
     const db = openPlanningDb(budgetId, { create: false });
     try {
       const planningSchemaVersion = Number(db.pragma("user_version", { simple: true }) || 0);
+      db.prepare("SELECT 1 FROM cashflow_sync_heads LIMIT 0").all();
+      db.prepare("SELECT 1 FROM cashflow_sync_operations LIMIT 0").all();
       return {
         ok: true,
         backend: "sqlite",
@@ -1337,8 +1366,138 @@ export function createSqliteBudgetStore({
     return { updated };
   }
 
+  const planningWrites = new Map();
+  /** Async owners must wait without blocking Node's event loop: a synchronous
+   * BEGIN IMMEDIATE cannot wait for a sibling callback paused at an await.
+   * Separate budgets remain independent; bound nesting uses savepoints below. */
+  async function planningTransaction(budgetId, work, options = {}) {
+    const previous = planningWrites.get(budgetId);
+    let release;
+    const turn = new Promise(resolve => { release = resolve; });
+    planningWrites.set(budgetId, turn);
+    await previous;
+    try { return await runPlanningTransaction(budgetId, work, options); }
+    finally {
+      release();
+      if (planningWrites.get(budgetId) === turn) planningWrites.delete(budgetId);
+    }
+  }
+
+  // Projection application touches only planning tables. Reuse existing methods
+  // on one connection, with close suppressed until the outer transaction ends.
+  // Since schema 22 the ledger is a table in the same file, so this one
+  // transaction also covers ledger rows.
+  async function runPlanningTransaction(budgetId, work, { authorizationDbPath = null } = {}) {
+    const db = openPlanningDb(budgetId);
+    // Only server configuration may select this file. BEGIN IMMEDIATE below
+    // locks attached global authorization until the planning commit.
+    if (authorizationDbPath !== null) {
+      try {
+        if (typeof authorizationDbPath !== "string" || !authorizationDbPath.startsWith("/")) {
+          throw new Error("An absolute authorization database path is required");
+        }
+        db.prepare("ATTACH DATABASE ? AS cashflow_authorization").run(authorizationDbPath);
+        db.prepare("SELECT instance_id FROM cashflow_authorization.app_device_instance WHERE id = 1").all();
+      } catch (error) { db.close(); throw error; }
+    }
+    let ledgerHandleOpen = false;
+    const shared = new Proxy(db, {
+      get(target, key) {
+        if (key === "close") return () => {};
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
+    const writer = createSqliteBudgetStore({
+      allowStandaloneOrigins,
+      openPlanningDb: requestedId => {
+        if (requestedId !== budgetId) throw new Error("Planning transaction cannot access another budget");
+        return shared;
+      },
+      // The ledger lives in planning.sqlite (schema 22), so ledger reads and
+      // writes join this transaction. One year view is open at a time: every
+      // caller closes its handle before opening the next year.
+      openLedgerDb: (requestedId, year) => {
+        if (requestedId !== budgetId) throw new Error("Planning transaction cannot access another budget");
+        if (ledgerHandleOpen) throw new Error("Planning transaction holds another ledger year open");
+        db.exec(ledgerYearViewSql(year));
+        ledgerHandleOpen = true;
+        return new Proxy(db, {
+          get(target, key) {
+            if (key === "close") return () => { ledgerHandleOpen = false; };
+            const value = Reflect.get(target, key, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+        });
+      },
+      listLedgerYears: requestedId => {
+        if (requestedId !== budgetId) throw new Error("Planning transaction cannot access another budget");
+        return db.prepare("SELECT DISTINCT ledger_year FROM ledger_transactions ORDER BY ledger_year").all()
+          .map(row => String(row.ledger_year));
+      }
+    });
+    writer.transactionBound = true;
+    const query = async (sql, values = []) => {
+      const statement = db.prepare(sql);
+      return statement.reader ? statement.all(...values) : (statement.run(...values), []);
+    };
+    Object.assign(writer, createLedgerAuditBackupAdapter({ writer, query, allowStandaloneOrigins }));
+    // Web confirmations share the same SQLite ledger/audit/revision commit.
+    writer.recordFinancialChange = (requestedId, reason) => {
+      if (requestedId !== budgetId) throw new Error("Financial change cannot access another budget");
+      return recordFinancialChange(query, budgetId, reason);
+    };
+    // A snapshot restore already owns this file's transaction; its epoch fence
+    // must join it instead of starting another BEGIN on the shared connection.
+    writer.rotateSyncEpoch = requestedId => {
+      if (requestedId !== budgetId) throw new Error("Planning transaction cannot access another budget");
+      return rotateFinancialEpoch(query, budgetId);
+    };
+    let savepointSequence = 0;
+    // Allow projection writes to join a source-edit transaction without opening
+    // a second SQLite connection. This remains planning-only, never cross-file.
+    writer.planningTransaction = async (requestedId, nestedWork) => {
+      if (requestedId !== budgetId) throw new Error("Planning transaction cannot access another budget");
+      const savepoint = `cashflow_planning_${++savepointSequence}`;
+      db.exec(`SAVEPOINT ${savepoint}`);
+      try {
+        const result = await nestedWork(writer, db);
+        db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        return result;
+      } catch (error) {
+        db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        throw error;
+      }
+    };
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      const result = await work(writer, db);
+      db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      if (db.inTransaction) db.exec("ROLLBACK");
+      throw error;
+    } finally { db.close(); }
+  }
+
+  /** Rotate sync cursors in a planning-only transaction, never copy receipts
+   * from an imported backup or claim yearly-ledger files are atomic here. */
+  async function rotateSyncEpoch(budgetId) {
+    return planningTransaction(budgetId, async (_writer, db) => rotateFinancialEpoch(async (sql, values) => {
+      const statement = db.prepare(sql);
+      return statement.reader ? statement.all(...values) : (statement.run(...values), []);
+    }, budgetId));
+  }
+
   return {
     backend: "sqlite",
+    supportsStandaloneOrigins: allowStandaloneOrigins,
+    // Root reads acquire the same file transaction as ordinary financial writes.
+    exportLedgerAuditSnapshot: budgetId => planningTransaction(budgetId, writer => writer.exportLedgerAuditSnapshot(budgetId)),
+    ledgerOpeningBalance: (budgetId, currency) => planningTransaction(budgetId, writer => writer.ledgerOpeningBalance(budgetId, currency)),
+    rotateSyncEpoch,
+    planningTransaction,
     checkReadiness,
     close: async () => {},
     countRows,
@@ -1352,7 +1511,11 @@ export function createSqliteBudgetStore({
     insertPlanningRows,
     listConfirmedTransactions,
     listPlanningRows,
-    listLedgerYears: async budgetId => ledgerYearsForBudget(budgetId),
+    // Legacy SQLite paths enumerate canonical filename strings. Normalize at this
+    // adapter boundary to the numeric-year contract shared with PostgreSQL; keep
+    // snapshot validation strict rather than coercing arbitrary remote metadata.
+    listLedgerYears: async budgetId => ledgerYearsForBudget(budgetId).map(year =>
+      typeof year === "string" && /^\d{4}$/.test(year) ? Number(year) : year),
     pendingTransactionExistsByOccurrenceKey,
     replaceConfirmedTransactionsForYear,
     replacePlanningRows,
@@ -1366,8 +1529,34 @@ export function createSqliteBudgetStore({
   };
 }
 
+/** PostgreSQL counterpart with the same explicit origin policy. Bound writers
+ * inherit it so backup validation and replacement use one owning transaction. */
 export async function createPostgresBudgetStore(options = {}) {
+  const { allowStandaloneOrigins = false } = options;
+  if (typeof allowStandaloneOrigins !== 'boolean') throw new Error('Explicit standalone-origin host policy required');
   const service = await createPostgresBudgetDbService(options);
+  let savepointSequence = 0;
+
+  /** Keep composed writes on the owning connection; nested failures roll back
+   * to a savepoint without committing or aborting their caller's transaction.
+   * Callers must await nested work before reusing the bound writer. */
+  async function runTransaction(client, fn, nested = false) {
+    const savepoint = nested ? `cashflow_budget_${++savepointSequence}` : null;
+    await client.query(savepoint ? `SAVEPOINT ${savepoint}` : "BEGIN");
+    try {
+      const result = await fn(repositoryForClient(client), client);
+      await client.query(savepoint ? `RELEASE SAVEPOINT ${savepoint}` : "COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query(savepoint ? `ROLLBACK TO SAVEPOINT ${savepoint}` : "ROLLBACK");
+        if (savepoint) await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      } catch (rollbackError) {
+        error.rollbackError = rollbackError;
+      }
+      throw error;
+    }
+  }
 
   function repositoryForClient(client) {
 
@@ -1382,6 +1571,27 @@ export async function createPostgresBudgetStore(options = {}) {
         INSERT INTO cashflow_backup_artifacts (budget_id, id, payload, created_at)
         VALUES ($1, $2, $3, $4)
       `, [budgetId, metadata.id, payloadText, metadata.created_at]);
+    }
+
+    /** Orphan discovery rows cannot displace the newest restorable artifact. */
+    async function listBackupArtifactsForPruning(budgetId) {
+      const result = await client.query(`SELECT m.* FROM backup_metadata m
+        JOIN cashflow_backup_artifacts a ON a.budget_id = m.budget_id AND a.id = m.id
+        WHERE m.budget_id = $1 AND m.success = true
+          AND m.backup_path = 'postgres-backup:' || m.id`, [budgetId]);
+      return result.rows;
+    }
+
+    /** Delete only a matching successful Cashflow artifact and its discovery row.
+     * The caller owns the transaction and portability lock. */
+    async function deleteBackupArtifact(budgetId, artifactId) {
+      const result = await client.query(`DELETE FROM cashflow_backup_artifacts a
+        USING backup_metadata m WHERE a.budget_id = $1 AND a.id = $2
+          AND m.budget_id = a.budget_id AND m.id = a.id AND m.success = true
+          AND m.backup_path = 'postgres-backup:' || m.id RETURNING a.id`, [budgetId, artifactId]);
+      if (!result.rowCount) return 0;
+      await client.query('DELETE FROM backup_metadata WHERE budget_id = $1 AND id = $2', [budgetId, artifactId]);
+      return Number(result.rowCount);
     }
 
     async function readBackupArtifact(budgetId, artifactId) {
@@ -1531,30 +1741,13 @@ export async function createPostgresBudgetStore(options = {}) {
     }
 
     async function upsertNotifications(budgetId, rows = []) {
-      // PostgreSQL cannot update one conflict target twice in a single INSERT.
-      // Match sequential SQLite upserts: retain the first row's identity and
-      // immutable fields, but use the last row's updateable notification content.
-      const normalized = [];
-      const byKey = new Map();
-      for (const row of normalizeNotificationRows(budgetId, rows)) {
-        const previous = row.dedupe_key == null ? null : byKey.get(row.dedupe_key);
-        if (previous) {
-          Object.assign(previous, {
-            title: row.title,
-            message: row.message,
-            priority: row.priority,
-            queued_at: row.queued_at
-          });
-        } else {
-          normalized.push(row);
-          if (row.dedupe_key != null) byKey.set(row.dedupe_key, row);
-        }
-      }
+      // Repeated dedupe keys are split across sequential batches (see
+      // notificationBatches), matching SQLite's row-by-row upserts. Public
+      // Cashflow merges them in memory instead; both keep the same result.
+      const normalized = normalizeNotificationRows(budgetId, rows);
       let upserted = 0;
       if (normalized.length > 0) {
-        const chunkSize = 1000;
-        for (let i = 0; i < normalized.length; i += chunkSize) {
-          const chunk = normalized.slice(i, i + chunkSize);
+        for (const chunk of notificationBatches(normalized)) {
           const values = [];
           const placeholders = [];
           for (let j = 0; j < chunk.length; j++) {
@@ -2105,6 +2298,13 @@ export async function createPostgresBudgetStore(options = {}) {
       return normalizeRowsFromDb("notification_queue", result?.rows || []);
     }
 
+    /** Delivery progress across several channels; committed even when a later channel fails. */
+    async function recordNotificationChannelsSent(budgetId, id, channels) {
+      const value = ["ntfy", "discord"].filter(channel => channels.includes(channel)).join(",");
+      await client.query("UPDATE notification_queue SET sent_channels = $3 WHERE budget_id = $1 AND id = $2 AND sent_at IS NULL",
+        [budgetId, String(id), value]);
+    }
+
     async function markNotificationsSent(budgetId, ids = [], sentAt = new Date().toISOString()) {
       const normalizedIds = normalizeNotificationIds(ids);
       if (!normalizedIds.length) return { updated: 0 };
@@ -2121,7 +2321,21 @@ export async function createPostgresBudgetStore(options = {}) {
       return { updated: Number(result?.rowCount || 0) };
     }
 
-    return {
+    const repository = {
+      // Projection application can join an existing source/ledger transaction
+      // instead of opening another connection or independently committing.
+      transactionBound: true,
+      supportsStandaloneOrigins: allowStandaloneOrigins,
+      transaction: fn => runTransaction(client, fn, true),
+      // Only transaction-bound writers may record a revision alongside effects.
+      recordFinancialChange: (budgetId, reason) => recordFinancialChange(async (sql, values) => {
+        let index = 0;
+        return (await client.query(sql.replace(/\?/g, () => `$${++index}`), values)).rows;
+      }, budgetId, reason),
+      rotateSyncEpoch: budgetId => rotateFinancialEpoch(async (sql, values) => {
+        let index = 0;
+        return (await client.query(sql.replace(/\?/g, () => `$${++index}`), values)).rows;
+      }, budgetId),
       claimUnsentNotifications,
       countRows,
       deleteConfirmedTransactionsById,
@@ -2137,7 +2351,10 @@ export async function createPostgresBudgetStore(options = {}) {
       listPlanningRows,
       lockBudgetLedger,
       markNotificationsSent,
+      recordNotificationChannelsSent,
       pendingTransactionExistsByOccurrenceKey,
+      deleteBackupArtifact,
+      listBackupArtifactsForPruning,
       readBackupArtifact,
       replaceConfirmedTransactionsForYear,
       replacePlanningRows,
@@ -2149,24 +2366,15 @@ export async function createPostgresBudgetStore(options = {}) {
       upsertFxRates,
       upsertNotifications
     };
+    Object.assign(repository, createLedgerAuditBackupAdapter({ writer: repository, allowStandaloneOrigins, query: async (sql, values = []) => {
+      let index = 0;
+      return (await client.query(sql.replace(/\?/g, () => `$${++index}`), values)).rows;
+    } }));
+    return repository;
   }
 
   async function transaction(fn) {
-    return await service.withClient(async client => {
-      await client.query("BEGIN");
-      try {
-        const result = await fn(repositoryForClient(client), client);
-        await client.query("COMMIT");
-        return result;
-      } catch (error) {
-        try {
-          await client.query("ROLLBACK");
-        } catch (rollbackError) {
-          error.rollbackError = rollbackError;
-        }
-        throw error;
-      }
-    });
+    return await service.withClient(client => runTransaction(client, fn));
   }
 
   async function countRows(budgetId, tableName, { ledgerYear = null } = {}) {
@@ -2436,11 +2644,7 @@ export async function createPostgresBudgetStore(options = {}) {
         let upserted = 0;
         if (normalized.length > 0) {
 
-          const chunkSize = 1000;
-
-          for (let i = 0; i < normalized.length; i += chunkSize) {
-
-            const chunk = normalized.slice(i, i + chunkSize);
+          for (const chunk of notificationBatches(normalized)) {
 
             const values = [];
 
@@ -3066,6 +3270,21 @@ export async function createPostgresBudgetStore(options = {}) {
 
   return {
     backend: "postgres",
+    supportsStandaloneOrigins: allowStandaloneOrigins,
+    // Root audit exports join the same lock as confirmations and backup writes.
+    exportLedgerAuditSnapshot: budgetId => transaction(async writer => {
+      await writer.lockBudgetLedger(budgetId);
+      return writer.exportLedgerAuditSnapshot(budgetId);
+    }),
+    ledgerOpeningBalance: (budgetId, currency) => transaction(async writer => {
+      await writer.lockBudgetLedger(budgetId);
+      return writer.ledgerOpeningBalance(budgetId, currency);
+    }),
+    // Public fencing joins the same budget lock as financial mutations.
+    rotateSyncEpoch: budgetId => transaction(async writer => {
+      await writer.lockBudgetLedger(budgetId);
+      return writer.rotateSyncEpoch(budgetId);
+    }),
     readBackupArtifact,
     saveBackupArtifact,
     checkReadiness,

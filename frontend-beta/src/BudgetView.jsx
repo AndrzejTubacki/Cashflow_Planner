@@ -520,7 +520,7 @@ export default function BudgetView({ snapshot, onRefresh, onCurrentBudgetRemoved
         <div className="beta-error beta-dismissible">
           {formatParts("Couldn’t load budgets: {error}. Try reloading the page. If that doesn’t help, open the {legacyApp} once to refresh your session, then come back.", {
             error: loadError,
-            legacyApp: <a href="/">{t("Legacy app")}</a>
+            legacyApp: <a href="/legacy/?ui=legacy">{t("Legacy app")}</a>
           })}<button type="button" onClick={() => setLoadError("")} aria-label={t("Dismiss error")}>&times;</button></div>
       ) : null}
 

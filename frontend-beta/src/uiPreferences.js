@@ -27,6 +27,9 @@ export const DEFAULT_UI_PREFERENCES = Object.freeze({
   defaultTab: "ledger"
 });
 
+const LEGACY_TO_REACT = { income: "recurring", goals: "targets", flex: "targets", priority: "priorities", budgets: "budget" };
+const REACT_TO_LEGACY = { targets: "goals", priorities: "priority", budget: "budgets" };
+
 function preferenceKey(scope = "") {
   const normalizedScope = String(scope || "default").trim() || "default";
   return `${STORAGE_PREFIX}:${normalizedScope}`;
@@ -53,11 +56,12 @@ export function normalizeUiPreferences(input = {}) {
   const themeIds = optionIds(UI_THEME_OPTIONS);
   const densityIds = optionIds(UI_DENSITY_OPTIONS);
   const tabIds = optionIds(UI_DEFAULT_TAB_OPTIONS);
+  const tab = LEGACY_TO_REACT[input.defaultTab] || input.defaultTab;
 
   return {
     theme: themeIds.has(input.theme) ? input.theme : DEFAULT_UI_PREFERENCES.theme,
     density: densityIds.has(input.density) ? input.density : DEFAULT_UI_PREFERENCES.density,
-    defaultTab: tabIds.has(input.defaultTab) ? input.defaultTab : DEFAULT_UI_PREFERENCES.defaultTab
+    defaultTab: tabIds.has(tab) ? tab : DEFAULT_UI_PREFERENCES.defaultTab
   };
 }
 
@@ -72,8 +76,12 @@ export function loadUiPreferences(scope = currentPreferenceScope()) {
 
 export function saveUiPreferences(scope, preferences = {}) {
   const normalized = normalizeUiPreferences(preferences);
+  let previous = {};
+  try { previous = JSON.parse(localStorage.getItem(preferenceKey(scope)) || "{}") || {}; } catch { /* Recover malformed preferences on save. */ }
   try {
-    localStorage.setItem(preferenceKey(scope), JSON.stringify(normalized));
+    const legacyTab = LEGACY_TO_REACT[previous.defaultTab] === normalized.defaultTab
+      ? previous.defaultTab : REACT_TO_LEGACY[normalized.defaultTab] || normalized.defaultTab;
+    localStorage.setItem(preferenceKey(scope), JSON.stringify({ ...normalized, defaultTab: legacyTab }));
   } catch {
     // Storage can be unavailable in private contexts; applying still works for this page view.
   }

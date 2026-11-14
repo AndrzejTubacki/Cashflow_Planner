@@ -62,8 +62,17 @@ export function requireNullableNumber(value, field, options = {}) {
   return requireNumber(value, field, options);
 }
 
+export const MAX_MONEY_AMOUNT = 9999999999.99;
+
+/** Keep browser/import amounts within the native sync contract, and repeat
+ * caller bounds after rounding so a positive input cannot become zero. */
 export function requireMoneyAmount(value, field, options = {}) {
-  return roundMoneyAmount(requireNumber(value, field, options));
+  const bounded = { ...options, max: Math.min(options.max ?? MAX_MONEY_AMOUNT, MAX_MONEY_AMOUNT) };
+  const amount = roundMoneyAmount(requireNumber(value, field, bounded));
+  if (!Number.isFinite(amount) || !Number.isSafeInteger(Math.round(amount * 100))) {
+    validationError(field, 'unsafe_money', `${field} exceeds safe monetary precision`);
+  }
+  return requireNumber(amount, field, bounded);
 }
 
 export function requireNullableMoneyAmount(value, field, options = {}) {

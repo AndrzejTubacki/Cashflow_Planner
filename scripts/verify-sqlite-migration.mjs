@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
+import { ENGINE_AUDIT_HOST_OPTIONS } from "../src/engine/engine-host-capabilities.js";
+
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from 'node:util';
+import { readSqliteFinancialExportAudit, validateFinancialExportAudit } from '../src/server/cashflow-ledger-audit-export.js';
 
 import { isMainModule, parseCliArgs } from "./lib/cli.mjs";
 
@@ -20,7 +24,8 @@ function usage() {
   return `Usage: npm run db:sqlite:verify -- --input PATH --data-dir PATH [--pretty]
 
 Compares a Postgres storage export artifact with row counts and schema
-versions read from the SQLite files under --data-dir. Read-only; does not
+versions read from the SQLite files under --data-dir (ledger rows from
+planning.sqlite, plus any not-yet-merged yearly ledger files). Read-only; does not
 modify --data-dir.`;
 }
 
@@ -51,13 +56,16 @@ function compareSchemaValue(mismatches, field, expected, actual) {
   }
 }
 
+/** Read-only proof/count verification. Origin-aware hosts replay the exact
+ * retained origin/index/history; default callers refuse the new semantics. */
 export function verifySqliteMigration({
   dataDir = process.env.DATA_DIR || path.resolve("data"),
+  allowStandaloneOrigins = false,
   input = ""
 } = {}) {
   if (!input) throw new Error("--input is required");
 
-  const snapshot = normalizeCashflowStorageSnapshot(readJson(input));
+  const snapshot = normalizeCashflowStorageSnapshot(readJson(input), { allowStandaloneOrigins });
   const rootDir = path.resolve(dataDir);
   const mismatches = [];
 
@@ -102,11 +110,30 @@ export function verifySqliteMigration({
         for (const table of planningTables) {
           actualBudgetCounts[table] += countRows(db, table);
         }
+        // Since planning schema 22 the ledger is a planning.sqlite table.
+        actualBudgetCounts.confirmed_transactions += countRows(db, "ledger_transactions");
+        const expected = (snapshot.budget.ledgerAudits || []).find(audit => audit.budgetId === budgetId) || null;
+        try {
+          const retained = readSqliteFinancialExportAudit(db, budgetId, { allowStandaloneOrigins });
+          if (retained !== null) {
+            const ledgers = {};
+            for (const row of db.prepare('SELECT * FROM ledger_transactions').all()) {
+              (ledgers[row.ledger_year] ||= []).push(row);
+            }
+            validateFinancialExportAudit(budgetId, retained, ledgers, { allowStandaloneOrigins });
+          }
+          if (!isDeepStrictEqual(retained, expected)) {
+            mismatches.push({ scope: 'ledger-audit', budgetId, reason: 'retained_evidence_differs' });
+          }
+        } catch {
+          mismatches.push({ scope: 'ledger-audit', budgetId, reason: 'invalid_retained_evidence' });
+        }
       } finally {
         db.close();
       }
     }
 
+    // Yearly files only exist for data not yet merged by the server.
     if (!fs.existsSync(budgetDir)) continue;
     for (const entry of fs.readdirSync(budgetDir)) {
       if (!/^ledger_\d{4}\.sqlite$/.test(entry)) continue;
@@ -151,6 +178,8 @@ function main() {
     string: ["--input","--data-dir"],
     boolean: ["--pretty"],
     defaults: {
+    // The installed CLI supports the same financial format as engine 0.4.
+    ...ENGINE_AUDIT_HOST_OPTIONS,
     dataDir: process.env.DATA_DIR || path.resolve("data"),
     input: "",
     pretty: false

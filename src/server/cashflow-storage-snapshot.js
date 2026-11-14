@@ -21,10 +21,13 @@ function nowIso(now = new Date()) {
   return now instanceof Date ? now.toISOString() : new Date(now).toISOString();
 }
 
+/** Offline/staging snapshot of both storage domains. Origin support belongs
+ * to the host and its financial store, never to an imported JSON claim. */
 export async function createCashflowStorageSnapshot({
   budgetIds,
   budgetStore,
   globalStore,
+  allowStandaloneOrigins = false,
   now = new Date(),
   reason = "manual"
 } = {}) {
@@ -43,6 +46,7 @@ export async function createCashflowStorageSnapshot({
   const budget = await createBudgetStoreSnapshot({
     budgetIds,
     budgetStore,
+    allowStandaloneOrigins,
     now,
     reason
   });
@@ -60,7 +64,9 @@ export async function createCashflowStorageSnapshot({
   };
 }
 
-export function normalizeCashflowStorageSnapshot(snapshot) {
+/** Validate both domains before writes, including the host's financial format
+ * policy. This function grants no authority from imported account/device IDs. */
+export function normalizeCashflowStorageSnapshot(snapshot, { allowStandaloneOrigins = false } = {}) {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
     throw new Error("Storage snapshot must be an object");
   }
@@ -72,7 +78,7 @@ export function normalizeCashflowStorageSnapshot(snapshot) {
   }
 
   const global = normalizeSqliteGlobalMetadataExport(snapshot.global);
-  const budget = normalizeBudgetStoreSnapshot(snapshot.budget);
+  const budget = normalizeBudgetStoreSnapshot(snapshot.budget, { allowStandaloneOrigins });
   return {
     budgetCount: budget.budgetCount,
     budgetIds: [...budget.budgetIds],
@@ -86,14 +92,23 @@ export function normalizeCashflowStorageSnapshot(snapshot) {
   };
 }
 
+/** Offline/staging whole-storage restore. Global and financial stores have
+ * separate transaction domains; file-import callers stage a fresh destination
+ * before publication. Reject incompatible origin writers before global writes. */
 export async function restoreCashflowStorageSnapshot({
   budgetStore,
   globalStore,
+  allowStandaloneOrigins = false,
   includeExistingLedgerYears = true,
   onBatch = () => {},
   snapshot
 } = {}) {
-  const normalized = normalizeCashflowStorageSnapshot(snapshot);
+  const normalized = normalizeCashflowStorageSnapshot(snapshot, { allowStandaloneOrigins });
+  // Global replacement is a separate storage domain. Refuse an incompatible
+  // financial writer before changing global metadata, not after it commits.
+  if (normalized.budget.ledgerAudits?.some(audit => audit.version === 2) && budgetStore?.supportsStandaloneOrigins !== true) {
+    throw new Error('Standalone ledger origins need an upgraded storage host');
+  }
 
   const globalPlan = createGlobalStoreImportPlan(normalized.global);
   await onBatch({
@@ -116,6 +131,7 @@ export async function restoreCashflowStorageSnapshot({
   const budgetResult = await restoreBudgetStoreSnapshot({
     budgetStore,
     includeExistingLedgerYears,
+    allowStandaloneOrigins,
     snapshot: normalized.budget,
     onBatch: batch => onBatch({
       ...batch,

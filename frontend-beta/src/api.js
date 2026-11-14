@@ -43,7 +43,7 @@ let sessionRecoveryPromise = null;
 
 // Routes gated by requireActor() (budgets/accounts/admin) need a real cookie-backed
 // session, not just the x-cashflow-budget-id header the rest of the app runs on. If
-// legacy never established one for this browser (e.g. jumping straight to /beta on an
+// legacy never established one for this browser (e.g. jumping straight to / on an
 // account that predates the account/session system), those routes 401 with
 // "Authentication required" while everything else keeps working fine — confusing,
 // since only some tabs look broken. Recover once by establishing a real session for

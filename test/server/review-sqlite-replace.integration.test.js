@@ -22,6 +22,12 @@ async function withPopulatedBudget(work) {
     await harness.api(`/api/pending/${encodeURIComponent(pendingIncome.id)}/confirm`, {
       method: "POST", body: { amount: 1000, confirmed_date: harness.today }
     });
+    // These regressions exercise recovery of pre-capture legacy budgets whose
+    // prepared-import path commits planning before ledger batches. New audited
+    // confirmations have their own atomic rollback/retention coverage.
+    const legacyDb = harness.openPlanningDb();
+    try { legacyDb.prepare('DELETE FROM cashflow_ledger_audit_state WHERE budget_id = ?').run(harness.userId); }
+    finally { legacyDb.close(); }
     const expense = await harness.api("/api/recurring-expenses", {
       method: "POST", body: {
         name: "Original rent", currency: "PLN", amount: 100, necessary: 1,

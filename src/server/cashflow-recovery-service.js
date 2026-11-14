@@ -1,6 +1,7 @@
 export function createCashflowRecoveryService({
   budgetStore = null,
   cleanupOperationalData = () => null,
+  protectBackup = () => () => {},
   createBackup,
   createBackupAsync = null,
   logError,
@@ -33,66 +34,64 @@ export function createCashflowRecoveryService({
       ? await createBackupAsync(userId, { deferCleanup: true })
       : createBackup(userId, { deferCleanup: true });
 
-    if (global.__CASHFLOW_TEST_RACE_DELAY) {
-      await new Promise(r => setTimeout(r, global.__CASHFLOW_TEST_RACE_DELAY));
-    }
-
+    const releaseBackup = protectBackup(safetyBackup);
     try {
-      const result = await work();
-      if (typeof afterWork === "function") {
-        await afterWork({ userId, operation, result, safetyBackup });
+      if (global.__CASHFLOW_TEST_RACE_DELAY) {
+        await new Promise(r => setTimeout(r, global.__CASHFLOW_TEST_RACE_DELAY));
       }
-      const successful = requireProjectionSuccess(result);
-      // Retention cleanup is SQLite-only (it opens openPlanningDb directly)
-      // and would otherwise create a stray, disconnected local planning.sqlite
-      // file as a side effect for a Postgres-backed budget, so it's skipped
-      // there rather than called best-effort. Best-effort retention isn't
-      // critical to correctness either way.
-      if (!usePostgres) cleanupOperationalData(userId, `${operation}_completed`);
-      return successful;
-    } catch (error) {
-      logError("cashflow_recoverable_mutation_failed_before_rollback", {
-        userId,
-        operation,
-        safetyBackup,
-        error: error.message || String(error)
-      });
+
       try {
-        const rollbackProjection = usePostgres
-          ? await restoreBackupFromPathAsync(userId, safetyBackup)
-          : restoreBackupFromPath(userId, safetyBackup);
-        if (rollbackProjection?.projection_ok === false) {
-          throw new Error(`Rollback projection regeneration failed: ${rollbackProjection.projection_error || "unknown error"}`);
+        const result = await work();
+        if (typeof afterWork === "function") {
+          await afterWork({ userId, operation, result, safetyBackup });
         }
-        logServerEvent("cashflow_recoverable_mutation_rolled_back", {
+        const successful = requireProjectionSuccess(result);
+        await cleanupOperationalData(userId, `${operation}_completed`);
+        return successful;
+      } catch (error) {
+        logError("cashflow_recoverable_mutation_failed_before_rollback", {
           userId,
           operation,
           safetyBackup,
           error: error.message || String(error)
         });
-        if (!usePostgres) cleanupOperationalData(userId, `${operation}_rolled_back`);
-      } catch (rollbackError) {
-        logError("cashflow_recoverable_mutation_rollback_failed", {
-          userId,
-          operation,
-          safetyBackup,
-          error: error.message || String(error),
-          rollbackError: rollbackError.message || String(rollbackError)
-        });
-        const combined = new Error(`${operation} failed and rollback also failed`);
-        combined.status = 500;
-        combined.details = {
-          phase: "rollback_failed",
-          safetyBackup,
-          originalError: error.message,
-          originalStatus: Number(error?.status) || 500,
-          rollbackError: rollbackError.message
-        };
-        throw combined;
-      }
+        try {
+          const rollbackProjection = usePostgres
+            ? await restoreBackupFromPathAsync(userId, safetyBackup)
+            : restoreBackupFromPath(userId, safetyBackup);
+          if (rollbackProjection?.projection_ok === false) {
+            throw new Error(`Rollback projection regeneration failed: ${rollbackProjection.projection_error || "unknown error"}`);
+          }
+          logServerEvent("cashflow_recoverable_mutation_rolled_back", {
+            userId,
+            operation,
+            safetyBackup,
+            error: error.message || String(error)
+          });
+          await cleanupOperationalData(userId, `${operation}_rolled_back`);
+        } catch (rollbackError) {
+          logError("cashflow_recoverable_mutation_rollback_failed", {
+            userId,
+            operation,
+            safetyBackup,
+            error: error.message || String(error),
+            rollbackError: rollbackError.message || String(rollbackError)
+          });
+          const combined = new Error(`${operation} failed and rollback also failed`);
+          combined.status = 500;
+          combined.details = {
+            phase: "rollback_failed",
+            safetyBackup,
+            originalError: error.message,
+            originalStatus: Number(error?.status) || 500,
+            rollbackError: rollbackError.message
+          };
+          throw combined;
+        }
 
-      throw error;
-    }
+        throw error;
+      }
+    } finally { releaseBackup(); }
   }
 
   return {

@@ -34,8 +34,8 @@ async function withStores(work) {
   });
 }
 
-// Force both real preflight reads AND safety snapshots to finish before either
-// replica writes. A losing read-only validation must never restore its old snapshot.
+// Hold both real preflight reads before either replica can take its write lock.
+// A losing read-only validation must never restore an older financial snapshot.
 test("Postgres confirmations recheck shared balance under lock without rolling back the winner", gated, async () => {
   await withStores(async (a, b) => {
     await a.insertConfirmedTransactions("review_a", [confirmed("opening", 100, "income"),
@@ -58,13 +58,7 @@ test("Postgres confirmations recheck shared balance under lock without rolling b
       });
       const recovery = createCashflowRecoveryService({
         budgetStore: store, logError: () => {}, logServerEvent: () => {},
-        createBackupAsync: async (...args) => {
-          const ref = await backup.createBackupAsync(...args);
-          if (++arrivals === 1) timer = setTimeout(() => reject(new Error("snapshot barrier timed out")), 20000);
-          if (arrivals === 2) { clearTimeout(timer); release(); }
-          await gate;
-          return ref;
-        },
+        createBackupAsync: (...args) => backup.createBackupAsync(...args),
         restoreBackupFromPathAsync: async (...args) => {
           restores++;
           return backup.restoreBackupFromPathAsync(...args);
@@ -75,7 +69,15 @@ test("Postgres confirmations recheck shared balance under lock without rolling b
         getConfirmedFxForDate: async () => ({ fxRate: 1, bufferedFxRate: 1 }),
         wouldLedgerGoNegativeAfterInsertAsync: async (...args) => {
           const negative = await ledger.wouldLedgerGoNegativeAfterInsertAsync(...args);
-          preflights.push(negative); return negative;
+          preflights.push(negative);
+          // Transaction-bound rechecks receive a fourth writer argument. The
+          // first checks must overlap even when one replica is much faster.
+          if (args[3] === undefined) {
+            if (++arrivals === 1) timer = setTimeout(() => reject(new Error("preflight barrier timed out")), 20000);
+            if (arrivals === 2) { clearTimeout(timer); release(); }
+            await gate;
+          }
+          return negative;
         },
         runRecoverableUserMutation: recovery.runRecoverableUserMutation,
         withProjectionStatus: (_id, result) => result

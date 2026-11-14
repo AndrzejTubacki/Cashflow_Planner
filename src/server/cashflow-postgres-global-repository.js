@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 
-import { LEGACY_ADMIN_ACCOUNT_ID } from "./cashflow-global-schema.js";
 import { normalizeUserId, notFound } from "./cashflow-user-utils.js";
 
 export const POSTGRES_GLOBAL_REPOSITORY_BACKEND = "postgres";
@@ -73,32 +72,10 @@ export function createPostgresGlobalRepository(client, {
     const normalizedId = normalizeUserId(budgetId);
     return await one(`
       SELECT id, storage_key, display_name, status, created_by_account_id,
-        created_at, updated_at, archived_at, deleted_at
+        created_at, updated_at, archived_at, deleted_at, revision
       FROM budgets
       WHERE id = $1
     `, [normalizedId]);
-  }
-
-  async function ensureLegacyAdmin() {
-    const timestamp = nowIso(now);
-    const existing = await one("SELECT id FROM accounts WHERE id = $1", [LEGACY_ADMIN_ACCOUNT_ID]);
-    await run(`
-      INSERT INTO accounts (
-        id, email, display_name, status, created_at, updated_at
-      )
-      VALUES ($1, NULL, 'Legacy Administrator', 'active', $2, $2)
-      ON CONFLICT (id) DO NOTHING
-    `, [LEGACY_ADMIN_ACCOUNT_ID, timestamp]);
-
-    if (!existing) {
-      await run(`
-        INSERT INTO account_global_roles (
-          account_id, role, granted_by_account_id, created_at
-        )
-        VALUES ($1, 'system_admin', NULL, $2)
-        ON CONFLICT (account_id, role) DO NOTHING
-      `, [LEGACY_ADMIN_ACCOUNT_ID, timestamp]);
-    }
   }
 
   async function activeSessionsForAccount(accountId) {
@@ -311,6 +288,8 @@ export function createPostgresGlobalRepository(client, {
         return await one("SELECT active_mode, draft_config_json FROM auth_config WHERE id = 1") || {};
       },
       async activateDraft() {
+        await run("UPDATE app_devices SET revoked_ms = $1 WHERE revoked_ms IS NULL", [Date.now()]);
+        await run("UPDATE app_device_pairings SET status = 'denied' WHERE status IN ('pending', 'approved')");
         await run(`
           UPDATE auth_config
           SET active_mode = draft_mode,
@@ -413,7 +392,9 @@ export function createPostgresGlobalRepository(client, {
         const normalizedId = normalizeUserId(id);
         const normalizedStorageKey = normalizeUserId(storageKey);
         const timestamp = nowIso(now);
-        await ensureLegacyAdmin();
+        // Compatibility adoption requires a real, explicitly created account.
+        const owner = await getAccount(normalizedStorageKey);
+        if (!owner || owner.status !== 'active' || await getBudget(normalizedId)) return normalizedId;
         await run(`
           INSERT INTO budgets (
             id, storage_key, display_name, status, created_by_account_id,
@@ -425,7 +406,7 @@ export function createPostgresGlobalRepository(client, {
           normalizedId,
           normalizedStorageKey,
           String(displayName || normalizedId).trim() || normalizedId,
-          LEGACY_ADMIN_ACCOUNT_ID,
+          owner.id,
           timestamp
         ]);
         await run(`
@@ -435,7 +416,7 @@ export function createPostgresGlobalRepository(client, {
           )
           VALUES ($1, $2, 'owner', NULL, $3, $3)
           ON CONFLICT (budget_id, account_id) DO NOTHING
-        `, [normalizedId, LEGACY_ADMIN_ACCOUNT_ID, timestamp]);
+        `, [normalizedId, owner.id, timestamp]);
         return normalizedId;
       },
       get: getBudget,
@@ -464,15 +445,20 @@ export function createPostgresGlobalRepository(client, {
           ORDER BY id
         `);
       },
-      async updateDisplayName(id, displayName) {
-        await run(`
+      // Compare in the write: concurrent READ COMMITTED readers may share a revision.
+      async updateDisplayName(id, displayName, expectedRevision) {
+        return await one(`
           UPDATE budgets
           SET display_name = $2,
+              revision = revision + 1,
               updated_at = $3
-          WHERE id = $1
-        `, [normalizeUserId(id), displayName, nowIso(now)]);
+          WHERE id = $1 AND revision = $4
+          RETURNING *
+        `, [normalizeUserId(id), displayName, nowIso(now), expectedRevision]);
       },
       async markArchived(id) {
+        await run("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, $1) WHERE account_id IN (SELECT account_id FROM budget_memberships WHERE budget_id = $2)",
+          [nowMs(), normalizeUserId(id)]);
         const timestamp = nowIso(now);
         await run(`
           UPDATE budgets
@@ -517,7 +503,12 @@ export function createPostgresGlobalRepository(client, {
               fx_provider = $6,
               fx_buffer_percent = $7,
               ntfy_allowed_private_hosts = $8::jsonb,
-              updated_at = $9::timestamptz
+              device_access_minutes = $9,
+              device_renewal_idle_days = $10,
+              device_absolute_days = $11,
+              backup_max_retention_count = $12,
+              backup_max_age_days = $13,
+              updated_at = $14::timestamptz
           WHERE id = 1
         `, [
           settings.ledger_currency,
@@ -528,6 +519,11 @@ export function createPostgresGlobalRepository(client, {
           settings.fx_provider,
           settings.fx_buffer_percent,
           JSON.stringify(settings.ntfy_allowed_private_hosts || []),
+          settings.device_access_minutes ?? 15,
+          settings.device_renewal_idle_days ?? 90,
+          settings.device_absolute_days ?? 365,
+          settings.backup_max_retention_count ?? 0,
+          settings.backup_max_age_days ?? 0,
           nowIso(now)
         ]);
       }
@@ -544,7 +540,12 @@ export function createPostgresGlobalRepository(client, {
         await run("DELETE FROM auth_identities WHERE account_id = $1", [normalizeUserId(accountId)]);
       },
       async deleteForAccountById(accountId, identityId) {
-        const result = await run("DELETE FROM auth_identities WHERE account_id = $1 AND id = $2", [normalizeUserId(accountId), String(identityId || "")]);
+        const normalizedAccountId = normalizeUserId(accountId);
+        const result = await run("DELETE FROM auth_identities WHERE account_id = $1 AND id = $2", [normalizedAccountId, String(identityId || "")]);
+        if (result.rowCount > 0) {
+          await run("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, $1) WHERE account_id = $2",
+            [nowMs(), normalizedAccountId]);
+        }
         return result.rowCount;
       },
       async listForAccount(accountId) {
@@ -915,6 +916,8 @@ export function createPostgresGlobalRepository(client, {
         ]);
       },
       async delete({ accountId, budgetId }) {
+        await run("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, $1) WHERE account_id = $2",
+          [nowMs(), normalizeUserId(accountId)]);
         await run(`
           DELETE FROM budget_memberships
           WHERE budget_id = $1 AND account_id = $2
@@ -940,7 +943,7 @@ export function createPostgresGlobalRepository(client, {
       async listBudgetsForAccount(accountId, { includeArchived = true } = {}) {
         return await all(`
           SELECT b.id, b.display_name, b.status, b.created_at, b.updated_at,
-            b.archived_at, bm.role
+            b.archived_at, bm.role, b.revision
           FROM budget_memberships bm
           JOIN budgets b ON b.id = bm.budget_id
           WHERE bm.account_id = $1
@@ -965,7 +968,10 @@ export function createPostgresGlobalRepository(client, {
     },
     passwordCredentials: {
       async deleteForAccount(accountId) {
-        await run("DELETE FROM password_credentials WHERE account_id = $1", [normalizeUserId(accountId)]);
+        const normalizedAccountId = normalizeUserId(accountId);
+        await run("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, $1) WHERE account_id = $2",
+          [nowMs(), normalizedAccountId]);
+        await run("DELETE FROM password_credentials WHERE account_id = $1", [normalizedAccountId]);
       },
       async existsForAccount(accountId) {
         return Boolean(await one(`
@@ -1144,12 +1150,13 @@ export function createPostgresGlobalRepository(client, {
       }
     },
     sessions: {
-      async getByTokenHash(tokenHash) {
+      async getByTokenHash(tokenHash, { forShare = false } = {}) {
         return await one(`
           SELECT *
           FROM auth_sessions
           WHERE token_hash = $1
             AND revoked_at IS NULL
+          ${forShare ? "FOR SHARE" : ""}
         `, [tokenHash]);
       },
       async insert({
@@ -1226,15 +1233,20 @@ export function createPostgresGlobalRepository(client, {
         `, [normalizeUserId(accountId), nowIso(now)]);
       },
       async revokeOthersForAccount(accountId, keepSessionId) {
+        const normalizedAccountId = normalizeUserId(accountId);
+        await run("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, $1) WHERE account_id = $2",
+          [nowMs(), normalizedAccountId]);
         await run(`
           UPDATE auth_sessions
           SET revoked_at = COALESCE(revoked_at, $3)
           WHERE account_id = $1
             AND id <> $2
             AND revoked_at IS NULL
-        `, [normalizeUserId(accountId), String(keepSessionId || ""), nowIso(now)]);
+        `, [normalizedAccountId, String(keepSessionId || ""), nowIso(now)]);
       },
       async revokeForAccountBudget(accountId, budgetId) {
+        await run("UPDATE app_devices SET revoked_ms = COALESCE(revoked_ms, $1) WHERE account_id = $2",
+          [nowMs(), normalizeUserId(accountId)]);
         const timestamp = nowIso(now);
         await run(`
           UPDATE auth_sessions

@@ -1,4 +1,10 @@
 import Database from "better-sqlite3";
+import { backupPruningPlan } from "./cashflow-backup-retention.js";
+import { POSTGRES_BUDGET_COLUMNS } from "./cashflow-postgres-budget-schema.js";
+import { rotateSqliteFinancialEpoch } from "./cashflow-financial-journal.js";
+import { LEDGER_COLUMNS, LEDGER_IN_PLANNING_SCHEMA_VERSION } from "./cashflow-schema.js";
+import { applyLedgerMigrations } from "./cashflow-migrations.js";
+import { occurrenceKeyFromRow } from "./cashflow-occurrence-utils.js";
 import fs from "fs";
 import path from "path";
 import {
@@ -23,6 +29,7 @@ import {
 import { cleanupMigrationRecoveryFolders } from "./cashflow-migration-recovery.js";
 import { addMoneyAmounts, multiplyMoney, roundMoneyAmount, subtractMoneyAmounts } from "./cashflow-money-utils.js";
 import { badRequest, conflict, notFound } from "./cashflow-user-utils.js";
+import { readSqliteFinancialExportAudit, validateFinancialExportAudit } from './cashflow-ledger-audit-export.js';
 
 const PROJECTION_SNAPSHOT_RETENTION = 100;
 const EVENT_LOG_RETENTION = 2_000;
@@ -51,7 +58,10 @@ function dataPortabilityLockConflict(userId) {
 
 import { BUDGET_RUNTIME_LOCK_JOBS, budgetRuntimeLockName } from "./cashflow-runtime-locks.js";
 
+/** Durable backup/restore uses the same host-selected audit semantics as the
+ * owning financial runtime; stored JSON cannot enable new origin semantics. */
 export function createCashflowBackupService({
+  allowStandaloneOrigins = false,
   lockService = null,
   backupDir,
   backupHook = null,
@@ -60,6 +70,8 @@ export function createCashflowBackupService({
   directorySizeBytes,
   generateId,
   getSettings,
+  getGlobalOptions = () => ({}),
+  getGlobalOptionsAsync = null,
   getSettingsAsync = null,
   initReadOnlyPragmas,
   listLedgerYears,
@@ -99,7 +111,29 @@ export function createCashflowBackupService({
       && typeof regenerateProjectionsAfterMutationAsync === "function";
   }
 
-  function validateBackupFolderForRestore(backupPath) {
+  /** Verify every retained audit namespace against the complete backup ledger.
+   * Unknown/orphan/foreign namespaces cannot become unaudited replacement data. */
+  function validateSqliteBackupAudit(db, ledgerRows, expectedBudgetId = null) {
+    const scopes = new Set();
+    for (const table of ['cashflow_ledger_audit_state', 'cashflow_ledger_origins', 'cashflow_ledger_originals', 'cashflow_ledger_corrections']) {
+      if (tableExists(db, table)) for (const row of db.prepare(`SELECT DISTINCT budget_id FROM ${table}`).all()) scopes.add(row.budget_id);
+    }
+    if (scopes.size > 1 || (expectedBudgetId !== null && [...scopes].some(id => id !== expectedBudgetId))) {
+      throw new Error('Backup correction history has an unexpected budget scope');
+    }
+    if (!scopes.size) return null;
+    const budgetId = [...scopes][0];
+    const audit = readSqliteFinancialExportAudit(db, budgetId, { allowStandaloneOrigins });
+    if (audit === null) throw new Error('Backup correction history has no retained parent state');
+    const ledgers = {};
+    for (const row of ledgerRows) (ledgers[row.ledger_year] ||= []).push(row);
+    validateFinancialExportAudit(budgetId, audit, ledgers, { allowStandaloneOrigins });
+    return audit;
+  }
+
+  /** Validate both SQLite integrity and financial evidence before publication
+   * or replacement, including legacy yearly-ledger backups. */
+  function validateBackupFolderForRestore(backupPath, expectedBudgetId = null) {
     if (!fs.existsSync(backupPath) || !fs.statSync(backupPath).isDirectory()) {
       throw new Error("Backup folder not found");
     }
@@ -147,6 +181,7 @@ export function createCashflowBackupService({
           throw new Error(`Backup planning.sqlite missing table: ${tableName}`);
         }
       }
+      validateSqliteBackupAudit(planningDb, backupLedgerRows(backupPath, planningSource, backupLedgerYears), expectedBudgetId);
     } finally {
       planningDb.close();
     }
@@ -295,6 +330,7 @@ export function createCashflowBackupService({
       ["fx_buffer_percent", () => isFiniteNumber(settings.fx_buffer_percent) && Number(settings.fx_buffer_percent) >= 0 && Number(settings.fx_buffer_percent) <= 100],
       ["fx_provider", () => FX_PROVIDER_IDS.includes(String(settings.fx_provider || ""))],
       ["notification_channel", () => ["ntfy", "discord"].includes(String(settings.notification_channel || "ntfy"))],
+      ["notification_channels", () => settings.notification_channels == null || /^(ntfy|discord)?(,(ntfy|discord))?$/.test(String(settings.notification_channels))],
       ["ntfy_url", () => isHttpUrlOrEmpty(settings.ntfy_url)],
       ["ntfy_auth_token", () => isReasonableStringOrEmpty(settings.ntfy_auth_token, 500)],
       ["discord_webhook_url", () => isHttpUrlOrEmpty(settings.discord_webhook_url)]
@@ -706,52 +742,99 @@ export function createCashflowBackupService({
     return result;
   }
 
-  function cleanupBackupFolders(userId) {
+  const protectedBackups = new Set();
+
+  /** Pin recovery artifacts across asynchronous mutations, including rollback. */
+  function protectBackup(backupPath) {
+    protectedBackups.add(backupPath);
+    return () => protectedBackups.delete(backupPath);
+  }
+
+  /** Metadata alone is not authority to recursively remove an arbitrary path.
+   * Require the app's exact folder shape, only owned regular files, and a
+   * readable Cashflow schema. Symlinks and foreign files are left untouched.
+   */
+  function isOwnedBackupFolder(backupPath, roots = null, temporary = false, expectedBudgetId = null) {
+    if (roots && !roots.some(root => path.dirname(path.resolve(backupPath)) === path.resolve(root))) return false;
+    if (!/^backup_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_backup[-_][a-zA-Z0-9_-]+(?:\.tmp)?$/.test(path.basename(backupPath))) return false;
+    try {
+      if (!fs.lstatSync(backupPath).isDirectory()) return false;
+      const files = fs.readdirSync(backupPath, { withFileTypes: true });
+      if (!files.length || files.some(file => !file.isFile() || !/^(planning\.sqlite|ledger_\d{4}\.sqlite)$/.test(file.name))) return false;
+      const db = new Database(path.join(backupPath, 'planning.sqlite'), { readonly: true, fileMustExist: true });
+      try { if (!tableExists(db, 'settings') || !tableExists(db, 'backup_metadata')) return false; }
+      finally { db.close(); }
+      if (!temporary) validateBackupFolderForRestore(backupPath, expectedBudgetId);
+      return temporary || !backupPath.endsWith('.tmp');
+    } catch { return false; }
+  }
+
+  function cleanupBackupFolders(userId, keepPaths = []) {
     const settings = getSettings(userId);
-    const retention = Math.max(1, Number(settings?.backup_retention_count || 10));
-    const dir = backupRootDir(userId, settings);
+    const db = openPlanningDb(userId);
+    try {
+      // Metadata keeps historical custom locations discoverable after a move.
+      // The folder must still identify this exact registered backup and pass
+      // the same budget-scoped validation as restore before recursive deletion.
+      const backups = db.prepare('SELECT * FROM backup_metadata WHERE success = 1').all()
+        .filter(row => typeof row.backup_path === 'string'
+          && path.basename(row.backup_path).endsWith(`_${row.id}`)
+          && isOwnedBackupFolder(row.backup_path, null, false, userId));
+      const toDelete = backupPruningPlan(backups, settings, getGlobalOptions(), now().getTime(),
+        [...protectedBackups, ...keepPaths]);
+      let deleted = 0;
+      for (const backup of toDelete) {
+        fs.rmSync(backup.backup_path, { recursive: true });
+        db.prepare('DELETE FROM backup_metadata WHERE id = ? AND success = 1').run(backup.id);
+        deleted += 1;
+      }
+      return { deleted };
+    } finally { db.close(); }
+  }
 
-    if (!fs.existsSync(dir)) return { deleted: 0, retainedPaths: [] };
-
-    const backups = fs.readdirSync(dir, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && entry.name.startsWith("backup_") && !entry.name.endsWith(".tmp"))
-      .map(entry => {
-        const fullPath = path.join(dir, entry.name);
-        // Extract timestamp from backup_YYYY-MM-DDTHH-MM-SS-MMMZ_... if present
-        const match = entry.name.match(/^backup_([^_]+)_/);
-        const nameTimestamp = match ? match[1] : "";
-        return {
-          path: fullPath,
-          name: entry.name,
-          nameTimestamp,
-          mtimeMs: fs.statSync(fullPath).mtimeMs
-        };
-      })
-      .sort((a, b) => {
-        // Sort descending by embedded timestamp first, fallback to mtimeMs
-        const timeCompare = String(b.nameTimestamp).localeCompare(String(a.nameTimestamp));
-        if (timeCompare !== 0) return timeCompare;
-        return b.mtimeMs - a.mtimeMs;
+  /** Use the same portability lock as restore/import in scheduled maintenance.
+   * Artifact bytes and metadata disappear in one PostgreSQL transaction.
+   */
+  async function cleanupOperationalDataAsync(userId, { dataPortabilityLockHeld = false, keepPaths = [] } = {}) {
+    const work = async () => {
+      if (!usesPostgresBudgetStoreForBackup()) return cleanupOperationalData(userId, keepPaths);
+      const settings = await getSettingsAsync(userId);
+      const options = getGlobalOptionsAsync ? await getGlobalOptionsAsync() : getGlobalOptions();
+      return budgetStore.transaction(async writer => {
+        await writer.lockBudgetLedger(userId);
+        const rows = await writer.listBackupArtifactsForPruning(userId);
+        const toDelete = backupPruningPlan(rows, settings, options, now().getTime(), [...protectedBackups, ...keepPaths]);
+        let backupsDeleted = 0;
+        for (const row of toDelete) {
+          backupsDeleted += await writer.deleteBackupArtifact(userId, row.id);
+        }
+        return { backupsDeleted, metadataDeleted: backupsDeleted };
       });
-
-    const toDelete = backups.slice(retention);
-
-    for (const backup of toDelete) {
-      fs.rmSync(backup.path, { recursive: true, force: true });
-    }
-
-    return {
-      deleted: toDelete.length,
-      retainedPaths: backups.slice(0, retention).map(backup => backup.path)
     };
+    if (dataPortabilityLockHeld || !lockService?.withLock) return work();
+    const result = await lockService.withLock(budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability), work, { ttlMs: 300000 });
+    return result.acquired ? result.result : { backupsDeleted: 0, skipped: true };
+  }
+
+  async function cleanupOperationalDataBestEffortAsync(userId, reason, options = {}) {
+    try {
+      await runBackupHook('before_retention_cleanup', { userId, reason });
+      const result = await cleanupOperationalDataAsync(userId, options);
+      logServerEvent('cashflow_operational_retention_completed', { userId, reason, ...result });
+      return result;
+    } catch (error) {
+      logError('cashflow_operational_retention_failed', { userId, reason, code: error.code || 'retention_failed' });
+      return null;
+    }
   }
 
   function cleanupStaleTemporaryFolders(dir, currentTime) {
     if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return 0;
     let deleted = 0;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !entry.name.startsWith("backup_") || !entry.name.endsWith(".tmp")) continue;
+      if (!entry.isDirectory() || !entry.name.endsWith(".tmp")) continue;
       const fullPath = path.join(dir, entry.name);
+      if (!isOwnedBackupFolder(fullPath, [dir], true)) continue;
       if (currentTime - fs.statSync(fullPath).mtimeMs <= STALE_TEMP_AGE_MS) continue;
       fs.rmSync(fullPath, { recursive: true, force: true });
       deleted += 1;
@@ -759,12 +842,12 @@ export function createCashflowBackupService({
     return deleted;
   }
 
-  function cleanupOperationalData(userId) {
+  function cleanupOperationalData(userId, keepPaths = []) {
     const settings = getSettings(userId);
     const root = backupRootDir(userId, settings);
     const builtInRoot = typeof backupDir === "function" ? backupDir(userId) : root;
     const currentTime = now().getTime();
-    const folderCleanup = cleanupBackupFolders(userId);
+    const folderCleanup = cleanupBackupFolders(userId, keepPaths);
     const staleTemporaryDeleted = [...new Set([root, builtInRoot])]
       .reduce((total, dir) => total + cleanupStaleTemporaryFolders(dir, currentTime), 0);
     const migrationCleanup = cleanupMigrationRecoveryFolders(builtInRoot, currentTime);
@@ -831,6 +914,7 @@ export function createCashflowBackupService({
 
       return {
         ...result,
+        metadataDeleted: result.metadataDeleted + folderCleanup.deleted,
         backupsDeleted: folderCleanup.deleted,
         migrationBackupsDeleted: migrationCleanup.completedDeleted,
         staleTemporaryDeleted: staleTemporaryDeleted + migrationCleanup.staleTemporaryDeleted
@@ -840,17 +924,17 @@ export function createCashflowBackupService({
     }
   }
 
-  function cleanupOperationalDataBestEffort(userId, reason) {
+  function cleanupOperationalDataBestEffort(userId, reason, keepPaths = []) {
     try {
       runBackupHook("before_retention_cleanup", { userId, reason });
-      const result = cleanupOperationalData(userId);
+      const result = cleanupOperationalData(userId, keepPaths);
       logServerEvent("cashflow_operational_retention_completed", { userId, reason, ...result });
       return result;
     } catch (error) {
       logError("cashflow_operational_retention_failed", {
         userId,
         reason,
-        error: error.message
+        code: error.code || 'retention_failed'
       });
       return null;
     }
@@ -909,11 +993,8 @@ export function createCashflowBackupService({
       if (ageMs < requiredMs) return null;
     }
 
-    // Retention cleanup (backupsDeleted) is SQLite-only — see the note in
-    // runRecoverableUserMutation — so it's skipped here rather than
-    // best-effort, same as the rest of the Postgres backup path.
-    const backupPath = await createBackupAsync(userId, { deferCleanup: true });
-    return { backupPath, deleted: 0 };
+    const backupPath = await createBackupAsync(userId);
+    return { backupPath };
   }
 
   function createBackup(userId, options = {}) {
@@ -952,24 +1033,25 @@ export function createCashflowBackupService({
         planningDb.close();
       }
 
-      for (const year of listLedgerYears(userId)) {
-        const ledgerBackupPath = path.join(temporaryRoot, `ledger_${year}.sqlite`);
-        runBackupHook("before_ledger_copy", { userId, year, backupRoot, temporaryRoot });
-        const ledgerDb = openLedgerDb(userId, year);
-
-        try {
-          ledgerDb.prepare("VACUUM INTO ?").run(ledgerBackupPath);
-        } finally {
-          ledgerDb.close();
-        }
-      }
+      // Schema 22: the ledger is inside planning.sqlite, so the planning copy is
+      // the whole budget; no yearly ledger files are written any more.
 
       runBackupHook("before_backup_validation", { userId, backupRoot, temporaryRoot });
       validateBackupFolderForRestore(temporaryRoot);
       fs.renameSync(temporaryRoot, backupRoot);
       runBackupHook("before_success_metadata", { userId, backupRoot });
       recordMetadata(true, null, directorySizeBytes(backupRoot));
-      if (!deferCleanup) cleanupOperationalDataBestEffort(userId, "backup_created");
+      if (!deferCleanup) cleanupOperationalDataBestEffort(userId, "backup_created", [backupRoot]);
+      else {
+        // Safety backups still enforce backup limits; full operational cleanup
+        // waits until the owning mutation finishes.
+        try {
+          const result = cleanupBackupFolders(userId, [backupRoot]);
+          logServerEvent('cashflow_operational_retention_completed', { userId, reason: 'safety_backup_created', backupsDeleted: result.deleted });
+        } catch (error) {
+          logError('cashflow_operational_retention_failed', { userId, reason: 'safety_backup_created', code: error.code || 'retention_failed' });
+        }
+      }
       return backupRoot;
     } catch (error) {
       for (const partialPath of [temporaryRoot, backupRoot]) {
@@ -1005,11 +1087,8 @@ export function createCashflowBackupService({
   }
 
   async function createBackupAsync(userId, options = {}) {
-    if (!usesPostgresBudgetStoreForBackup()) {
-      return createBackup(userId, options);
-    }
-
     const runBackup = async () => {
+    if (!usesPostgresBudgetStoreForBackup()) return createBackup(userId, options);
 
     const createdAt = now().toISOString();
     const backupId = generateId("backup");
@@ -1054,6 +1133,7 @@ export function createCashflowBackupService({
         await writer.lockBudgetLedger(userId);
         await runBackupHook("before_planning_copy", { userId, backupPath });
         return await createBudgetStoreSnapshot({
+          allowStandaloneOrigins,
           budgetIds: [userId],
           budgetStore: writer,
           excludeBackupMetadata: true,
@@ -1063,7 +1143,7 @@ export function createCashflowBackupService({
       const serialized = JSON.stringify(snapshot);
 
       await runBackupHook("before_backup_validation", { userId, backupPath });
-      normalizeBudgetStoreSnapshot(snapshot);
+      normalizeBudgetStoreSnapshot(snapshot, { allowStandaloneOrigins });
 
       await runBackupHook("before_success_metadata", { userId, backupPath });
       await budgetStore.saveBackupArtifact(userId, {
@@ -1075,6 +1155,9 @@ export function createCashflowBackupService({
         error_message: null,
         created_at: new Date().toISOString()
       }, serialized);
+      await cleanupOperationalDataBestEffortAsync(userId, 'backup_created', {
+        dataPortabilityLockHeld: true, keepPaths: [backupPath]
+      });
       return backupPath;
     } catch (error) {
       try {
@@ -1115,7 +1198,9 @@ export function createCashflowBackupService({
     return await runBackup();
   }
 
-  function importPlanningBackupIntoLiveDb(userId, backupPlanningPath) {
+  /** Replace planning, ledger, retained audit and device fence together. A
+   * backup without audit explicitly clears the replaced audit namespace. */
+  function importPlanningBackupIntoLiveDb(userId, backupPlanningPath, ledgerRows = [], afterReplace = () => null) {
     const liveDb = openPlanningDb(userId);
     const backupDb = new Database(backupPlanningPath, {
       readonly: true,
@@ -1158,9 +1243,19 @@ export function createCashflowBackupService({
 
     try {
       initReadOnlyPragmas(backupDb);
+      const sourceAudit = validateSqliteBackupAudit(backupDb, ledgerRows, userId);
 
-      liveDb.transaction(() => {
+      return liveDb.transaction(() => {
+        if (tableExists(liveDb, 'cashflow_ledger_audit_state')) {
+          const previous = liveDb.prepare('SELECT * FROM cashflow_ledger_audit_state WHERE budget_id = ?').get(userId);
+          if (Number(previous?.origin_version ?? 0) !== 0 && !allowStandaloneOrigins) throw new Error('Standalone ledger origins need an upgraded backup host');
+        }
         liveDb.pragma("foreign_keys = OFF");
+
+        // Delete children explicitly: PRAGMA foreign_keys cannot change inside
+        // an active transaction, and correctness must not depend on its value.
+        const auditTables = ['cashflow_ledger_audit_state', 'cashflow_ledger_origins', 'cashflow_ledger_originals', 'cashflow_ledger_corrections'];
+        for (const table of [...auditTables].reverse()) if (tableExists(liveDb, table)) liveDb.prepare(`DELETE FROM ${table}`).run();
 
         for (const tableName of deleteOrder) {
           if (tableExists(liveDb, tableName)) {
@@ -1171,6 +1266,16 @@ export function createCashflowBackupService({
         for (const tableName of insertOrder) {
           replaceTableRowsFromBackup(liveDb, backupDb, tableName);
         }
+        // The ledger and the device fence commit with the planning tables.
+        liveDb.prepare("DELETE FROM ledger_transactions").run();
+        const insertLedger = liveDb.prepare(`INSERT INTO ledger_transactions (${LEDGER_COLUMNS.join(", ")}, ledger_year)
+          VALUES (${LEDGER_COLUMNS.map(() => "?").join(", ")}, ?)`);
+        const defaults = { ledger_currency: "PLN", running_balance_pln: 0 };
+        for (const row of ledgerRows) insertLedger.run(...LEDGER_COLUMNS.map(column => row[column] ?? defaults[column] ?? null), Number(row.ledger_year));
+        for (const table of auditTables) replaceTableRowsFromBackup(liveDb, backupDb, table);
+        const retainedAudit = validateSqliteBackupAudit(liveDb, liveDb.prepare('SELECT * FROM ledger_transactions').all(), userId);
+        if (JSON.stringify(sourceAudit) !== JSON.stringify(retainedAudit)) throw new Error('Restored correction history was not retained completely');
+        rotateSqliteFinancialEpoch(liveDb, userId);
 
         liveDb.pragma("foreign_keys = ON");
 
@@ -1187,6 +1292,7 @@ export function createCashflowBackupService({
           userId,
           JSON.stringify({ backupPlanningPath })
         );
+        return afterReplace(liveDb);
       })();
     } finally {
       backupDb.close();
@@ -1194,58 +1300,44 @@ export function createCashflowBackupService({
     }
   }
 
-  function importLedgerBackupIntoLiveDb(userId, backupLedgerPath, year) {
-    const liveDb = openLedgerDb(userId, year);
-    const backupDb = new Database(backupLedgerPath, {
-      readonly: true,
-      fileMustExist: true
-    });
-
+  /** Ledger rows of a backup: from its planning.sqlite (schema 22+), or, for a
+   * legacy backup, from its yearly files, migrated on a temporary copy. */
+  function backupLedgerRows(backupPath, planningSource, backupLedgerYears) {
+    const planning = new Database(planningSource, { readonly: true, fileMustExist: true });
     try {
-      initReadOnlyPragmas(backupDb);
-
-      liveDb.transaction(() => {
-        replaceTableRowsFromBackup(liveDb, backupDb, "confirmed_transactions");
-      })();
-    } finally {
-      backupDb.close();
-      liveDb.close();
+      initReadOnlyPragmas(planning);
+      // Only a merged planning file holds the ledger; an older backup whose
+      // planning copy was just migrated has the table but still empty.
+      if (Number(planning.pragma("user_version", { simple: true })) >= LEDGER_IN_PLANNING_SCHEMA_VERSION
+        && tableExists(planning, "ledger_merge_state")
+        && planning.prepare("SELECT 1 FROM ledger_merge_state WHERE id = 1").get()) {
+        return planning.prepare("SELECT * FROM ledger_transactions").all();
+      }
+    } finally { planning.close(); }
+    const rows = [];
+    for (const year of backupLedgerYears) {
+      const copy = path.join(backupPath, `.restore-ledger-${year}-${process.pid}.sqlite`);
+      fs.copyFileSync(path.join(backupPath, `ledger_${year}.sqlite`), copy);
+      const ledger = new Database(copy);
+      try {
+        applyLedgerMigrations(ledger, { occurrenceKeyFromRow });
+        for (const row of ledger.prepare("SELECT * FROM confirmed_transactions").all()) rows.push({ ...row, ledger_year: Number(year) });
+      } finally { ledger.close(); for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(copy + suffix, { force: true }); }
     }
-  }
-
-  function clearLedgerYear(userId, year) {
-    const ledgerDb = openLedgerDb(userId, year);
-
-    try {
-      ledgerDb.prepare("DELETE FROM confirmed_transactions").run();
-    } finally {
-      ledgerDb.close();
-    }
+    return rows;
   }
 
   function restoreBackupFromPath(userId, backupPath) {
-    const { planningSource, backupLedgerYears } = validateBackupFolderForRestore(backupPath);
-    const existingLedgerYears = listLedgerYears(userId);
-
-    for (const year of backupLedgerYears) {
-      importLedgerBackupIntoLiveDb(userId, path.join(backupPath, `ledger_${year}.sqlite`), year);
-    }
-
-    importPlanningBackupIntoLiveDb(userId, planningSource);
-
-    for (const year of existingLedgerYears) {
-      if (!backupLedgerYears.includes(year)) {
-        clearLedgerYear(userId, year);
-      }
-    }
-
-    recalculateLedgerRunningBalance(userId);
-
-    const projection = regenerateProjectionsAfterMutation(userId);
-    if (projection?.projection_ok === false) {
-      throw new Error(`Projection regeneration failed after restore: ${projection.projection_error || "unknown error"}`);
-    }
-    return projection;
+    const { planningSource, backupLedgerYears } = validateBackupFolderForRestore(backupPath, userId);
+    const ledgerRows = backupLedgerRows(backupPath, planningSource, backupLedgerYears);
+    return importPlanningBackupIntoLiveDb(userId, planningSource, ledgerRows, db => {
+      runBackupHook('after_restore_replace', { userId });
+      recalculateLedgerRunningBalance(userId, { db });
+      const projection = regenerateProjectionsAfterMutation(userId, { db });
+      if (projection && typeof projection.then === 'function') throw new Error('Synchronous restore requires synchronous projection');
+      if (projection?.projection_ok === false) throw new Error(`Projection regeneration failed after restore: ${projection.projection_error || 'unknown error'}`);
+      return projection;
+    });
   }
 
   function restoreBackup(userId, backupId) {
@@ -1273,7 +1365,7 @@ export function createCashflowBackupService({
       throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
     }
     try {
-      validateBackupFolderForRestore(backupPath);
+      validateBackupFolderForRestore(backupPath, userId);
     } catch (error) {
       throw badRequest("Backup is invalid and cannot be restored", {
         phase: "backup_validation_failed",
@@ -1282,57 +1374,85 @@ export function createCashflowBackupService({
       });
     }
 
-    const safetyBackup = createBackup(userId, { deferCleanup: true });
-
+    const release = protectBackup(backupPath);
+    let result;
     try {
-      runBackupHook("before_restore_apply", { userId, backupPath, safetyBackup });
+      const safetyBackup = createBackup(userId, { deferCleanup: true });
+
+      // Failure rolls back the owning SQLite transaction; never compensate with
+      // an older independently captured snapshot after releasing its locks.
+      runBackupHook('before_restore_apply', { userId, backupPath, safetyBackup });
       const projection = restoreBackupFromPath(userId, backupPath);
-      cleanupOperationalDataBestEffort(userId, "restore_completed");
+      result = { ok: true, restoredFrom: backupPath, safetyBackup,
+        mode: 'row_import_validated', _projection: projection };
+    } finally { release(); }
+    // Prune once the source is no longer pinned, so the limits hold again.
+    // The safety backup is the way back from this restore; always keep it.
+    cleanupOperationalDataBestEffort(userId, 'restore_completed', [result.safetyBackup]);
+    return result;
+  }
 
-      return {
-        ok: true,
-        restoredFrom: backupPath,
-        safetyBackup,
-        mode: "row_import_validated",
-        _projection: projection
-      };
-    } catch (error) {
-      logError("cashflow_restore_failed_before_rollback", {
-        userId,
-        restoredFrom: backupPath,
-        safetyBackup,
-        error: error.message
-      });
+  /** Read and validate an artifact before acquiring the owning write transaction.
+   * SQLite file backups are adapted to the same scoped snapshot contract as PG. */
+  async function snapshotForRestore(userId, backupPath) {
+    if (budgetStore?.backend === 'sqlite') {
+      if (!fs.existsSync(backupPath)) throw notFound('Backup not found', [{ field: 'backupId', reason: 'backup_folder_missing' }]);
+      const { planningSource, backupLedgerYears } = validateBackupFolderForRestore(backupPath, userId);
+      const ledgerRows = backupLedgerRows(backupPath, planningSource, backupLedgerYears);
+      const db = new Database(planningSource, { readonly: true, fileMustExist: true });
       try {
-        runBackupHook("before_restore_rollback", { userId, backupPath, safetyBackup, error });
-        restoreBackupFromPath(userId, safetyBackup);
-        logServerEvent("cashflow_restore_rolled_back", {
-          userId,
-          restoredFrom: backupPath,
-          safetyBackup,
-          error: error.message
-        });
-        cleanupOperationalDataBestEffort(userId, "restore_rolled_back");
-      } catch (rollbackError) {
-        logError("cashflow_restore_rollback_failed", {
-          userId,
-          restoredFrom: backupPath,
-          safetyBackup,
-          error: error.message,
-          rollbackError: rollbackError.message
-        });
-        const combined = new Error("Restore failed and rollback also failed");
-        combined.status = 500;
-        combined.details = {
-          phase: "rollback_failed",
-          safetyBackup,
-          originalError: error.message,
-          originalStatus: Number(error?.status) || 500,
-          rollbackError: rollbackError.message
-        };
-        throw combined;
-      }
+        const scoped = (table, rows) => rows.map(row => Object.fromEntries(
+          POSTGRES_BUDGET_COLUMNS[table].map(key => [key, key === 'budget_id' ? userId : row[key]])
+            .filter(([, value]) => value !== undefined)));
+        return await createBudgetStoreSnapshot({ budgetIds: [userId], allowStandaloneOrigins,
+          excludeBackupMetadata: true, budgetStore: {
+            backend: 'sqlite',
+            listPlanningRows: async (_id, table) => tableExists(db, table) ? scoped(table, db.prepare(`SELECT * FROM "${table}"`).all()) : [],
+            listConfirmedTransactions: async () => scoped('confirmed_transactions', ledgerRows),
+            listLedgerYears: async () => [...new Set(ledgerRows.map(row => Number(row.ledger_year)))],
+            exportLedgerAuditSnapshot: async () => readSqliteFinancialExportAudit(db, userId, { allowStandaloneOrigins })
+          } });
+      } finally { db.close(); }
+    }
+    let raw;
+    if (String(backupPath).startsWith('postgres-backup:')) {
+      raw = await budgetStore.readBackupArtifact(userId, String(backupPath).slice('postgres-backup:'.length));
+      if (raw == null) throw notFound('Backup not found');
+    } else {
+      if (!fs.existsSync(backupPath)) throw notFound('Backup not found');
+      raw = fs.readFileSync(backupPath, 'utf8');
+    }
+    const snapshot = normalizeBudgetStoreSnapshot(JSON.parse(raw), { allowStandaloneOrigins });
+    if (snapshot.budgetIds.length !== 1 || snapshot.budgetIds[0] !== userId) throw badRequest('Backup budget does not match');
+    return snapshot;
+  }
 
+  /** Replacement, audit, epoch, balances and projections commit together. No
+   * later snapshot compensation may overwrite an independently committed write. */
+  async function applyRestoreSnapshot(userId, snapshot, within = null) {
+    const run = within || (work => budgetStore.backend === 'sqlite'
+      ? budgetStore.planningTransaction(userId, work) : budgetStore.transaction(work));
+    try {
+      return await run(async writer => {
+        // Nested snapshot transactions must join this exact writer/commit.
+        const store = new Proxy(writer, { get(target, prop) {
+          if (prop === 'transaction') return callback => callback(store);
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        } });
+        if (typeof store.lockBudgetLedger === 'function') await store.lockBudgetLedger(userId);
+        await restoreBudgetStoreSnapshot({ budgetStore: store, allowStandaloneOrigins,
+          includeExistingLedgerYears: true, preserveBackupMetadata: true, snapshot });
+        await runBackupHook("after_restore_replace", { userId });
+        await recalculateLedgerRunningBalanceAsync(userId, { store });
+        const projection = await regenerateProjectionsAfterMutationAsync(userId, { store });
+        if (projection?.projection_ok === false) throw new Error(`Projection regeneration failed after restore: ${projection.projection_error || 'unknown error'}`);
+        return projection;
+      });
+    } catch (error) {
+      // The owning transaction has settled before reporting rollback. Never
+      // reapply the safety snapshot or log raw errors/artifact contents.
+      logServerEvent("cashflow_restore_rolled_back", { userId, recovery: "transaction" });
       const rolledBack = new Error(`Restore failed and was rolled back: ${error.message}`);
       rolledBack.status = Number(error?.status) || 500;
       if (error?.details) rolledBack.details = error.details;
@@ -1341,162 +1461,50 @@ export function createCashflowBackupService({
   }
 
   async function restoreBackupFromPathAsync(userId, backupPath) {
-    let raw;
-    if (usesPostgresBudgetStoreForBackup() && String(backupPath).startsWith("postgres-backup:")) {
-      const artifactId = String(backupPath).slice("postgres-backup:".length);
-      raw = await budgetStore.readBackupArtifact(userId, artifactId);
-      if (raw === null || raw === undefined) {
-        throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
-      }
-    } else {
-      // Compatibility for metadata created by the earlier file-backed Postgres implementation.
-      if (!fs.existsSync(backupPath)) {
-        throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
-      }
-      raw = fs.readFileSync(backupPath, "utf8");
-    }
-    const snapshot = normalizeBudgetStoreSnapshot(JSON.parse(raw));
-
-    await restoreBudgetStoreSnapshot({
-      budgetStore,
-      // A restore must end up exactly matching the backup, so ledger years
-      // present now but absent from the backup need to be cleared too, not
-      // just left alone.
-      includeExistingLedgerYears: true,
-      // The snapshot being restored never contains backup_metadata rows
-      // (createBackupAsync excludes them so a backup doesn't recursively
-      // embed its own history) - without this flag, replacing planning
-      // tables to match the snapshot still wipes the existing
-      // backup_metadata table since it isn't in the payload to restore,
-      // destroying all backup history (including the safety backup this
-      // same restore call may be about to create) on every restore.
-      preserveBackupMetadata: true,
-      snapshot
-    });
-
-    await recalculateLedgerRunningBalanceAsync(userId);
-
-    const projection = await regenerateProjectionsAfterMutationAsync(userId);
-    if (projection?.projection_ok === false) {
-      throw new Error(`Projection regeneration failed after restore: ${projection.projection_error || "unknown error"}`);
-    }
-    return projection;
+    return applyRestoreSnapshot(userId, await snapshotForRestore(userId, backupPath));
   }
 
-  async function restoreBackupAsync(userId, backupId) {
-    if (!usesPostgresBudgetStoreForBackup()) {
-      return restoreBackup(userId, backupId);
-    }
-
+  /** Authorization supplied by the device host runs inside the same transaction
+   * as replacement; the pre-apply hook remains outside that boundary. */
+  async function restoreBackupAsync(userId, backupId, { within = null } = {}) {
     const runRestore = async () => {
-
-    const rows = await budgetStore.listPlanningRows(userId, "backup_metadata");
-    const row = rows.find(candidate => candidate.id === backupId);
-    if (!row?.backup_path || !row.success) {
-      throw notFound("Backup not found", [{ field: "backupId", reason: "not_found" }]);
-    }
-
-    const backupPath = row.backup_path;
-    try {
-      let raw;
-      if (String(backupPath).startsWith("postgres-backup:")) {
-        raw = await budgetStore.readBackupArtifact(userId, backupId);
-        if (raw === null || raw === undefined) {
-          throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
-        }
-      } else {
-        // Compatibility for metadata created by the earlier file-backed Postgres implementation.
-        if (!fs.existsSync(backupPath)) {
-          throw notFound("Backup not found", [{ field: "backupId", reason: "backup_folder_missing" }]);
-        }
-        raw = fs.readFileSync(backupPath, "utf8");
-      }
-      normalizeBudgetStoreSnapshot(JSON.parse(raw));
-    } catch (error) {
-      if (error?.status === 404) throw error;
-      throw badRequest("Backup is invalid and cannot be restored", {
-        phase: "backup_validation_failed",
-        backupPath,
-        error: error.message
-      });
-    }
-
-    const safetyBackup = await createBackupAsync(userId, {
-      deferCleanup: true,
-      dataPortabilityLockHeld: true
-    });
-
-    try {
-      await runBackupHook("before_restore_apply", { userId, backupPath, safetyBackup });
-      const projection = await restoreBackupFromPathAsync(userId, backupPath);
-
-      return {
-        ok: true,
-        restoredFrom: backupPath,
-        safetyBackup,
-        mode: "budget_store_snapshot",
-        _projection: projection
-      };
-    } catch (error) {
-      logError("cashflow_restore_failed_before_rollback", {
-        userId,
-        restoredFrom: backupPath,
-        safetyBackup,
-        error: error.message
-      });
+      const row = (await budgetStore.listPlanningRows(userId, 'backup_metadata')).find(row => row.id === backupId);
+      if (!row?.backup_path || !Number(row.success)) throw notFound('Backup not found');
+      const release = protectBackup(row.backup_path);
+      let result;
       try {
-        await runBackupHook("before_restore_rollback", { userId, backupPath, safetyBackup, error });
-        await restoreBackupFromPathAsync(userId, safetyBackup);
-        logServerEvent("cashflow_restore_rolled_back", {
-          userId,
-          restoredFrom: backupPath,
-          safetyBackup,
-          error: error.message
-        });
-      } catch (rollbackError) {
-        logError("cashflow_restore_rollback_failed", {
-          userId,
-          restoredFrom: backupPath,
-          safetyBackup,
-          error: error.message,
-          rollbackError: rollbackError.message
-        });
-        const combined = new Error("Restore failed and rollback also failed");
-        combined.status = 500;
-        combined.details = {
-          phase: "rollback_failed",
-          safetyBackup,
-          originalError: error.message,
-          originalStatus: Number(error?.status) || 500,
-          rollbackError: rollbackError.message
-        };
-        throw combined;
-      }
-
-      const rolledBack = new Error(`Restore failed and was rolled back: ${error.message}`);
-      rolledBack.status = Number(error?.status) || 500;
-      if (error?.details) rolledBack.details = error.details;
-      throw rolledBack;
-    }
+        let snapshot;
+        try { snapshot = await snapshotForRestore(userId, row.backup_path); }
+        catch (error) {
+          if (error?.status === 404) throw error;
+          throw badRequest('Backup is invalid and cannot be restored', { phase: 'backup_validation_failed' });
+        }
+        const safetyBackup = await createBackupAsync(userId, { deferCleanup: true, dataPortabilityLockHeld: true });
+        const releaseSafety = protectBackup(safetyBackup);
+        try {
+          await runBackupHook('before_restore_apply', { userId, backupPath: row.backup_path, safetyBackup });
+          const projection = await applyRestoreSnapshot(userId, snapshot, within);
+          result = { ok: true, restoredFrom: row.backup_path, safetyBackup,
+            mode: budgetStore.backend === 'sqlite' ? 'row_import_validated' : 'budget_store_snapshot', _projection: projection };
+        } finally { releaseSafety(); }
+      } finally { release(); }
+      // Prune once the source is no longer pinned, so the limits hold again.
+      // The safety backup is the way back from this restore; always keep it.
+      await cleanupOperationalDataBestEffortAsync(userId, 'restore_completed', { dataPortabilityLockHeld: true, keepPaths: [result.safetyBackup] });
+      return result;
     };
-
-    if (lockService && typeof lockService.withLock === "function") {
-      const lockResult = await lockService.withLock(
-        budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability),
-        runRestore,
-        { ttlMs: 300000 }
-      );
-      if (!lockResult?.acquired) {
-        throw dataPortabilityLockConflict(userId);
-      }
-      return lockResult.result;
-    }
-    return await runRestore();
+    if (!lockService || typeof lockService.withLock !== 'function') return runRestore();
+    const result = await lockService.withLock(budgetRuntimeLockName(userId, BUDGET_RUNTIME_LOCK_JOBS.dataPortability), runRestore, { ttlMs: 300000 });
+    if (!result?.acquired) throw dataPortabilityLockConflict(userId);
+    return result.result;
   }
 
   return {
     cleanupOperationalData,
+    cleanupOperationalDataAsync,
     cleanupOperationalDataBestEffort,
+    cleanupOperationalDataBestEffortAsync,
+    protectBackup,
     createBackup,
     createBackupAsync,
     maybeRunAutomaticBackup,

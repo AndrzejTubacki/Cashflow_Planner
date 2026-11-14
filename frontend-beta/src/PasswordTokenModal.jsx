@@ -44,7 +44,7 @@ export default function PasswordTokenModal({ account, purpose, internalLoginActi
   const tokenRef = useRef(null);
 
   const label = account.display_name || account.id;
-  const title = purpose === "password_setup" ? "Create password setup token" : "Create password reset token";
+  const title = purpose === "password_setup" ? t("Create password setup token") : t("Create password reset token");
 
   useEffect(() => {
     function handleKeyDown(event) {

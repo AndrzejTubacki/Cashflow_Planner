@@ -531,6 +531,11 @@ function AdminOptionsPanel({ options, onChanged }) {
   const [futurePeriods, setFuturePeriods] = useState(options.future_periods || 11);
   const [fxProvider, setFxProvider] = useState(options.fx_provider || "nbp");
   const [fxBufferPercent, setFxBufferPercent] = useState(options.fx_buffer_percent ?? 0);
+  const [backupMaxRetentionCount, setBackupMaxRetentionCount] = useState(options.backup_max_retention_count || "");
+  const [backupMaxAgeDays, setBackupMaxAgeDays] = useState(options.backup_max_age_days || "");
+  const [deviceAccessMinutes, setDeviceAccessMinutes] = useState(options.device_access_minutes ?? 15);
+  const [deviceRenewalIdleDays, setDeviceRenewalIdleDays] = useState(options.device_renewal_idle_days ?? 90);
+  const [deviceAbsoluteDays, setDeviceAbsoluteDays] = useState(options.device_absolute_days ?? 365);
   const [ntfyAllowedPrivateHosts, setNtfyAllowedPrivateHosts] = useState(
     Array.isArray(options.ntfy_allowed_private_hosts) ? options.ntfy_allowed_private_hosts.join("\n") : ""
   );
@@ -552,7 +557,12 @@ function AdminOptionsPanel({ options, onChanged }) {
           future_periods: Number(futurePeriods) || 11,
           fx_provider: fxProvider,
           fx_buffer_percent: Number(fxBufferPercent) || 0,
-          ntfy_allowed_private_hosts: ntfyAllowedPrivateHosts
+          ntfy_allowed_private_hosts: ntfyAllowedPrivateHosts,
+          backup_max_retention_count: Number(backupMaxRetentionCount),
+          backup_max_age_days: Number(backupMaxAgeDays),
+          device_access_minutes: Number(deviceAccessMinutes),
+          device_renewal_idle_days: Number(deviceRenewalIdleDays),
+          device_absolute_days: Number(deviceAbsoluteDays)
         }
       });
       await onChanged();
@@ -609,11 +619,42 @@ function AdminOptionsPanel({ options, onChanged }) {
             <input type="number" min="0" max="100" step="0.5" value={fxBufferPercent} onChange={e => setFxBufferPercent(e.target.value)} />
           </label>
           <label className="beta-field">
+            <span>{t("Maximum backups per budget")}</span>
+            <input name="backup_max_retention_count" type="number" min="0" max="2147483647" step="1" value={backupMaxRetentionCount} onChange={e => setBackupMaxRetentionCount(e.target.value)} />
+            <small className="beta-hint">{t("Empty or zero means no cap. Each budget keeps the smaller of its retention count and this cap. The newest successful backup is always kept.")}</small>
+          </label>
+          <label className="beta-field">
+            <span>{t("Maximum backup age (days)")}</span>
+            <input name="backup_max_age_days" type="number" min="0" max="2147483647" step="1" value={backupMaxAgeDays} onChange={e => setBackupMaxAgeDays(e.target.value)} />
+            <small className="beta-hint">{t("Empty or zero means no age limit. Older successful backups are pruned, while the newest and backups in use by restore or import are kept.")}</small>
+          </label>
+          <label className="beta-field">
             <span>{t("Private ntfy hosts")}</span>
             <textarea rows="4" value={ntfyAllowedPrivateHosts} onChange={e => setNtfyAllowedPrivateHosts(e.target.value)} />
             <small className="beta-hint">{t("Allow self-hosted ntfy servers on a private network. Only the exact hosts listed here are allowed, one per line.")}</small>
           </label>
         </div>
+        <fieldset className="beta-settings-section">
+          <legend>{t("Device token lifetimes")}</legend>
+          <p className="beta-hint">{t("Policy for future device credentials. Device pairing is not enabled yet. Changes apply to newly issued credentials, not existing expiry timestamps.")}</p>
+          <div className="beta-form-grid beta-form-grid-three">
+            <label className="beta-field">
+              <span>{t("Access token lifetime (minutes)")}</span>
+              <input name="device_access_minutes" type="number" required min="1" max="1440" step="1" value={deviceAccessMinutes}
+                onChange={e => setDeviceAccessMinutes(e.target.value)} />
+            </label>
+            <label className="beta-field">
+              <span>{t("Renewal inactivity timeout (days)")}</span>
+              <input name="device_renewal_idle_days" type="number" required min="1" max="3650" step="1" value={deviceRenewalIdleDays}
+                onChange={e => setDeviceRenewalIdleDays(e.target.value)} />
+            </label>
+            <label className="beta-field">
+              <span>{t("Absolute device lifetime (days)")}</span>
+              <input name="device_absolute_days" type="number" required min="1" max="3650" step="1" value={deviceAbsoluteDays}
+                onChange={e => setDeviceAbsoluteDays(e.target.value)} />
+            </label>
+          </div>
+        </fieldset>
         <div className="beta-form-actions">
           <button type="submit" className="beta-btn-primary" disabled={busy}>{t("Save global options")}</button>
         </div>

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
 import Database from "better-sqlite3";
 import fs from "node:fs";
@@ -89,6 +90,8 @@ async function withTempDirs(fn) {
 function createGlobalSource(dataDir) {
   const db = new Database(path.join(dataDir, "cashflow-global.sqlite"));
   try {
+    initializeGlobalSchema(db);
+    db.exec("INSERT INTO accounts (id, display_name, created_at, updated_at) VALUES ('household', 'Household', datetime('now'), datetime('now')); INSERT INTO account_global_roles (account_id, role, created_at) VALUES ('household', 'system_admin', datetime('now'))");
     initializeGlobalSchema(db, { storageProfileIds: ["household"] });
     db.prepare(`
       INSERT INTO accounts (
@@ -126,6 +129,8 @@ function createGlobalSource(dataDir) {
   }
 }
 
+/** A budget whose ledger is still a yearly file the server has not merged yet
+ * (planning.sqlite carries no ledger_merge_state marker). */
 function createBudgetStorageSource(dataDir) {
   const budgetDir = path.join(dataDir, "household");
   fs.mkdirSync(budgetDir, { recursive: true });
@@ -133,6 +138,7 @@ function createBudgetStorageSource(dataDir) {
   const planning = new Database(path.join(budgetDir, "planning.sqlite"));
   try {
     initializePlanningSchema(planning);
+    planning.prepare("DELETE FROM ledger_merge_state").run();
     planning.prepare(`
       INSERT INTO one_off_transactions (
         id, name, currency, amount, type, date, created_at, updated_at
@@ -749,28 +755,26 @@ test("SQLite snapshot migrates into disposable Postgres and verifies counts with
         });
         assert.equal(compactionPlan.needsCompaction, true);
         assert.equal(compactionPlan.eligibleRows, 2);
+        // Summaries retain original accepted facts and preserve linked device cursors.
+        const oldEpoch = randomUUID();
+        await budgetStore.transaction(async (_writer, client) => client.query(
+          "INSERT INTO cashflow_sync_heads (budget_id, epoch, revision) VALUES ('household', $1, 3) ON CONFLICT (budget_id) DO UPDATE SET epoch = $1, revision = 3", [oldEpoch]));
         const compaction = await ledgerService.compactHistoricalLedgerAsync("household", {
           months: 12,
           now: "2026-05-20T00:00:00.000Z",
           plan: compactionPlan
         });
+        const fencedHead = await budgetStore.transaction(async (_writer, client) =>
+          (await client.query("SELECT epoch, revision FROM cashflow_sync_heads WHERE budget_id = 'household'")).rows[0]);
+        assert.equal(fencedHead.epoch, oldEpoch);
+        assert.equal(Number(fencedHead.revision), 3);
         assert.equal(compaction.compactedRows, 2);
         assert.equal(compaction.createdRows, 1);
         const compactedConfirmedRows = await budgetStore.listConfirmedTransactions("household");
-        assert.equal(
-          compactedConfirmedRows.some(row => row.id === "old_income_for_compaction"),
-          false
-        );
-        const compactedRow = compactedConfirmedRows.find(row =>
-          row.occurrence_key === "ledger_history_compaction:PLN:2025-05-20"
-        );
-        assert.ok(compactedRow, "expected compacted historical balance row");
-        assert.equal(Number(compactedRow.amount), 750);
-        assert.equal(Number(compactedRow.running_balance_pln), 750);
-        assert.equal(
-          Number(compactedConfirmedRows.find(row => row.id === "confirmed_income")?.running_balance_pln),
-          1250
-        );
+        assert.ok(compactedConfirmedRows.some(row => row.id === "old_income_for_compaction"));
+        assert.ok(compactedConfirmedRows.some(row => row.id === "old_expense_for_compaction"));
+        assert.equal(compaction.summaries[0].netAmount, 750);
+        assert.equal(compaction.detailsRetained, true);
 
         const setupService = createCashflowSetupService({
           budgetStore,
@@ -782,6 +786,9 @@ test("SQLite snapshot migrates into disposable Postgres and verifies counts with
           regenerateProjectionsAfterMutation: async () => ({ projection_ok: true })
         });
         assert.equal(await setupService.setupRequiredAsync("household"), true);
+        // The compaction check above already created this head; reset it for setup.
+        await budgetStore.transaction((_writer, client) => client.query(
+          "INSERT INTO cashflow_sync_heads (budget_id, epoch, revision) VALUES ('household', $1, 0) ON CONFLICT (budget_id) DO UPDATE SET epoch = $1, revision = 0", [randomUUID()]));
         const setupResult = await setupService.completeSetup("household", {
           currency: "EUR",
           future_periods: 6,
@@ -795,6 +802,9 @@ test("SQLite snapshot migrates into disposable Postgres and verifies counts with
           timezone: "Europe/Berlin"
         });
         assert.equal(setupResult.ok, true);
+        await budgetStore.transaction(async (_writer, client) => {
+          assert.equal(Number((await client.query("SELECT revision FROM cashflow_sync_heads WHERE budget_id='household'")).rows[0].revision), 1);
+        });
         assert.equal(setupResult.settings.setup_completed, true);
         assert.equal(setupResult.settings.ledger_currency, "EUR");
         assert.equal(Boolean(setupResult.created.openingBalanceId), true);
@@ -1384,7 +1394,7 @@ test("SQLite snapshot migrates into disposable Postgres and verifies counts with
         assert.equal(
           (await budgetStore.listConfirmedTransactions("household"))
             .find(row => row.id === "confirmed_postgres_goal_delete")?.source_goal_id,
-          null
+          createdGoal.id
         );
 
         const createdOneOff = await planMutations.createOneOffTransaction("household", {
@@ -1557,7 +1567,7 @@ test("SQLite snapshot migrates into disposable Postgres and verifies counts with
         assert.equal(
           (await budgetStore.listConfirmedTransactions("household"))
             .find(row => row.id === "confirmed_postgres_oneoff_delete")?.source_one_off_id,
-          null
+          createdOneOff.id
         );
 
         const remainderOneOff = await planMutations.createOneOffTransaction("household", {
@@ -2178,11 +2188,7 @@ test("importFullDataAsync, createBackupAsync/restoreBackupAsync, and purgeBudget
         const afterImportBackupIds = new Set((await budgetStore.listPlanningRows("household", "backup_metadata")).map(row => row.id));
         assert.ok(existingBackupIds.every(id => afterImportBackupIds.has(id)));
 
-        // "household" already has "legacy-admin" as its owner (inserted by
-        // initializeGlobalSchema's migrateLegacyProfiles bootstrap for any
-        // storage profile id passed to createGlobalSource) — a budget can
-        // only have one owner (idx_budget_memberships_single_owner), so the
-        // purge actor here is the existing owner, not "alice" (an editor).
+        // The explicit household fixture account owns this budget.
         await globalStore.transaction(async repo => {
           await repo.budgets.markArchived("household");
         });
@@ -2202,7 +2208,7 @@ test("importFullDataAsync, createBackupAsync/restoreBackupAsync, and purgeBudget
           }
         });
 
-        const purgeResult = await budgetService.purgeBudgetAsync("legacy-admin", "household");
+        const purgeResult = await budgetService.purgeBudgetAsync("household", "household");
         assert.equal(purgeResult.status, "deleted");
         assert.deepEqual(deletedStorageCalls, ["household"]);
         assert.equal(
@@ -2851,14 +2857,15 @@ test("migrate-postgres-to-sqlite.mjs moves real data from a disposable Postgres 
         restoredPlanning.close();
       }
 
+      // The ledger lands in planning.sqlite (schema 22); no yearly files.
+      assert.equal(fs.existsSync(path.join(targetDataDir, "household", "ledger_2026.sqlite")), false);
       const restoredLedger = new Database(
-        path.join(targetDataDir, "household", "ledger_2026.sqlite"),
+        path.join(targetDataDir, "household", "planning.sqlite"),
         { readonly: true }
       );
       try {
-        assert.equal(restoredLedger.pragma("integrity_check", { simple: true }), "ok");
         const confirmed = restoredLedger.prepare(
-          "SELECT name, amount, running_balance_pln FROM confirmed_transactions WHERE id = ?"
+          "SELECT name, amount, running_balance_pln FROM ledger_transactions WHERE id = ? AND ledger_year = 2026"
         ).get("confirmed_income");
         assert.equal(confirmed?.name, "Confirmed income");
         assert.equal(Number(confirmed?.amount), 500);
@@ -3046,13 +3053,14 @@ test("two replicas racing compactHistoricalLedgerAsync for the same budget are s
         const confirmedRows = await budgetStore.listConfirmedTransactions("household");
         assert.equal(
           confirmedRows.some(row => row.id === "confirmed_income"),
-          false,
-          "expected the old confirmed row to have been compacted away"
+          true,
+          "expected the old confirmed row to remain available"
         );
         const compactionRows = confirmedRows.filter(row =>
           String(row.occurrence_key || "").startsWith("ledger_history_compaction:")
         );
-        assert.equal(compactionRows.length, 1, "expected exactly one compaction summary row, not zero or two");
+        assert.equal(compactionRows.length, 0, "summaries must not become synthetic accepted payments");
+        assert.equal(fulfilled[0].value.summaries.length, 1);
       } finally {
         await budgetStore.close();
         await globalStore.close();
@@ -3247,7 +3255,7 @@ test("two replicas racing tickPerUserJobs are serialized by the global backgroun
     try {
       await globalDb.initializeGlobalSchema();
 
-      function buildReplica(ownerId) {
+      function buildReplica(ownerId, listBudgets = async () => []) {
         return createCashflowBackgroundJobs({
           budgetStore: null,
           getSettings: () => {
@@ -3256,7 +3264,7 @@ test("two replicas racing tickPerUserJobs are serialized by the global backgroun
           listCashflowUserIds: () => {
             throw new Error("must not list SQLite user ids");
           },
-          listCashflowUserIdsAsync: async () => [],
+          listCashflowUserIdsAsync: listBudgets,
           lockService: globalStore.createLockService({ ownerId }),
           logError: () => {},
           logServerEvent: () => {},
@@ -3287,13 +3295,28 @@ test("two replicas racing tickPerUserJobs are serialized by the global backgroun
         });
       }
 
-      const replicaA = buildReplica("tick_replica_a");
+      let enteredFirst;
+      let releaseFirst;
+      const firstEntered = new Promise(resolve => { enteredFirst = resolve; });
+      const firstReleased = new Promise(resolve => { releaseFirst = resolve; });
+      const replicaA = buildReplica("tick_replica_a", async () => {
+        enteredFirst();
+        await firstReleased;
+        return [];
+      });
       const replicaB = buildReplica("tick_replica_b");
 
-      const [resultA, resultB] = await Promise.all([
-        replicaA.tickPerUserJobs(),
-        replicaB.tickPerUserJobs()
+      // Guarantee actual overlap. Two empty ticks started together can finish
+      // sequentially on a fast database, in which case both may correctly run.
+      const runningFirst = replicaA.tickPerUserJobs();
+      await Promise.race([
+        firstEntered,
+        runningFirst.then(() => { throw new Error('First replica never entered its locked tick'); })
       ]);
+      let resultA;
+      let resultB;
+      try { resultB = await replicaB.tickPerUserJobs(); }
+      finally { releaseFirst(); resultA = await runningFirst; }
 
       const skipped = [resultA, resultB].filter(result => result?.skipped === true);
       const ran = [resultA, resultB].filter(result => result?.skipped !== true);

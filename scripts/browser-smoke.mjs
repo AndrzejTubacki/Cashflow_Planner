@@ -8,6 +8,8 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
 const startedChildren = [];
+// Exact expected refusal logs from deliberately rejected synthetic requests.
+const expectedTempServerErrors = [];
 const SYSTEM_CHROME_CANDIDATES = [
   process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   "/usr/bin/google-chrome",
@@ -184,8 +186,16 @@ async function assertNoTempServerErrors() {
     if (!existsSync(errorLog)) continue;
 
     const content = (await fs.readFile(errorLog, "utf8")).trim();
-    if (content) throw new Error(`Browser smoke server wrote errors:\n${content}`);
+    const unexpected = [];
+    for (const line of content.split('\n').filter(Boolean)) {
+      const entry = JSON.parse(line);
+      const expected = expectedTempServerErrors.findIndex(item => item.kind === entry.kind && item.message === entry.message);
+      if (expected >= 0) expectedTempServerErrors.splice(expected, 1);
+      else unexpected.push(line);
+    }
+    if (unexpected.length) throw new Error(`Browser smoke server wrote unexpected errors:\n${unexpected.join('\n')}`);
   }
+  assert.deepEqual(expectedTempServerErrors, [], 'expected refusal must appear exactly once in operational logs');
 }
 
 async function waitForPage(page) {
@@ -493,22 +503,29 @@ async function assertBudgetManagerAndSharing(page, baseUrl, userId, sessionAuth)
 
   const providerId = `smoke-provider-${Date.now()}`;
   const providerForm = page.locator("[data-cashflow-admin-provider-form]").last();
-  await providerForm.locator('input[name="providerId"]').waitFor({ state: "visible" });
-  await providerForm.locator('input[name="providerId"]').fill(providerId);
-  await providerForm.locator('select[name="kind"]').selectOption("oidc");
-  await providerForm.locator('input[name="displayName"]').fill("Smoke Provider");
-  await providerForm.locator('input[name="issuer"]').fill("https://issuer.example.test/");
-  await providerForm.locator('input[name="redirectUri"]').fill(`${baseUrl}/api/auth/providers/${providerId}/callback`);
-  const providerFormValidity = await providerForm.evaluate(form => ({
-    valid: form.checkValidity(),
-    invalid: [...form.elements]
-      .filter(element => typeof element.checkValidity === "function" && !element.checkValidity())
-      .map(element => ({
-        name: element.getAttribute("name") || "",
-        message: element.validationMessage || "",
-        value: element.value || ""
-      }))
-  }));
+  // A late settings refresh can re-render the admin panel and clear typed
+  // values (a known legacy-UI race); refill until the form keeps them.
+  let providerFormValidity = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await providerForm.locator('input[name="providerId"]').waitFor({ state: "visible" });
+    await providerForm.locator('input[name="providerId"]').fill(providerId);
+    await providerForm.locator('select[name="kind"]').selectOption("oidc");
+    await providerForm.locator('input[name="displayName"]').fill("Smoke Provider");
+    await providerForm.locator('input[name="issuer"]').fill("https://issuer.example.test/");
+    await providerForm.locator('input[name="redirectUri"]').fill(`${baseUrl}/api/auth/providers/${providerId}/callback`);
+    await waitForRefreshSettle(page);
+    providerFormValidity = await providerForm.evaluate(form => ({
+      valid: form.checkValidity(),
+      invalid: [...form.elements]
+        .filter(element => typeof element.checkValidity === "function" && !element.checkValidity())
+        .map(element => ({
+          name: element.getAttribute("name") || "",
+          message: element.validationMessage || "",
+          value: element.value || ""
+        }))
+    }));
+    if (!providerFormValidity.invalid.length) break;
+  }
   assert.deepEqual(providerFormValidity.invalid, [], "provider form failed browser validation");
   await waitForApiMethodResponse(page, "PUT", `/api/admin/auth/providers/${providerId}`, () =>
     providerForm.locator("button[type='submit']").click()
@@ -603,12 +620,35 @@ async function assertDataPortability(page, baseUrl, userId, sessionAuth) {
   const mergeExport = mergeExportFrom(fullExport, mergeId);
   await uploadFile(page, "[data-cashflow-full-import-file]", "smoke-merge.json", "application/json", JSON.stringify(mergeExport));
   await page.locator("[data-cashflow-full-import-mode]").selectOption("merge");
-  page.once("dialog", dialog => dialog.accept());
-  await waitForApiResponse(page, "/api/import/full", () =>
-    page.locator("[data-cashflow-import-full]").click()
-  );
-  await waitForRefreshSettle(page);
-  assert.ok((await apiJson(baseUrl, userId, "/api", {}, sessionAuth)).oneOffs.some(row => row.id === mergeId));
+  if (fullExport.version === 2) {
+    // An audited budget must refuse merging before confirmation/submission.
+    // Verify the real preview and visible error rather than weakening its audit.
+    let writes = 0;
+    const submitted = request => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/import/full') writes++;
+    };
+    page.on('request', submitted);
+    try {
+      const responsePromise = page.waitForResponse(response => new URL(response.url()).pathname === '/api/import/full/preview');
+      await page.locator('[data-cashflow-import-full]').click();
+      const response = await responsePromise;
+      assert.equal(response.status(), 400);
+      assert.match((await response.json()).error, /correction history cannot receive merged financial data/i);
+      expectedTempServerErrors.push({ kind: 'cashflow_full_import_preview_failed',
+        message: 'A budget with correction history cannot receive merged financial data' });
+      const banner = page.locator('[data-cashflow-error-banner]');
+      await banner.waitFor({ state: 'visible' });
+      assert.match(await banner.textContent(), /correction history cannot receive merged financial data/i);
+      assert.equal(writes, 0);
+      await banner.locator('[data-cashflow-dismiss-error]').click();
+      assert.equal((await apiJson(baseUrl, userId, '/api', {}, sessionAuth)).oneOffs.some(row => row.id === mergeId), false);
+    } finally { page.off('request', submitted); }
+  } else {
+    page.once("dialog", dialog => dialog.accept());
+    await waitForApiResponse(page, "/api/import/full", () => page.locator("[data-cashflow-import-full]").click());
+    await waitForRefreshSettle(page);
+    assert.ok((await apiJson(baseUrl, userId, "/api", {}, sessionAuth)).oneOffs.some(row => row.id === mergeId));
+  }
 
   await openAllSettingsSections(page);
   const appendCsv = "name,type,amount,currency,date\nSmoke CSV append,income,11,PLN,2099-04-01";
@@ -720,6 +760,101 @@ async function assertLedgerConfirmation(page, baseUrl, userId, sessionAuth) {
   assert.ok(snapshot.confirmedTransactions.some(item => item.name === name));
 }
 
+async function assertBetaRedirectsToRoot(page, baseUrl) {
+  await page.goto(`${baseUrl}/beta/`, { waitUntil: "domcontentloaded" });
+  assert.equal(new URL(page.url()).pathname, "/");
+  await page.goto(`${baseUrl}/beta`, { waitUntil: "domcontentloaded" });
+  assert.equal(new URL(page.url()).pathname, "/");
+}
+
+async function assertDevicePolicyAdminUi(page, baseUrl, userId) {
+  await page.evaluate(id => localStorage.setItem("cashflow_budget_id", id), userId);
+  await page.goto(`${baseUrl}/#settings/admin`, { waitUntil: "domcontentloaded" });
+  const access = page.locator('input[name="device_access_minutes"]');
+  await access.waitFor({ state: "visible" });
+  assert.equal(await access.inputValue(), "15");
+  const inactivity = page.locator('input[name="device_renewal_idle_days"]');
+  const absolute = page.locator('input[name="device_absolute_days"]');
+  assert.equal(await inactivity.inputValue(), "90");
+  assert.equal(await absolute.inputValue(), "365");
+  await access.fill("20");
+  await inactivity.fill("75");
+  await absolute.fill("400");
+  await waitForApiMethodResponse(page, "PUT", "/api/admin/options", () =>
+    access.locator("xpath=ancestor::form").locator('button[type="submit"]').click());
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await access.waitFor({ state: "visible" });
+  assert.equal(await access.inputValue(), "20");
+  assert.equal(await inactivity.inputValue(), "75");
+  assert.equal(await absolute.inputValue(), "400");
+  await page.goto(`${baseUrl}/legacy/?ui=legacy`, { waitUntil: "domcontentloaded" });
+  await waitForPage(page);
+}
+
+async function assertBrowserDeviceApproval(page, baseUrl, userId, sessionAuth) {
+  // Runs only in the disposable local smoke profile, after other workflows.
+  const password = "Synthetic pairing password 2026";
+  await apiJson(baseUrl, userId, "/api/account", { method: "PUT", body: { email: "browser-pairing@example.test" } }, sessionAuth);
+  await apiJson(baseUrl, userId, "/api/account/password", { method: "POST", body: { newPassword: password } }, sessionAuth);
+  await apiJson(baseUrl, userId, "/api/admin/auth/draft", { method: "PUT", body: { draftMode: "internal" } }, sessionAuth);
+  await apiJson(baseUrl, userId, "/api/admin/auth/activate", { method: "POST", body: {} }, sessionAuth);
+  const login = await page.request.post(`${baseUrl}/api/auth/internal/login`, {
+    data: { email: "browser-pairing@example.test", password }
+  });
+  assert.equal(login.status(), 200);
+  const signedIn = await login.json();
+  const selectBudget = await page.request.post(`${baseUrl}/api/budgets/${userId}/select`, {
+    headers: { "x-cashflow-csrf-token": signedIn.csrfToken }, data: {}
+  });
+  assert.equal(selectBudget.status(), 200);
+  const pairing = await requestJson(`${baseUrl}/api/device/pairings`, { method: "POST", body: { label: "Browser-smoke Android" } });
+  await page.goto(`${baseUrl}/#settings/account`, { waitUntil: "domcontentloaded" });
+  const panel = page.locator("[data-device-panel]");
+  await panel.waitFor({ state: "visible" });
+  await panel.locator('input[name="device_verification_code"]').fill(pairing.verificationCode);
+  await panel.locator(`input[type="checkbox"][value="${userId}"]`).check();
+  await waitForApiMethodResponse(page, "POST", "/api/account/device-pairings/inspect", () => panel.locator('button[type="submit"]').click());
+  await panel.getByText("Browser-smoke Android", { exact: true }).waitFor({ state: "visible" });
+  await waitForApiMethodResponse(page, "POST", "/api/account/device-pairings/approve", () => panel.locator('button[type="submit"]').click());
+  const tokens = await requestJson(`${baseUrl}/api/device/pairings/poll`, { method: "POST", body: { deviceCode: pairing.deviceCode } });
+  assert.equal(tokens.status, "approved");
+  assert.equal(tokens.scope, "app:snapshot:read");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const row = page.locator(`[data-device-id="${tokens.deviceId}"]`);
+  await row.waitFor({ state: "visible" });
+  await waitForApiMethodResponse(page, "DELETE", `/api/account/devices/${tokens.deviceId}`, () => row.locator("button").click());
+  await row.locator("button").waitFor({ state: "detached" });
+  const financialPairing = await requestJson(`${baseUrl}/api/device/pairings`, {
+    method: "POST", body: { label: "Browser-smoke financial sync", scope: "app:financial:sync" }
+  });
+  await panel.locator('input[name="device_verification_code"]').fill(financialPairing.verificationCode);
+  await panel.locator(`input[type="checkbox"][value="${userId}"]`).check();
+  await waitForApiMethodResponse(page, "POST", "/api/account/device-pairings/inspect", () => panel.locator('button[type="submit"]').click());
+  const writeChoice = panel.locator(`input[data-write-budget-id="${userId}"]`);
+  assert.equal(await writeChoice.isChecked(), false);
+  await writeChoice.check();
+  // A budget removed and re-added must not inherit stale write consent.
+  const downloadChoice = panel.locator(`input[type="checkbox"][value="${userId}"]`);
+  await downloadChoice.uncheck();
+  await downloadChoice.check();
+  assert.equal(await writeChoice.isChecked(), false);
+  await writeChoice.check();
+  await waitForApiMethodResponse(page, "POST", "/api/account/device-pairings/approve", () => panel.locator('button[type="submit"]').click());
+  const financialTokens = await requestJson(`${baseUrl}/api/device/pairings/poll`, {
+    method: "POST", body: { deviceCode: financialPairing.deviceCode }
+  });
+  assert.equal(financialTokens.scope, "app:financial:sync");
+  assert.deepEqual(financialTokens.writeBudgetIds, [userId]);
+  // Enrollment happens at poll, after approval's list refresh; fetch the created device.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  const financialRow = page.locator(`[data-device-id="${financialTokens.deviceId}"]`);
+  await financialRow.waitFor({ state: "visible" });
+  await waitForApiMethodResponse(page, "DELETE", `/api/account/devices/${financialTokens.deviceId}`, () => financialRow.locator("button").click());
+  await financialRow.locator("button").waitFor({ state: "detached" });
+  // Rejected bearer requests are verified in HTTP integration tests; this smoke
+  // deliberately keeps its existing zero-server-error-log invariant.
+}
+
 // Exercise real beta event handlers as well as the legacy smoke above.
 async function assertBetaPendingActions(page, baseUrl, userId, sessionAuth) {
   const snapshot = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
@@ -727,7 +862,7 @@ async function assertBetaPendingActions(page, baseUrl, userId, sessionAuth) {
   const source = await apiJson(baseUrl, userId, "/api/one-off", { method: "POST", body: {
     name, currency: snapshot.settings.ledger_currency, amount: 20, type: "income", date: snapshot.today
   } }, sessionAuth);
-  await page.goto(`${baseUrl}/beta/#ledger`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/#ledger`, { waitUntil: "domcontentloaded" });
   const row = page.locator("tr", { hasText: name });
   await row.getByRole("button", { name: "Confirm", exact: true }).waitFor();
   page.once("dialog", dialog => {
@@ -754,7 +889,7 @@ async function assertBetaPendingActions(page, baseUrl, userId, sessionAuth) {
   );
   current = await apiJson(baseUrl, userId, "/api", {}, sessionAuth);
   assert.ok(current.confirmedTransactions.some(item => item.name === name));
-  await page.goto(`${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/legacy/?ui=legacy`, { waitUntil: "domcontentloaded" });
   await waitForPage(page);
 }
 
@@ -789,7 +924,7 @@ async function assertIncomeFirstInBothInterfaces(page, baseUrl, userId, sessionA
     pairs.push(pair);
   }
   for (const ui of ["legacy", "beta"]) {
-    await page.goto(ui === "beta" ? `${baseUrl}/beta/#ledger` : `${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+    await page.goto(ui === "beta" ? `${baseUrl}/#ledger` : `${baseUrl}/legacy/?ui=legacy`, { waitUntil: "domcontentloaded" });
     if (ui === "legacy") {
       await waitForPage(page);
       await selectTab(page, "ledger", "[data-cashflow-ledger-tab]");
@@ -802,7 +937,7 @@ async function assertIncomeFirstInBothInterfaces(page, baseUrl, userId, sessionA
         < names.findIndex(text => text.includes(pair.expense.name)), `${ui}: income must appear first`);
     }
   }
-  await page.goto(`${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseUrl}/legacy/?ui=legacy`, { waitUntil: "domcontentloaded" });
   await waitForPage(page);
 }
 
@@ -857,8 +992,10 @@ async function runBrowserSmoke(baseUrl, {
       }, userId);
     }
 
-    // "/" defaults to the beta UI; this smoke covers the legacy app.
-    await page.goto(`${baseUrl}/?ui=legacy`, { waitUntil: "domcontentloaded" });
+    await assertBetaRedirectsToRoot(page, baseUrl);
+
+    // Open legacy UI at /legacy/
+    await page.goto(`${baseUrl}/legacy/?ui=legacy`, { waitUntil: "domcontentloaded" });
 
     if (!deployed) {
       userId = await createLocalSmokeUserAndCompleteSetup(page);
@@ -881,7 +1018,9 @@ async function runBrowserSmoke(baseUrl, {
     await assertSettingsSave(page, baseUrl, userId, sessionAuth);
     await assertDataPortability(page, baseUrl, userId, sessionAuth);
     await assertActionErrorsStayInApp(page);
+    if (!deployed) await assertDevicePolicyAdminUi(page, baseUrl, userId);
     await assertInvalidRememberedUserReturnsToSelection(page);
+    if (!deployed) await assertBrowserDeviceApproval(page, baseUrl, userId, sessionAuth);
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});

@@ -166,7 +166,9 @@ export function auditSqliteStorage({
 
   budgetEntries.forEach((budget, index) => {
     const budgetDir = path.join(rootDir, budget.storageKey);
-    const planning = safeInspectSqliteDb(budget.planningPath, PLANNING_TABLE_NAMES);
+    // Since planning schema 22 the ledger is the planning ledger_transactions table.
+    const planning = safeInspectSqliteDb(budget.planningPath, [...PLANNING_TABLE_NAMES, "ledger_transactions"]);
+    report.totals.confirmedRows += planning.tables.ledger_transactions || 0;
     const ledgers = budget.ledgerFiles.map(fileName => {
       const year = fileName.match(/^ledger_(\d{4})\.sqlite$/)?.[1] || "";
       const ledger = safeInspectSqliteDb(path.join(budgetDir, fileName), LEDGER_TABLE_NAMES);

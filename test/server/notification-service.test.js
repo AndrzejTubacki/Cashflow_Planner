@@ -52,9 +52,9 @@ test("notification row builder is backend-neutral and preserves dedupe semantics
 // to construct a Request from a URL that has embedded credentials.
 
 test("extractNtfyCredentialsFromUrl strips an empty-username access token embedded in the URL", () => {
-  const result = extractNtfyCredentialsFromUrl("https://:tk_g5qdcly4l23ssxlpx8ys8wcwtqh68@ntfy.tubacki.pl/budget");
-  assert.equal(result.cleanUrl, "https://ntfy.tubacki.pl/budget");
-  assert.equal(result.token, "tk_g5qdcly4l23ssxlpx8ys8wcwtqh68");
+  const result = extractNtfyCredentialsFromUrl("https://:tk_exampletokenexampletoken0001@ntfy.example.com/budget");
+  assert.equal(result.cleanUrl, "https://ntfy.example.com/budget");
+  assert.equal(result.token, "tk_exampletokenexampletoken0001");
   assert.equal(result.username, null);
   assert.equal(result.password, null);
 });
@@ -114,7 +114,7 @@ test("ntfyAuthorizationHeader returns null for a plain URL with no credentials a
 });
 
 test("a credentialed ntfy URL crashes the real fetch Request constructor, but the cleaned URL plus header does not", () => {
-  const dirty = "https://:tk_g5qdcly4l23ssxlpx8ys8wcwtqh68@ntfy.tubacki.pl/budget";
+  const dirty = "https://:tk_exampletokenexampletoken0001@ntfy.example.com/budget";
 
   // This is the exact failure mode seen in production logs:
   // "Request cannot be constructed from a URL that includes credentials".
@@ -159,7 +159,7 @@ test("sendQueuedNotifications delivers to ntfy using a token embedded in the sto
         UPDATE settings
         SET notification_channel = 'ntfy', ntfy_url = ?
         WHERE id = 1
-      `).run("https://:tk_g5qdcly4l23ssxlpx8ys8wcwtqh68@ntfy.tubacki.pl/budget");
+      `).run("https://:tk_exampletokenexampletoken0001@ntfy.example.com/budget");
 
       db.prepare(`
         INSERT INTO notification_queue (
@@ -183,9 +183,9 @@ test("sendQueuedNotifications delivers to ntfy using a token embedded in the sto
 
     assert.equal(sent, 1);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://ntfy.tubacki.pl/budget");
+    assert.equal(calls[0].url, "https://ntfy.example.com/budget");
     assert.equal(calls[0].url.includes("@"), false);
-    assert.equal(calls[0].options.headers.Authorization, "Bearer tk_g5qdcly4l23ssxlpx8ys8wcwtqh68");
+    assert.equal(calls[0].options.headers.Authorization, "Bearer tk_exampletokenexampletoken0001");
 
     const db2 = dbService.openPlanningDb(userId);
     try {
@@ -275,5 +275,42 @@ test("delivery rechecks private ntfy approval, logs safely, and retains blocked 
     discord.close();
     await assert.rejects(() => service.sendQueuedNotifications(userId), /non-public/);
     assert.equal(requests, 1, "private ntfy approval never applies to Discord");
+  });
+});
+
+test("several channels at once: a partial failure is retried only on the channel that failed", async () => {
+  await withTempPlanningDbService(async dbService => {
+    const userId = "multi-channel-user";
+    const calls = [];
+    let discordUp = false;
+    const fetchImpl = async url => {
+      const target = String(url).includes("discord") ? "discord" : "ntfy";
+      calls.push(target);
+      if (target === "discord" && !discordUp) return { ok: false, status: 503, statusText: "Unavailable" };
+      return { ok: true, status: 200, statusText: "OK" };
+    };
+    const db = dbService.openPlanningDb(userId);
+    try {
+      db.prepare(`UPDATE settings SET notification_channel = 'ntfy', notification_channels = 'ntfy,discord', ntfy_url = ?,
+        discord_webhook_url = ? WHERE id = 1`).run("https://ntfy.example.org/budget", "https://discord.com/api/webhooks/1/abc");
+      db.prepare(`INSERT INTO notification_queue (id, notification_type, title, message, priority, entity_id, queued_at, dedupe_key)
+        VALUES ('notif-multi', 'pending_summary', 'Pending', 'Waiting', 'default', NULL, datetime('now'), 'dedupe-multi')`).run();
+    } finally { db.close(); }
+    const service = createCashflowNotificationService({
+      lookupHost: async () => [{ address: "93.184.216.34", family: 4 }], fetchImpl, generateId: prefix => `${prefix}-id`,
+      listLedgerYears: dbService.listLedgerYears, openLedgerDb: dbService.openLedgerDb, openPlanningDb: dbService.openPlanningDb
+    });
+    const row = () => { const read = dbService.openPlanningDb(userId); try {
+      return read.prepare("SELECT sent_at, sent_channels FROM notification_queue WHERE id = 'notif-multi'").get(); } finally { read.close(); } };
+
+    await assert.rejects(service.sendQueuedNotifications(userId));
+    assert.deepEqual(calls, ["ntfy", "discord"]);
+    assert.deepEqual(row(), { sent_at: null, sent_channels: "ntfy" });
+
+    discordUp = true;
+    assert.equal(await service.sendQueuedNotifications(userId), 1);
+    assert.deepEqual(calls, ["ntfy", "discord", "discord"], "ntfy is not sent twice");
+    assert.ok(row().sent_at);
+    assert.equal(row().sent_channels, "ntfy,discord");
   });
 });

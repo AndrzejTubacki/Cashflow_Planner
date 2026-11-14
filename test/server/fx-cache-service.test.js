@@ -319,9 +319,22 @@ test("all-user FX refresh can use the async projection status hook", async () =>
 test("mutation FX preflight can fetch and upsert through the budget-store facade", async () => {
   const calls = [];
   const upserts = [];
+  const boundaries = [];
   const fx = createCashflowFxCacheService({
     budgetStore: {
       backend: "postgres",
+      async transaction(work) {
+        boundaries.push("begin");
+        const result = await work({
+          lockBudgetLedger: async id => { assert.equal(id, "household"); boundaries.push("lock"); },
+          upsertFxRates: this.upsertFxRates,
+          recordFinancialChange: async (id, reason) => {
+            assert.equal(id, "household"); assert.equal(reason, "fx"); boundaries.push("record");
+          }
+        });
+        boundaries.push("commit");
+        return result;
+      },
       async listPlanningRows(budgetId, tableName) {
         calls.push({ budgetId, tableName });
         assert.equal(budgetId, "household");
@@ -375,6 +388,7 @@ test("mutation FX preflight can fetch and upsert through the budget-store facade
   });
 
   assert.equal(result.refreshed, true);
+  assert.deepEqual(boundaries, ["begin", "lock", "record", "commit"]);
   assert.equal(result.provider, "frankfurter");
   assert.equal(result.rate, 1.2);
   assert.deepEqual(calls.map(call => call.tableName), ["settings", "fx_rates_cache"]);

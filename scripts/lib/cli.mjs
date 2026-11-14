@@ -6,6 +6,8 @@ export function isMainModule(fileUrl, argv1 = process.argv[1]) {
   return fs.realpathSync(path.resolve(argv1)) === fs.realpathSync(new URL(fileUrl).pathname);
 }
 
+/** Parse only declared options. Migration commands exposing both apply and
+ * dryRun must derive one consistent mode; the last explicit mode flag wins. */
 export function parseCliArgs(argv, config) {
   const options = { ...config.defaults, help: false };
   const booleanFlags = config.boolean || [];
@@ -29,5 +31,8 @@ export function parseCliArgs(argv, config) {
     }
   }
 
+  if (booleanFlags.includes('--apply') && Object.hasOwn(options, 'dryRun')) {
+    options.dryRun = !options.apply;
+  }
   return options;
 }

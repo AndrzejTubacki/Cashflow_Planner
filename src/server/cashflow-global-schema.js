@@ -1,5 +1,7 @@
-export const GLOBAL_SCHEMA_VERSION = 7;
-export const LEGACY_ADMIN_ACCOUNT_ID = "legacy-admin";
+import { DEVICE_SCHEMA_SQL, DEVICE_TABLE_COLUMNS } from "./cashflow-device-schema.js";
+import { STANDALONE_TRANSFER_JOURNAL_SCHEMA, STANDALONE_TRANSFER_TABLE_COLUMNS } from './cashflow-standalone-transfer-schema.js';
+
+export const GLOBAL_SCHEMA_VERSION = 8;
 export const GLOBAL_TABLE_NAMES = [
   "users",
   "global_options",
@@ -15,7 +17,9 @@ export const GLOBAL_TABLE_NAMES = [
   "auth_providers",
   "auth_oauth_states",
   "auth_config",
-  "security_audit_log"
+  "security_audit_log",
+  ...Object.keys(DEVICE_TABLE_COLUMNS),
+  ...Object.keys(STANDALONE_TRANSFER_TABLE_COLUMNS)
 ];
 
 export const GLOBAL_RUNTIME_GUARD_TRIGGER_NAMES = [
@@ -45,6 +49,11 @@ const GLOBAL_SCHEMA_SQL = `
     fx_provider TEXT NOT NULL DEFAULT 'nbp',
     fx_buffer_percent REAL NOT NULL DEFAULT 0,
     ntfy_allowed_private_hosts TEXT NOT NULL DEFAULT '[]',
+    backup_max_retention_count INTEGER NOT NULL DEFAULT 0 CHECK (backup_max_retention_count BETWEEN 0 AND 2147483647),
+    backup_max_age_days INTEGER NOT NULL DEFAULT 0 CHECK (backup_max_age_days BETWEEN 0 AND 2147483647),
+    device_access_minutes INTEGER NOT NULL DEFAULT 15 CHECK (device_access_minutes BETWEEN 1 AND 1440),
+    device_renewal_idle_days INTEGER NOT NULL DEFAULT 90 CHECK (device_renewal_idle_days BETWEEN 1 AND 3650),
+    device_absolute_days INTEGER NOT NULL DEFAULT 365 CHECK (device_absolute_days BETWEEN 1 AND 3650),
     updated_at TEXT NOT NULL
   );
 
@@ -82,6 +91,7 @@ const GLOBAL_SCHEMA_SQL = `
     updated_at TEXT NOT NULL,
     archived_at TEXT,
     deleted_at TEXT,
+    revision INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (created_by_account_id) REFERENCES accounts(id) ON DELETE SET NULL
   );
 
@@ -314,6 +324,8 @@ const GLOBAL_SCHEMA_SQL = `
 
   INSERT OR IGNORE INTO auth_config (id, updated_at)
   VALUES (1, datetime('now'));
+
+  ${STANDALONE_TRANSFER_JOURNAL_SCHEMA}
 `;
 
 export function dropGlobalRuntimeGuardTriggers(db) {
@@ -351,31 +363,16 @@ function addNtfyAllowedPrivateHostsCompatibilityColumn(db) {
   }
 }
 
-export function ensureLegacyAdminAccount(db) {
-  const existing = db.prepare("SELECT id FROM accounts WHERE id = ?").get(LEGACY_ADMIN_ACCOUNT_ID);
-  db.prepare(`
-    INSERT OR IGNORE INTO accounts (
-      id, email, display_name, status, created_at, updated_at
-    )
-    VALUES (?, NULL, 'Legacy Administrator', 'active', datetime('now'), datetime('now'))
-  `).run(LEGACY_ADMIN_ACCOUNT_ID);
-
-  if (!existing) {
-    db.prepare(`
-      INSERT OR IGNORE INTO account_global_roles (
-        account_id, role, granted_by_account_id, created_at
-      )
-      VALUES (?, 'system_admin', NULL, datetime('now'))
-    `).run(LEGACY_ADMIN_ACCOUNT_ID);
-  }
-}
-
 export function ensureLegacyBudget(db, {
   budgetId,
   displayName = "",
   storageKey = budgetId
 }) {
-  ensureLegacyAdminAccount(db);
+  // Discovery never creates identities. Only an explicitly created matching
+  // account may adopt a per-user storage folder.
+  const owner = db.prepare("SELECT id FROM accounts WHERE id = ? AND status = 'active'").get(storageKey);
+  if (!owner) return;
+  if (db.prepare("SELECT 1 FROM budgets WHERE id = ?").get(budgetId)) return;
   const name = String(displayName || budgetId).trim() || budgetId;
 
   db.prepare(`
@@ -383,14 +380,14 @@ export function ensureLegacyBudget(db, {
       id, storage_key, display_name, status, created_by_account_id, created_at, updated_at
     )
     VALUES (?, ?, ?, 'active', ?, datetime('now'), datetime('now'))
-  `).run(budgetId, storageKey, name, LEGACY_ADMIN_ACCOUNT_ID);
+  `).run(budgetId, storageKey, name, owner.id);
 
   db.prepare(`
     INSERT OR IGNORE INTO budget_memberships (
       budget_id, account_id, role, invited_by_account_id, created_at, updated_at
     )
     VALUES (?, ?, 'owner', NULL, datetime('now'), datetime('now'))
-  `).run(budgetId, LEGACY_ADMIN_ACCOUNT_ID);
+  `).run(budgetId, owner.id);
 }
 
 function migrateLegacyProfiles(db, storageProfileIds = []) {
@@ -406,15 +403,6 @@ function migrateLegacyProfiles(db, storageProfileIds = []) {
       storageKey: profileId
     });
   }
-
-  if (storageProfileIds.length) {
-    db.prepare(`
-      UPDATE auth_config
-      SET bootstrap_completed_at = COALESCE(bootstrap_completed_at, datetime('now')),
-          updated_at = datetime('now')
-      WHERE id = 1
-    `).run();
-  }
 }
 
 export function initializeGlobalSchema(db, {
@@ -422,6 +410,7 @@ export function initializeGlobalSchema(db, {
 } = {}) {
   db.transaction(() => {
     db.exec(GLOBAL_SCHEMA_SQL);
+    db.exec(DEVICE_SCHEMA_SQL);
     migrateLegacyProfiles(db, storageProfileIds);
     db.pragma(`user_version = ${GLOBAL_SCHEMA_VERSION}`);
   })();
@@ -467,6 +456,35 @@ export function applyGlobalMigrations(db, {
       addNtfyAllowedPrivateHostsCompatibilityColumn(db);
       db.exec(GLOBAL_SCHEMA_SQL);
       db.pragma("user_version = 7");
+    }
+    if (currentVersion < 8) {
+      beforeStep(8, db);
+      const columns = tableColumns(db, "global_options");
+      for (const [name, value, max] of [["device_access_minutes", 15, 1440],
+        ["device_renewal_idle_days", 90, 3650], ["device_absolute_days", 365, 3650]]) {
+        if (!columns.includes(name)) db.exec(`ALTER TABLE global_options ADD COLUMN ${name}
+          INTEGER NOT NULL DEFAULT ${value} CHECK (${name} BETWEEN 1 AND ${max})`);
+      }
+      // Unreleased 1.2.0 options belong to global step 8, alongside device policy.
+      for (const name of ["backup_max_retention_count", "backup_max_age_days"]) {
+        if (!columns.includes(name)) db.exec(`ALTER TABLE global_options ADD COLUMN ${name}
+          INTEGER NOT NULL DEFAULT 0 CHECK (${name} BETWEEN 0 AND 2147483647)`);
+      }
+      db.exec(DEVICE_SCHEMA_SQL);
+      // Reserve transfer identities additively; no financial writer is exposed.
+      db.exec(STANDALONE_TRANSFER_JOURNAL_SCHEMA);
+      // Cancellation is a durable negative outcome, not deletion of a job.
+      // Rebuild the old CHECK constraints inside this owning migration so an
+      // interrupted/failed upgrade retains every existing binding and receipt.
+      db.exec('ALTER TABLE cashflow_standalone_transfers RENAME TO cashflow_standalone_transfers_old');
+      db.exec(STANDALONE_TRANSFER_JOURNAL_SCHEMA);
+      db.exec(`INSERT INTO cashflow_standalone_transfers SELECT * FROM cashflow_standalone_transfers_old;
+        DROP TABLE cashflow_standalone_transfers_old`);
+      const budgetColumns = tableColumns(db, "budgets");
+      if (!budgetColumns.includes("revision")) {
+        db.exec("ALTER TABLE budgets ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
+      }
+      db.pragma("user_version = 8");
     }
   })();
 }

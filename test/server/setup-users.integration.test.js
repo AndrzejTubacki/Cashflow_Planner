@@ -1,4 +1,6 @@
+import { browserBoundOAuthState } from "../../src/server/cashflow-oauth-browser-binding.js";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -1276,7 +1278,10 @@ test("internal password setup async mutations can use an external global-store t
     email: "target@example.com",
     password: "Correct horse battery staple 123!"
   });
-  assert.deepEqual(login, { accountId: "target_account" });
+  // Session issuance needs the exact verified credential commitment to fence
+  // password replacement between authentication and session insertion.
+  assert.deepEqual(login, { accountId: "target_account",
+    credentialProof: createHash("sha256").update(credentials.get("target_account")).digest("hex") });
   assert.equal(failedAttempts.get("target_account"), 0);
   assert.deepEqual(transactions, ["transaction", "transaction", "transaction"]);
   assert.deepEqual(auditEvents.map(event => event.action), [
@@ -1683,12 +1688,12 @@ test("provider login and link startup can use an external global-store transacti
     }
   });
 
-  const login = await service.startAuthProviderLogin("github");
+  const login = await service.startAuthProviderLogin("github", { secret: "s".repeat(43) });
   assert.match(login.authorizationUrl, /^https:\/\/provider\.example\.test\/authorize\?state=/);
   assert.equal(states[0].purpose, "login");
   assert.equal(states[0].providerId, "github");
 
-  const link = await service.startAuthProviderLink("admin_account", "github");
+  const link = await service.startAuthProviderLink("admin_account", "github", { secret: "s".repeat(43), session: "fixture-session", linking: true });
   assert.match(link.authorizationUrl, /^https:\/\/provider\.example\.test\/authorize\?state=/);
   assert.equal(states[1].purpose, "link");
   assert.equal(states[1].accountId, "admin_account");
@@ -1729,6 +1734,7 @@ test("provider callback completion can use external global-store transactions", 
     updated_at: "2026-01-02T00:00:00Z"
   };
   const repo = {
+    sessions: { getByTokenHash: () => ({ account_id: "admin_account", idle_expires_at: "2099-01-01T00:00:00Z", absolute_expires_at: "2099-01-01T00:00:00Z" }) },
     accounts: {
       require(id) {
         return {
@@ -1822,7 +1828,8 @@ test("provider callback completion can use external global-store transactions", 
 
   const completed = await service.completeAuthProviderCallback(
     "github",
-    "https://cashflow.example.test/auth/github/callback?state=raw-state"
+    `https://cashflow.example.test/auth/github/callback?state=${browserBoundOAuthState({ secret: "s".repeat(43), session: "fixture-session", linking: true })}`,
+    { secret: "s".repeat(43), session: "fixture-session" }
   );
   assert.deepEqual(completed, {
     accountId: "admin_account",
@@ -2658,6 +2665,7 @@ test("GitHub links use the verified primary email, Facebook links store the emai
     assert.equal(started.response.status, 200, `${providerId} ${path} start: ${JSON.stringify(started.body)}`);
     const state = new URL(started.body.authorizationUrl).searchParams.get("state");
     const callback = await harness.request(`/api/auth/providers/${providerId}/callback?code=${code}&state=${encodeURIComponent(state)}`, {
+      useSession: path === "link",
       skipUserHeader: true,
       redirect: "manual"
     });
@@ -2804,6 +2812,7 @@ test("GitHub linking and sign-in work through the real OAuth exchange, without a
     assert.equal(authorizationUrl.origin + authorizationUrl.pathname, `${fakeGithub}/login/oauth/authorize`);
     const state = authorizationUrl.searchParams.get("state");
     const callback = await harness.request(`/api/auth/providers/github/callback?code=real-code&state=${encodeURIComponent(state)}`, {
+      useSession,
       skipUserHeader: true,
       redirect: "manual"
     });
@@ -3289,6 +3298,7 @@ test("internal authentication supports configured provider login, explicit linki
     assert.equal(linkStart.response.status, 200);
     const memberState = new URL(linkStart.body.authorizationUrl).searchParams.get("state");
     const memberCallback = await harness.request(`/api/auth/providers/google/callback?code=member-code&state=${encodeURIComponent(memberState)}`, {
+      useSession: true,
       skipUserHeader: true,
       redirect: "manual"
     });
@@ -3790,6 +3800,7 @@ test("confirmed-only users are treated as already set up", async () => withHarne
   fs.mkdirSync(userDir, { recursive: true });
 
   const ledgerDb = new Database(ledgerDbPath(harness.dataDir, userId, "2026"));
+  let historicalRow;
   try {
     initializeLedgerSchema(ledgerDb);
     ledgerDb.prepare(`
@@ -3802,9 +3813,27 @@ test("confirmed-only users are treated as already set up", async () => withHarne
         1, 1, 'PLN', 10, 10, datetime('now'), datetime('now')
       )
     `).run();
+    historicalRow = ledgerDb.prepare("SELECT * FROM confirmed_transactions WHERE id = 'confirmed-1'").get();
   } finally {
     ledgerDb.close();
   }
+
+  // Discovery must leave this folder unclaimed until its account is explicitly created.
+  const unclaimed = await harness.request("/api", {
+    headers: { "x-cashflow-user-id": userId }
+  });
+  assert.equal(unclaimed.response.status, 404);
+  assert.equal(unclaimed.body.error, `User not found: ${userId}`);
+  const listed = await harness.api("/api/users");
+  assert.equal(listed.users.some(user => user.id === userId), false);
+  assert.equal(fs.existsSync(userDir), true);
+
+  const created = await harness.api("/api/users", {
+    method: "POST",
+    body: { userId }
+  });
+  assert.equal(created.session.userId, userId);
+  assert.equal(created.session.budgetRole, "owner");
 
   const snapshot = await harness.api("/api", {
     headers: {
@@ -3815,6 +3844,23 @@ test("confirmed-only users are treated as already set up", async () => withHarne
   assert.equal(snapshot.setup_required, false);
   assert.equal(snapshot.settings.setup_completed, 1);
   assert.equal(snapshot.confirmedTransactions.length, 1);
+  assert.equal(snapshot.confirmedTransactions[0].id, "confirmed-1");
+  // Opening the budget merges the yearly file into planning.sqlite and keeps it as a *.merged recovery copy.
+  const recoveryDb = new Database(`${ledgerDbPath(harness.dataDir, userId, "2026")}.merged`, { readonly: true });
+  try {
+    assert.deepEqual(recoveryDb.prepare("SELECT * FROM confirmed_transactions WHERE id = 'confirmed-1'").get(), historicalRow);
+  } finally {
+    recoveryDb.close();
+  }
+  const planningDb = new Database(path.join(harness.dataDir, userId, "planning.sqlite"), { readonly: true });
+  try {
+    const merged = planningDb.prepare("SELECT * FROM ledger_transactions WHERE id = 'confirmed-1'").get();
+    for (const column of ["name", "currency", "amount", "type", "date", "confirmed_date", "ledger_amount", "running_balance_pln", "created_at", "updated_at"]) {
+      assert.equal(merged[column], historicalRow[column], column);
+    }
+  } finally {
+    planningDb.close();
+  }
 }));
 
 test("admins can store a provider secret from the UI; it lands in .env, works at once, and is never echoed or audited", async () => {
@@ -3891,7 +3937,7 @@ test("GitHub callbacks carrying the RFC 9207 iss parameter are accepted, includi
     assert.equal(started.response.status, 200, JSON.stringify(started.body));
     const state = new URL(started.body.authorizationUrl).searchParams.get("state");
     const query = new URLSearchParams({ code: "iss-code", state, ...(iss ? { iss } : {}) });
-    const result = await harness.request(`/api/auth/providers/github/callback?${query}`, { skipUserHeader: true, redirect: "manual" });
+    const result = await harness.request(`/api/auth/providers/github/callback?${query}`, { useSession, skipUserHeader: true, redirect: "manual" });
     return decodeURIComponent(result.response.headers.get("location") || "");
   }
 

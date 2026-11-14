@@ -1,11 +1,12 @@
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
-import { calculateNextDate, requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
+import { fallbackAnchorDayForDependent, requireHolidayCountry, requireIsoDate, todayInTimezone } from "./cashflow-date-utils.js";
 import { requireSupportedCurrency } from "./cashflow-fx-provider-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
 import { addMoneyAmounts, multiplyMoney, roundMoneyAmount } from "./cashflow-money-utils.js";
 import { badRequest, conflict, notFound } from "./cashflow-user-utils.js";
 import { makeOccurrenceKey } from "./cashflow-occurrence-utils.js";
 import { validatePlanMutationInput } from "./cashflow-plan-input-validation.js";
+import { recordSqliteFinancialChange } from "./cashflow-financial-journal.js";
 import {
   applyPlanningRunningBalancePlan,
   createPlanningRunningBalancePlan
@@ -21,16 +22,38 @@ import {
 export function createCashflowPlanMutationService({
   budgetStore = null,
   loadAllConfirmedTransactions,
-  listLedgerYears,
   newestConfirmedTransactionDate,
   normalizeRecurringInput,
-  openLedgerDb,
   openPlanningDb,
   recalculatePlanningRunningBalances,
   requireStartMonthYearIfNeeded,
   runRecoverableUserMutation,
   withProjectionStatus
 }) {
+  /** Keep each PostgreSQL planner result and its recalculation on one writer.
+   * Permission/revision integration can wrap this boundary without an early
+   * source commit; projection exceptions abort the entire financial edit. */
+  async function runPlanningMutation(userId, work, options = {}) {
+    return budgetStore.transaction(async writer => {
+      // Serialize with device CAS before reading or modifying planner sources.
+      await writer.lockBudgetLedger(userId);
+      const result = await work(writer);
+      const projected = await withProjectionStatus(userId, result, { ...options, store: writer });
+      await writer.recordFinancialChange(userId, "planner");
+      return projected;
+    });
+  }
+
+  /** Synchronous SQLite counterpart: nested writes become savepoints on the
+   * planning file, and projection failure aborts source and priority updates. */
+  function planningMutation(db, userId, work, options = {}) {
+    return db.transaction(() => {
+      const projected = withProjectionStatus(userId, work(), { ...options, db });
+      recordSqliteFinancialChange(db, userId, "planner");
+      return projected;
+    });
+  }
+
   function todayForUser(db) {
     const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
     return todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
@@ -130,22 +153,6 @@ export function createCashflowPlanMutationService({
       .filter(tx => tx.source_one_off_id === oneOffId);
   }
 
-  function uncoupleConfirmedOneOffRows(userId, oneOffId) {
-    for (const year of listLedgerYears(userId)) {
-      const ledgerDb = openLedgerDb(userId, year);
-      try {
-        ledgerDb.prepare(`
-          UPDATE confirmed_transactions
-          SET source_one_off_id = NULL,
-              updated_at = datetime('now')
-          WHERE source_one_off_id = ?
-        `).run(oneOffId);
-      } finally {
-        ledgerDb.close();
-      }
-    }
-  }
-
   function confirmedGoalRows(userId, goalId) {
     return loadAllConfirmedTransactions(userId)
       .filter(tx => tx.source_goal_id === goalId);
@@ -176,22 +183,6 @@ export function createCashflowPlanMutationService({
         String(tx.type || "") !== "income"
       )
       .reduce((sum, tx) => addMoneyAmounts(sum, tx.amount), 0);
-  }
-
-  function uncoupleConfirmedGoalRows(userId, goalId) {
-    for (const year of listLedgerYears(userId)) {
-      const ledgerDb = openLedgerDb(userId, year);
-      try {
-        ledgerDb.prepare(`
-          UPDATE confirmed_transactions
-          SET source_goal_id = NULL,
-              updated_at = datetime('now')
-          WHERE source_goal_id = ?
-        `).run(goalId);
-      } finally {
-        ledgerDb.close();
-      }
-    }
   }
 
   function normalizePredictionSubstituteMissing(strategy, value) {
@@ -304,17 +295,20 @@ export function createCashflowPlanMutationService({
     };
   }
 
-  function createRecurringExpense(userId, input) {
+  /** `options.entityId` is for the sync host only (a client-chosen stable ID);
+   * browser input still cannot supply an id. */
+  function createRecurringExpense(userId, input, options = {}) {
     input = validatePlanMutationInput("recurring-expense", input, { create: true });
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return createRecurringExpenseWithBudgetStore(userId, input);
+      return createRecurringExpenseWithBudgetStore(userId, input, options);
     }
+    if (options.entityId) throw new Error("Client-chosen entity IDs require the transactional sync host");
 
     let result;
 
     const db = openPlanningDb(userId);
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const id = generateId("rec-exp");
         const plannedTxId = insertPlannedTransaction(db, "recurring_expense", input.priority);
         const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
@@ -361,16 +355,16 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  async function createRecurringExpenseWithBudgetStore(userId, input) {
-    const result = await budgetStore.transaction(async writer => {
+  async function createRecurringExpenseWithBudgetStore(userId, input, options = {}) {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
-      const id = generateId("rec-exp");
+      const id = (options.entityId ?? generateId("rec-exp"));
       const plannedTxId = await insertPlannedTransactionWithBudgetStore(
         writer,
         userId,
@@ -410,7 +404,7 @@ export function createCashflowPlanMutationService({
       return await withPlanningPriority(writer, userId, row, "operating");
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function updateRecurringExpense(userId, id, input) {
@@ -424,7 +418,7 @@ export function createCashflowPlanMutationService({
     const db = openPlanningDb(userId);
 
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const existing = db.prepare(`
           SELECT *
           FROM recurring_expenses
@@ -493,11 +487,11 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function updateRecurringExpenseWithBudgetStore(userId, id, input) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -551,7 +545,7 @@ export function createCashflowPlanMutationService({
       return await withPlanningPriority(writer, userId, row, "operating");
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function deleteRecurringExpense(userId, id) {
@@ -561,7 +555,7 @@ export function createCashflowPlanMutationService({
 
     const db = openPlanningDb(userId);
     try {
-      db.transaction(() => {
+      return planningMutation(db, userId, () => {
         const expense = db.prepare(`
           SELECT planned_transaction_id
           FROM recurring_expenses
@@ -576,26 +570,29 @@ export function createCashflowPlanMutationService({
         db.prepare("DELETE FROM recurring_expenses WHERE id = ?").run(id);
         db.prepare("DELETE FROM planned_transactions WHERE id = ?").run(expense.planned_transaction_id);
         recalculatePlanningRunningBalances(db, userId);
+        return { ok: true };
       })();
     } finally {
       db.close();
     }
 
-    return withProjectionStatus(userId, { ok: true });
   }
 
-  function createRecurringIncome(userId, input) {
+  /** `options.entityId` is for the sync host only (a client-chosen stable ID);
+   * browser input still cannot supply an id. */
+  function createRecurringIncome(userId, input, options = {}) {
     input = validatePlanMutationInput("recurring-income", input, { create: true });
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return createRecurringIncomeWithBudgetStore(userId, input);
+      return createRecurringIncomeWithBudgetStore(userId, input, options);
     }
+    if (options.entityId) throw new Error("Client-chosen entity IDs require the transactional sync host");
 
     let result;
 
     const db = openPlanningDb(userId);
 
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const id = generateId("rec-inc");
         const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
         const active = input.active ?? 1;
@@ -649,7 +646,7 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function setOnlyPeriodSettingIncomeWithBudgetStore(writer, userId, incomeId) {
@@ -662,13 +659,13 @@ export function createCashflowPlanMutationService({
     })));
   }
 
-  async function createRecurringIncomeWithBudgetStore(userId, input) {
-    const result = await budgetStore.transaction(async writer => {
+  async function createRecurringIncomeWithBudgetStore(userId, input, options = {}) {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
-      const id = generateId("rec-inc");
+      const id = (options.entityId ?? generateId("rec-inc"));
       const repeatEveryMonths = requireStartMonthYearIfNeeded(input);
       const active = pgBoolean(input.active ?? 1);
       const periodSetting = active && pgBoolean(input.period_setting ?? 0);
@@ -709,7 +706,7 @@ export function createCashflowPlanMutationService({
         .find(candidate => candidate.id === id);
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function updateRecurringIncome(userId, id, input) {
@@ -723,7 +720,7 @@ export function createCashflowPlanMutationService({
     const db = openPlanningDb(userId);
 
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const existing = db.prepare(`
           SELECT *
           FROM recurring_incomes
@@ -798,11 +795,11 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function updateRecurringIncomeWithBudgetStore(userId, id, input) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -856,23 +853,7 @@ export function createCashflowPlanMutationService({
         .find(candidate => candidate.id === id);
     });
 
-    return withProjectionStatus(userId, result);
-  }
-
-  function fallbackAnchorDayForDependent(dependent, referencedIncome, today) {
-    // Preserve roughly where the expense currently lands: use the same
-    // income-anchored calculation calculateNextDate() already does for
-    // real generation, for this cycle (or next, if this cycle's has
-    // already passed), as the new fixed day-of-month — so deleting the
-    // income doesn't silently jump the expense's date around.
-    const [todayYear, todayMonth] = today.split("-").map(Number);
-    const anchored = { ...dependent, anchor_income: referencedIncome };
-    let anchorDate = calculateNextDate(anchored, todayYear, todayMonth);
-    if (!anchorDate || anchorDate < today) {
-      const next = new Date(Date.UTC(todayYear, todayMonth, 1));
-      anchorDate = calculateNextDate(anchored, next.getUTCFullYear(), next.getUTCMonth() + 1);
-    }
-    return anchorDate ? Number(anchorDate.slice(8, 10)) : 1;
+    return result;
   }
 
   function reanchorDependentExpenseToFixedDay(db, dependent, referencedIncome, today) {
@@ -896,7 +877,7 @@ export function createCashflowPlanMutationService({
 
     const db = openPlanningDb(userId);
     try {
-      db.transaction(() => {
+      return planningMutation(db, userId, () => {
         const existing = db.prepare("SELECT * FROM recurring_incomes WHERE id = ?").get(id);
         if (!existing) throw notFound("Recurring income not found");
 
@@ -947,12 +928,12 @@ export function createCashflowPlanMutationService({
         db.prepare("DELETE FROM future_transactions WHERE source_recurring_income_id = ?").run(id);
         db.prepare("DELETE FROM recurring_incomes WHERE id = ?").run(id);
         clearBudgetPeriodIncomeIfSelected(db, id);
+        return { ok: true };
       })();
     } finally {
       db.close();
     }
 
-    return withProjectionStatus(userId, { ok: true });
   }
 
   function updatePendingTransaction(userId, id, input = {}) {
@@ -1000,8 +981,12 @@ export function createCashflowPlanMutationService({
       const fx = Number(pending.buffered_fx_rate || pending.fx_rate || 1);
       const ledgerAmount = multiplyMoney(nextAmount, fx);
 
-      // Keep the source occurrence stable when users edit real-world pending details such as date or amount.
-      const nextOccurrenceKey = pending.occurrence_key || makeOccurrenceKey({
+      // One-off source dates move with pending edits, so their date-based key must move too.
+      // Recurring/goal/flex keys identify the original schedule and stay stable.
+      const nextOccurrenceKey = (pending.source_one_off_id
+        && !String(pending.occurrence_key || "").startsWith("one_off_remainder:"))
+        ? makeOccurrenceKey({ type: pending.type, date: nextDate, sourceOneOffId: pending.source_one_off_id })
+        : pending.occurrence_key || makeOccurrenceKey({
         type: pending.type,
         date: pending.date,
         sourceRecurringExpenseId: pending.source_recurring_expense_id || null,
@@ -1024,7 +1009,7 @@ export function createCashflowPlanMutationService({
         throw badRequest("Another pending transaction already exists for this occurrence");
       }
 
-      db.transaction(() => {
+      return planningMutation(db, userId, () => {
         if (pending.source_one_off_id) {
           const oneOff = db.prepare(`
             SELECT *
@@ -1075,20 +1060,15 @@ export function createCashflowPlanMutationService({
         );
 
         recalculatePlanningRunningBalances(db, userId);
-      })();
-
-      return withProjectionStatus(
-        userId,
-        db.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id),
-        { preservePending: true }
-      );
+        return db.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id);
+      }, { preservePending: true })();
     } finally {
       db.close();
     }
   }
 
   async function updatePendingTransactionWithBudgetStore(userId, id, input = {}) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1128,7 +1108,10 @@ export function createCashflowPlanMutationService({
       const fx = Number(pending.buffered_fx_rate || pending.fx_rate || 1);
       const ledgerAmount = multiplyMoney(nextAmount, fx);
 
-      const nextOccurrenceKey = pending.occurrence_key || makeOccurrenceKey({
+      const nextOccurrenceKey = (pending.source_one_off_id
+        && !String(pending.occurrence_key || "").startsWith("one_off_remainder:"))
+        ? makeOccurrenceKey({ type: pending.type, date: nextDate, sourceOneOffId: pending.source_one_off_id })
+        : pending.occurrence_key || makeOccurrenceKey({
         type: pending.type,
         date: pending.date,
         sourceRecurringExpenseId: pending.source_recurring_expense_id || null,
@@ -1184,22 +1167,25 @@ export function createCashflowPlanMutationService({
       await recalculatePlanningRunningBalancesWithBudgetStore(writer, userId);
       return (await writer.listPlanningRows(userId, "pending_transactions"))
         .find(row => row.id === id);
-    });
+    }, { preservePending: true });
 
-    return withProjectionStatus(userId, result, { preservePending: true });
+    return result;
   }
 
-  function createGoal(userId, input) {
+  /** `options.entityId` is for the sync host only (a client-chosen stable ID);
+   * browser input still cannot supply an id. */
+  function createGoal(userId, input, options = {}) {
     input = validatePlanMutationInput("goal", input, { create: true });
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return createGoalWithBudgetStore(userId, input);
+      return createGoalWithBudgetStore(userId, input, options);
     }
+    if (options.entityId) throw new Error("Client-chosen entity IDs require the transactional sync host");
 
     let result;
 
     const db = openPlanningDb(userId);
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const id = generateId("goal");
         const plannedTxId = insertPlannedTransaction(db, "goal", input.priority);
         const amount = input.amount ?? 0.01;
@@ -1229,16 +1215,16 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  async function createGoalWithBudgetStore(userId, input) {
-    const result = await budgetStore.transaction(async writer => {
+  async function createGoalWithBudgetStore(userId, input, options = {}) {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
-      const id = generateId("goal");
+      const id = (options.entityId ?? generateId("goal"));
       const plannedTxId = await insertPlannedTransactionWithBudgetStore(writer, userId, "goal", input.priority);
       const amount = input.amount ?? 0.01;
       const timestamp = new Date().toISOString();
@@ -1264,7 +1250,7 @@ export function createCashflowPlanMutationService({
       return await withPlanningPriority(writer, userId, row, "goal");
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function updateGoal(userId, id, input) {
@@ -1278,7 +1264,7 @@ export function createCashflowPlanMutationService({
     const db = openPlanningDb(userId);
 
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const existing = db.prepare(`
           SELECT *
           FROM goals
@@ -1333,11 +1319,11 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function updateGoalWithBudgetStore(userId, id, input) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1388,11 +1374,12 @@ export function createCashflowPlanMutationService({
       return await withPlanningPriority(writer, userId, row, "goal");
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  function deleteGoalPlanningSource(userId, id) {
-    const db = openPlanningDb(userId);
+  // Planning-only callers can include source removal in their outer rollback.
+  function deleteGoalPlanningSource(userId, id, transactionDb = null) {
+    const db = transactionDb || openPlanningDb(userId);
     try {
       db.transaction(() => {
         const goal = db.prepare(`
@@ -1410,7 +1397,7 @@ export function createCashflowPlanMutationService({
         recalculatePlanningRunningBalances(db, userId);
       })();
     } finally {
-      db.close();
+      if (!transactionDb) db.close();
     }
   }
 
@@ -1462,8 +1449,13 @@ export function createCashflowPlanMutationService({
     }
 
     if (!confirmedRows.length) {
-      deleteGoalPlanningSource(userId, id);
-      return withProjectionStatus(userId, { ok: true });
+      const planning = openPlanningDb(userId);
+      try {
+        return planningMutation(planning, userId, () => {
+          deleteGoalPlanningSource(userId, id, planning);
+          return { ok: true };
+        }).immediate();
+      } finally { planning.close(); }
     }
 
     if (confirmedAmount + 0.0001 < Number(goal.amount || 0)) {
@@ -1471,7 +1463,8 @@ export function createCashflowPlanMutationService({
     }
 
     return runRecoverableUserMutation(userId, "delete_funded_goal", async () => {
-      uncoupleConfirmedGoalRows(userId, id);
+      // Historical source IDs are accepted evidence even after planning ends.
+      // Deleting a completed goal must not rewrite payments in earlier years.
       deleteGoalPlanningSource(userId, id);
       return withProjectionStatus(userId, { ok: true });
     });
@@ -1479,7 +1472,7 @@ export function createCashflowPlanMutationService({
   }
 
   async function deleteGoalWithBudgetStore(userId, id) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1499,43 +1492,30 @@ export function createCashflowPlanMutationService({
         throw badRequest("Cannot delete confirmed goal transaction until it is fully funded");
       }
 
-      const byYear = new Map();
-      const timestamp = new Date().toISOString();
-      for (const row of confirmedRows) {
-        const year = Number(row.ledger_year);
-        const updates = byYear.get(year) || [];
-        updates.push({
-          id: row.id,
-          source_goal_id: null,
-          updated_at: timestamp
-        });
-        byYear.set(year, updates);
-      }
-
-      for (const [year, updates] of byYear.entries()) {
-        await writer.updateConfirmedTransactionsById(userId, year, updates);
-      }
-
+      // Ledger source IDs are historical references, not planning foreign keys.
       await deleteGoalPlanningSourceWithBudgetStore(writer, userId, id);
       await recalculatePlanningRunningBalancesWithBudgetStore(writer, userId);
       return { ok: true };
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  function createFlexTransaction(userId, input) {
+  /** `options.entityId` is for the sync host only (a client-chosen stable ID);
+   * browser input still cannot supply an id. */
+  function createFlexTransaction(userId, input, options = {}) {
     input = validatePlanMutationInput("flex", input, { create: true });
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return createFlexTransactionWithBudgetStore(userId, input);
+      return createFlexTransactionWithBudgetStore(userId, input, options);
     }
+    if (options.entityId) throw new Error("Client-chosen entity IDs require the transactional sync host");
 
     let result;
 
     const db = openPlanningDb(userId);
 
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const id = generateId("flex");
         const plannedTxId = insertPlannedTransaction(db, "flex", input.priority);
 
@@ -1584,15 +1564,15 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  async function createFlexTransactionWithBudgetStore(userId, input) {
-    const result = await budgetStore.transaction(async writer => {
+  async function createFlexTransactionWithBudgetStore(userId, input, options = {}) {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
-      const id = generateId("flex");
+      const id = (options.entityId ?? generateId("flex"));
       const plannedTxId = await insertPlannedTransactionWithBudgetStore(writer, userId, "flex", input.priority);
       const allowSplit = input.allow_split ?? 0;
       const minAmount = allowSplit ? input.min_amount ?? null : null;
@@ -1622,7 +1602,7 @@ export function createCashflowPlanMutationService({
       return await withPlanningPriority(writer, userId, row, "operating");
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function updateFlexTransaction(userId, id, input = {}) {
@@ -1636,7 +1616,7 @@ export function createCashflowPlanMutationService({
     const db = openPlanningDb(userId);
 
     try {
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         const existing = db.prepare(`
           SELECT *
           FROM flex_transactions
@@ -1709,11 +1689,11 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function updateFlexTransactionWithBudgetStore(userId, id, input = {}) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1770,7 +1750,7 @@ export function createCashflowPlanMutationService({
       return await withPlanningPriority(writer, userId, row, "operating");
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function deleteFlexTransaction(userId, id) {
@@ -1787,7 +1767,7 @@ export function createCashflowPlanMutationService({
 
     const db = openPlanningDb(userId);
     try {
-      db.transaction(() => {
+      return planningMutation(db, userId, () => {
         const flex = db.prepare(`
           SELECT planned_transaction_id
           FROM flex_transactions
@@ -1801,16 +1781,16 @@ export function createCashflowPlanMutationService({
         db.prepare("DELETE FROM flex_transactions WHERE id = ?").run(id);
         db.prepare("DELETE FROM planned_transactions WHERE id = ?").run(flex.planned_transaction_id);
         recalculatePlanningRunningBalances(db, userId);
+        return { ok: true };
       })();
     } finally {
       db.close();
     }
 
-    return withProjectionStatus(userId, { ok: true });
   }
 
   async function deleteRecurringIncomeWithBudgetStore(userId, id, options = {}) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1892,11 +1872,11 @@ export function createCashflowPlanMutationService({
       return { ok: true };
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function deleteRecurringExpenseWithBudgetStore(userId, id) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1925,11 +1905,11 @@ export function createCashflowPlanMutationService({
       return { ok: true };
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function deleteFlexTransactionWithBudgetStore(userId, id) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -1965,14 +1945,17 @@ export function createCashflowPlanMutationService({
       return { ok: true };
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  function createOneOffTransaction(userId, input) {
+  /** `options.entityId` is for the sync host only (a client-chosen stable ID);
+   * browser input still cannot supply an id. */
+  function createOneOffTransaction(userId, input, options = {}) {
     input = validatePlanMutationInput("one-off", input, { create: true });
     if (budgetStore?.backend === "postgres" && typeof budgetStore.transaction === "function") {
-      return createOneOffTransactionWithBudgetStore(userId, input);
+      return createOneOffTransactionWithBudgetStore(userId, input, options);
     }
+    if (options.entityId) throw new Error("Client-chosen entity IDs require the transactional sync host");
 
     let result;
 
@@ -1995,22 +1978,25 @@ export function createCashflowPlanMutationService({
           requireDateOrDefault(input.date, todayForUser(db))
         );
 
-        return db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
+        const projected = withProjectionStatus(userId,
+          db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id), { db });
+        recordSqliteFinancialChange(db, userId, "planner");
+        return projected;
       })();
     } finally {
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  async function createOneOffTransactionWithBudgetStore(userId, input) {
+  async function createOneOffTransactionWithBudgetStore(userId, input, options = {}) {
     const result = await budgetStore.transaction(async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
       const settings = (await writer.listPlanningRows(userId, "settings"))?.[0] || {};
-      const id = generateId("oneoff");
+      const id = (options.entityId ?? generateId("oneoff"));
       const timestamp = new Date().toISOString();
       const row = {
         amount: input.amount ?? 0,
@@ -2027,11 +2013,14 @@ export function createCashflowPlanMutationService({
       };
 
       await writer.insertPlanningRows(userId, "one_off_transactions", [row]);
-      return (await writer.listPlanningRows(userId, "one_off_transactions"))
+      const created = (await writer.listPlanningRows(userId, "one_off_transactions"))
         .find(candidate => candidate.id === id) || row;
+      const projected = await withProjectionStatus(userId, created, { store: writer });
+      await writer.recordFinancialChange(userId, "planner");
+      return projected;
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   function updateOneOffTransaction(userId, id, input) {
@@ -2090,17 +2079,22 @@ export function createCashflowPlanMutationService({
           id
         );
 
-        return db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id);
+        const projected = withProjectionStatus(userId,
+          db.prepare("SELECT * FROM one_off_transactions WHERE id = ?").get(id), { db });
+        recordSqliteFinancialChange(db, userId, "planner");
+        return projected;
       })();
     } finally {
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
-  function deleteOneOffPlanningSource(userId, id) {
-    const db = openPlanningDb(userId);
+  // Borrow the caller's planning connection when deletion and regeneration must
+  // roll back together; confirmed yearly-ledger recovery remains separate.
+  function deleteOneOffPlanningSource(userId, id, transactionDb = null) {
+    const db = transactionDb || openPlanningDb(userId);
     try {
       db.transaction(() => {
         db.prepare("DELETE FROM pending_transactions WHERE source_one_off_id = ?").run(id);
@@ -2109,7 +2103,7 @@ export function createCashflowPlanMutationService({
         recalculatePlanningRunningBalances(db, userId);
       })();
     } finally {
-      db.close();
+      if (!transactionDb) db.close();
     }
   }
 
@@ -2150,42 +2144,36 @@ export function createCashflowPlanMutationService({
     return plan;
   }
 
-  // Remove only this generated row, never its source/target or confirmed history.
-  // Normal regeneration may recreate it in pending, future, or not at all.
-  // Serialize audit details for PostgreSQL JSONB and SQLite TEXT alike; plain
-  // prose is not valid JSON and would roll back the PostgreSQL row deletion.
+  // Recompute only this occurrence, including an ended period. Carry its identity
+  // into projection before deleting it; deletion, audit and rebuild roll back together.
   async function regeneratePendingTransaction(userId, id) {
     const details = JSON.stringify({ reason: "Single pending row removed for regeneration" });
+    const options = { preservePending: true, recoverPendingRows: [] };
     if (budgetStore?.backend === "postgres") {
-      await budgetStore.transaction(async writer => {
-        await writer.lockBudgetLedger(userId);
-        const rows = await writer.listPlanningRows(userId, "pending_transactions");
-        if (!rows.some(row => row.id === id)) throw notFound("Pending transaction not found");
+      return runPlanningMutation(userId, async writer => {
+        const pending = (await writer.listPlanningRows(userId, "pending_transactions")).find(row => row.id === id);
+        if (!pending) throw notFound("Pending transaction not found");
+        options.recoverPendingRows.push(pending);
         await writer.deletePlanningRowsById(userId, "pending_transactions", [id]);
         await writer.insertPlanningRows(userId, "event_log", [{
           id: generateId("evt"), action: "pending_regenerated", entity_type: "pending",
-          entity_id: id, details,
-          timestamp: new Date().toISOString()
+          entity_id: id, details, timestamp: new Date().toISOString()
         }]);
-      });
-    } else {
-      const db = openPlanningDb(userId);
-      try {
-        db.transaction(() => {
-          if (!db.prepare("SELECT id FROM pending_transactions WHERE id = ?").get(id)) {
-            throw notFound("Pending transaction not found");
-          }
-          db.prepare("DELETE FROM pending_transactions WHERE id = ?").run(id);
-          db.prepare("INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp) VALUES (?, ?, ?, ?, ?, ?)")
-            .run(generateId("evt"), "pending_regenerated", "pending", id,
-              details, new Date().toISOString());
-        })();
-      } finally {
-        db.close();
-      }
+        return { ok: true, removedPendingId: id };
+      }, options);
     }
-    // Do not invoke the coordinator's bulk negative-pending cleanup.
-    return await withProjectionStatus(userId, { ok: true, removedPendingId: id }, { preservePending: true });
+    const db = openPlanningDb(userId);
+    try {
+      return planningMutation(db, userId, () => {
+        const pending = db.prepare("SELECT * FROM pending_transactions WHERE id = ?").get(id);
+        if (!pending) throw notFound("Pending transaction not found");
+        options.recoverPendingRows.push(pending);
+        db.prepare("DELETE FROM pending_transactions WHERE id = ?").run(id);
+        db.prepare("INSERT INTO event_log (id, action, entity_type, entity_id, details, timestamp) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(generateId("evt"), "pending_regenerated", "pending", id, details, new Date().toISOString());
+        return { ok: true, removedPendingId: id };
+      }, options)();
+    } finally { db.close(); }
   }
 
   function dismissPendingOneOffRemainder(userId, id) {
@@ -2219,7 +2207,7 @@ export function createCashflowPlanMutationService({
         throw badRequest("One-off remainder cannot be dismissed without confirmed history");
       }
 
-      result = db.transaction(() => {
+      result = planningMutation(db, userId, () => {
         db.prepare(`
           UPDATE one_off_transactions
           SET amount = ?,
@@ -2240,11 +2228,11 @@ export function createCashflowPlanMutationService({
       db.close();
     }
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function dismissPendingOneOffRemainderWithBudgetStore(userId, id) {
-    const result = await budgetStore.transaction(async writer => {
+    const result = await runPlanningMutation(userId, async writer => {
       if (typeof writer.lockBudgetLedger === "function") {
         await writer.lockBudgetLedger(userId);
       }
@@ -2306,7 +2294,7 @@ export function createCashflowPlanMutationService({
       };
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function updateOneOffTransactionWithBudgetStore(userId, id, input) {
@@ -2355,11 +2343,14 @@ export function createCashflowPlanMutationService({
         updated_at: new Date().toISOString()
       }]);
 
-      return (await writer.listPlanningRows(userId, "one_off_transactions"))
+      const updated = (await writer.listPlanningRows(userId, "one_off_transactions"))
         .find(candidate => candidate.id === id);
+      const projected = await withProjectionStatus(userId, updated, { store: writer });
+      await writer.recordFinancialChange(userId, "planner");
+      return projected;
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   async function deleteOneOffTransaction(userId, id) {
@@ -2378,12 +2369,19 @@ export function createCashflowPlanMutationService({
     }
 
     if (!confirmedRows.length) {
-      deleteOneOffPlanningSource(userId, id);
-      return withProjectionStatus(userId, { ok: true });
+      const planning = openPlanningDb(userId);
+      try {
+        return planning.transaction(() => {
+          deleteOneOffPlanningSource(userId, id, planning);
+          const projected = withProjectionStatus(userId, { ok: true }, { db: planning });
+          recordSqliteFinancialChange(planning, userId, "planner");
+          return projected;
+        }).immediate();
+      } finally { planning.close(); }
     }
 
     return runRecoverableUserMutation(userId, "delete_confirmed_one_off", async () => {
-      uncoupleConfirmedOneOffRows(userId, id);
+      // End future planning while preserving original payment attribution.
       deleteOneOffPlanningSource(userId, id);
       return withProjectionStatus(userId, { ok: true });
     });
@@ -2398,32 +2396,15 @@ export function createCashflowPlanMutationService({
         .find(row => row.id === id) || null;
       if (!existing) throw notFound("One-off transaction not found");
 
-      const confirmedRows = await confirmedOneOffRowsAsync(userId, id, writer);
-      if (confirmedRows.length) {
-        const byYear = new Map();
-        const timestamp = new Date().toISOString();
-        for (const row of confirmedRows) {
-          const year = Number(row.ledger_year);
-          const updates = byYear.get(year) || [];
-          updates.push({
-            id: row.id,
-            source_one_off_id: null,
-            updated_at: timestamp
-          });
-          byYear.set(year, updates);
-        }
-
-        for (const [year, updates] of byYear.entries()) {
-          await writer.updateConfirmedTransactionsById(userId, year, updates);
-        }
-      }
-
+      // Deletion only changes planning; accepted ledger facts stay attributable.
       await deleteOneOffPlanningSourceWithBudgetStore(writer, userId, id);
       await recalculatePlanningRunningBalancesWithBudgetStore(writer, userId);
-      return { ok: true };
+      const projected = await withProjectionStatus(userId, { ok: true }, { store: writer });
+      await writer.recordFinancialChange(userId, "planner");
+      return projected;
     });
 
-    return withProjectionStatus(userId, result);
+    return result;
   }
 
   return {

@@ -1,4 +1,13 @@
+import { CAPABILITIES } from "./server/cashflow-authorization.js";
+import { createDevicePortability } from './server/cashflow-device-portability.js';
 import fs from "node:fs";
+import { createAppSnapshotService } from "./server/cashflow-app-snapshot-service.js";
+import { createDeviceService } from "./server/cashflow-device-service.js";
+import { capabilitiesFor } from "./server/cashflow-authorization.js";
+import { createDeviceStore } from "./server/cashflow-device-store.js";
+import { createStandaloneTransferPublisher } from './server/cashflow-standalone-transfer-publisher.js';
+import { createStandaloneTransferFiles } from './server/cashflow-standalone-transfer-files.js';
+import { createStandaloneTransferHttpHost } from './server/cashflow-standalone-transfer-http.js';
 import path from "node:path";
 
 import { createCashflowErrorLogger } from "./server/cashflow-error-utils.js";
@@ -31,6 +40,7 @@ import { createCashflowProjectionStateService } from "./server/cashflow-projecti
 import { createCashflowPlanMutationService } from "./server/cashflow-plan-mutation-service.js";
 import { createCashflowPendingTransitionService } from "./server/cashflow-pending-transition-service.js";
 import { createCashflowPendingConfirmationService } from "./server/cashflow-pending-confirmation-service.js";
+import { createFinancialGrantAuthorizer, createFinancialOperationService } from "./server/cashflow-financial-operation-service.js";
 import { createCashflowConfirmedFxService } from "./server/cashflow-confirmed-fx-service.js";
 import { createCashflowProjectionEngineService } from "./server/cashflow-projection-engine-service.js";
 import { createCashflowProjectionCoordinatorService } from "./server/cashflow-projection-coordinator-service.js";
@@ -95,10 +105,17 @@ function cleanupDeletedBudgetRecoveries(recoveryDir, {
   };
 }
 
+/** Origin support matches engine 0.4/native state v3. A legacy/test host may
+ * explicitly disable it; HTTP and environment data never select capability. */
 async function createCashflowModule({
+  allowStandaloneOrigins = true,
   appVersion = "0.0.0",
   authProviderHook = null,
+  appSnapshotReadHook = null,
+  deviceNow = () => Date.now(),
+  sessionNow = () => new Date(),
   backupServiceHook = null,
+  deviceMutationHook = null,
   dataDir,
   databaseConfig = resolveCashflowDbConfig(),
   env = process.env,
@@ -181,6 +198,7 @@ async function createCashflowModule({
   });
 
   const storageBackend = await createCashflowStorageBackend({
+    allowStandaloneOrigins,
     beforeGlobalMigrationStep: globalMigrationHook || (() => {}),
     databaseConfig,
     dataDir,
@@ -288,6 +306,7 @@ async function createCashflowModule({
     wouldLedgerGoNegativeAfterInsert,
     wouldLedgerGoNegativeAfterInsertAsync
   } = createCashflowLedgerService({
+    allowStandaloneOrigins,
     budgetStore,
     generateId,
     listLedgerYears,
@@ -321,10 +340,12 @@ async function createCashflowModule({
     refreshPendingOccurrence,
     requireStartMonthYearIfNeeded
   } = createCashflowProjectionStateService({
+    allowStandaloneOrigins,
     budgetStore,
     latestConfirmedBalance,
     listLedgerYears,
     loadAllConfirmedTransactions,
+    openPlanningDb,
     openLedgerDb
   });
 
@@ -368,7 +389,8 @@ async function createCashflowModule({
     normalizeLocale,
     openPlanningDb,
     recalculatePlanningRunningBalances,
-    recalculatePlanningRunningBalancesAsync
+    recalculatePlanningRunningBalancesAsync,
+    withProjectionStatus
   });
 
   const {
@@ -470,6 +492,7 @@ async function createCashflowModule({
     validateCsrfToken
   } = createCashflowSessionService({
     globalStore,
+    now: sessionNow,
     openGlobalDb,
     resolveAccountContext: resolveAccountContextAsync,
     resolveBudgetContext: resolveBudgetContextAsync
@@ -548,9 +571,9 @@ async function createCashflowModule({
     return await requireProjectionCoordinator().regenerateAllUsersAfterFxChangeAsync();
   }
 
-  function withProjectionStatus(userId, result) {
-    // Attach projection success/failure metadata to mutation responses.
-    return requireProjectionCoordinator().withProjectionStatus(userId, result);
+  function withProjectionStatus(userId, result, options = {}) {
+    // Forward explicit transaction ownership for atomic source/projection edits.
+    return requireProjectionCoordinator().withProjectionStatus(userId, result, options);
   }
 
   async function regenerateProjectionsWithFxRefresh(userId, options = {}) {
@@ -580,19 +603,22 @@ async function createCashflowModule({
 
   let projectionEngine = null;
 
-  function regenerateProjections(userId) {
+  function regenerateProjections(userId, db = null, options = {}) {
     // Low-level projection rebuild delegated to the engine once it is wired.
     if (!projectionEngine) {
       throw new Error("Cashflow projection engine is not initialized");
     }
 
-    return projectionEngine.regenerateProjections(userId);
+    return projectionEngine.regenerateProjections(userId, db, options);
   }
 
   // Create/restore backups and validate data integrity before risky operations.
   const {
     cleanupOperationalData,
+    cleanupOperationalDataAsync,
     cleanupOperationalDataBestEffort,
+    cleanupOperationalDataBestEffortAsync,
+    protectBackup,
     createBackup,
     createBackupAsync,
     maybeRunAutomaticBackup,
@@ -605,12 +631,15 @@ async function createCashflowModule({
     validateCashflowData,
     validateCashflowDataAsync
   } = createCashflowBackupService({
+    allowStandaloneOrigins,
     backupDir,
     backupHook: backupServiceHook,
     backupRootDir,
     budgetStore,
     directorySizeBytes,
     generateId,
+    getGlobalOptions,
+    getGlobalOptionsAsync,
     getSettings,
     getSettingsAsync,
     initReadOnlyPragmas,
@@ -622,15 +651,18 @@ async function createCashflowModule({
     openPlanningDb,
     recalculateLedgerRunningBalance,
     recalculateLedgerRunningBalanceAsync,
-    regenerateProjectionsAfterMutation,
-    regenerateProjectionsAfterMutationAsync
+    regenerateProjectionsAfterMutation: (id, options) => options?.db
+      ? withProjectionStatus(id, null, options) : regenerateProjectionsAfterMutation(id),
+    regenerateProjectionsAfterMutationAsync: (id, options) => options?.store
+      ? withProjectionStatus(id, null, options) : regenerateProjectionsAfterMutationAsync(id)
   });
   cleanupAfterMigrationRecovery = cleanupOperationalDataBestEffort;
 
   recoveryService = createCashflowRecoveryService({
     afterWork: recoverableMutationHook,
     budgetStore,
-    cleanupOperationalData: cleanupOperationalDataBestEffort,
+    cleanupOperationalData: cleanupOperationalDataBestEffortAsync,
+    protectBackup,
     createBackup,
     createBackupAsync,
     logError,
@@ -649,12 +681,16 @@ async function createCashflowModule({
       };
     }
 
-    return runRecoverableUserMutation(userId, "compact_ledger_history", async () =>
-      withProjectionStatus(userId, await compactHistoricalLedgerRowsAsync(userId, {
-        ...options,
-        plan
-      }))
-    );
+    // Only derived metadata changes. Keep the safety backup, but do not regenerate
+    // projections or restore financial history if an atomic cache write fails.
+    await createBackupAsync(userId);
+    const result = await compactHistoricalLedgerRowsAsync(userId, { ...options, plan });
+    logServerEvent("cashflow_ledger_history_summarized", {
+      retainedRows: result.retainedRows,
+      summarizedRows: result.compactedRows,
+      createdSummaries: result.createdRows
+    });
+    return result;
   }
 
   const {
@@ -684,6 +720,8 @@ async function createCashflowModule({
     renameBudgetAsync,
     restoreBudget: restoreBudgetMetadata,
     restoreBudgetAsync: restoreBudgetMetadataAsync,
+    rollbackCreatedBudget,
+    rollbackCreatedBudgetAsync,
     revokeInvitation,
     revokeInvitationAsync,
     transferOwnership,
@@ -713,12 +751,16 @@ async function createCashflowModule({
     importFullDataAsync,
     importOneOffCsv,
     importOneOffCsvAsync,
+    prepareOneOffCsvImportPlanAsync,
     importSampleData,
     importSampleDataAsync
   } = createCashflowDataPortabilityService({
+    allowStandaloneOrigins,
     budgetStore,
+    protectBackup,
     cleanupOperationalData: cleanupOperationalDataBestEffort,
     createBackup,
+    createBackupAsync,
     generateId,
     listLedgerYears,
     loadAllConfirmedTransactions,
@@ -790,6 +832,7 @@ async function createCashflowModule({
 
   const {
     completeSetup,
+    validateSetupInput,
     setupRequired,
     setupRequiredAsync
   } = createCashflowSetupService({
@@ -818,9 +861,110 @@ async function createCashflowModule({
 
   const authSecretStore = secretStore || createSecretStore({ env, envFilePath });
 
+  // Share one injectable device clock across enrollment, authorization and renewal.
+  // The default remains wall time; deterministic offline tests never edit token rows.
+  const deviceStore = createDeviceStore(globalStore);
+  const deviceService = createDeviceService({ store: deviceStore, now: deviceNow,
+    archiveReceiptTimeoutMs: Number(env.CASHFLOW_DEVICE_ARCHIVE_RECEIPT_HOURS ?? 24) * 3600000 });
+  const transferFxReader = ({ budgetId, writer, today }) => getCachedFxSnapshotAsync(budgetId, today, writer);
+  const transferPublisher = allowStandaloneOrigins ? createStandaloneTransferPublisher({ deviceStore, deviceService, budgetStore,
+    readFxSnapshot: transferFxReader, now: deviceNow, logServerEvent, logError,
+    sqliteFiles: budgetStore.backend === 'sqlite' ? createStandaloneTransferFiles({ dataDir: path.resolve(dataDir), readFxSnapshot: transferFxReader }) : null }) : null;
+  const transferHost = transferPublisher ? createStandaloneTransferHttpHost({ publisher: transferPublisher, now: deviceNow,
+    fetchRate: ({ provider, baseCurrency, quoteCurrency }) => fetchProviderRate(provider, baseCurrency, null, quoteCurrency) }) : null;
+
+  /** Financial sync host for one device request: the device grant is checked on
+   * the financial transaction, and every server service below is bound to that
+   * transaction's store so validation, ledger checks and projections join it. */
+  function createSyncHost(token) {
+    const authorizationDbPath = budgetStore.backend === "sqlite" ? path.join(dataDir, "cashflow-global.sqlite") : null;
+    const projected = store => (id, result, options = {}) => withProjectionStatus(id, result, { ...options, store });
+    return createFinancialOperationService({
+      budgetStore, authorizationDbPath,
+      authorize: createFinancialGrantAuthorizer({ deviceService, token, backend: budgetStore.backend }),
+      // Cached rates only: a bootstrap never waits on an FX provider inside its transaction.
+      fxSnapshot: ({ budgetId, writer }) => getCachedFxSnapshotAsync(budgetId, null, writer),
+      project: async ({ budgetId, writer }) => { await withProjectionStatus(budgetId, null, { store: writer }); },
+      planMutations: ({ store }) => createCashflowPlanMutationService({ budgetStore: store, listLedgerYears, loadAllConfirmedTransactions,
+        newestConfirmedTransactionDate, normalizeRecurringInput, openLedgerDb, openPlanningDb, recalculatePlanningRunningBalances,
+        requireStartMonthYearIfNeeded, runRecoverableUserMutation, withProjectionStatus: projected(store) }),
+      ledgerActions: ({ store }) => {
+        const ledger = createCashflowLedgerService({ allowStandaloneOrigins, budgetStore: store, generateId, listLedgerYears, openLedgerDb, openPlanningDb });
+        return {
+          confirmPendingTransaction: createCashflowPendingConfirmationService({ budgetStore: store, deletePendingOccurrence, findConfirmedOccurrence,
+            getConfirmedFxForDate, newestConfirmedTransactionDate, newestConfirmedTransactionDateAsync: ledger.newestConfirmedTransactionDateAsync,
+            openLedgerDb, openPlanningDb, recalculateLedgerRunningBalance, runRecoverableUserMutation, withProjectionStatus: projected(store),
+            wouldLedgerGoNegativeAfterInsert, wouldLedgerGoNegativeAfterInsertAsync: ledger.wouldLedgerGoNegativeAfterInsertAsync }).confirmPendingTransaction,
+          moveFutureTransactionToPending: createCashflowPendingTransitionService({ budgetStore: store, normalizePendingStatus, openPlanningDb,
+            recalculatePlanningRunningBalances, withProjectionStatus: projected(store) }).moveFutureTransactionToPending,
+          updateSettings: createCashflowSettingsService({ budgetStore: store, fetchProviderRate, getCachedFxRate, getCachedFxRateAsync,
+            getGlobalOptions: async () => typeof getGlobalOptionsAsync === "function" ? await getGlobalOptionsAsync() : getGlobalOptions(),
+            latestConfirmedBalance, latestConfirmedBalanceAsync: ledger.latestConfirmedBalanceAsync, logServerEvent, normalizeLocale, openPlanningDb,
+            recalculatePlanningRunningBalances, recalculatePlanningRunningBalancesAsync, withProjectionStatus: projected(store) }).updateSettings
+        };
+      }
+    });
+  }
+
+  // Explicit imports use a transaction-bound store rather than snapshot uploads.
+  const devicePortability = createDevicePortability({ budgetStore, deviceService,
+    authorizationDbPath: budgetStore.backend === 'sqlite' ? path.join(dataDir, 'cashflow-global.sqlite') : null,
+    makePortability: (store, idGenerator) => createCashflowDataPortabilityService({
+      allowStandaloneOrigins, budgetStore: store, generateId: idGenerator, normalizeLocale,
+      listLedgerYears, openPlanningDb, openLedgerDb, loadAllConfirmedTransactions
+    }),
+    createBackup: id => createBackupAsync(id, { deferCleanup: true }),
+    recalculate: (id, store) => recalculateLedgerRunningBalanceAsync(id, { store }),
+    project: (id, store) => withProjectionStatus(id, null, { store }),
+    logServerEvent
+  });
+
+  /** Device metadata writes join the authorization repository, even on SQLite
+   * where its synchronous repository methods are safe to await inside this host. */
+  async function deviceBudgetMutation(token, budgetId, operation, args) {
+    const capability = { renameBudget: CAPABILITIES.BUDGET_RENAME,
+      updateMemberRole: CAPABILITIES.BUDGET_MEMBERS, removeMember: CAPABILITIES.BUDGET_MEMBERS,
+      createInvitation: CAPABILITIES.BUDGET_MEMBERS, revokeInvitation: CAPABILITIES.BUDGET_MEMBERS,
+      leaveBudget: CAPABILITIES.BUDGET_READ, transferOwnership: CAPABILITIES.BUDGET_TRANSFER }[operation];
+    if (!capability) throw new Error('Unsupported device metadata mutation');
+    if (deviceMutationHook) await deviceMutationHook({ operation, budgetId });
+    return deviceService.mutateBudget(token, budgetId, capability, async (tx, grant) => {
+      if (args[0] !== grant.accountId) throw new Error('Device actor mismatch');
+      const service = createCashflowBudgetService({
+        globalStore: { backend: 'postgres', transaction: work => work(tx.repo, tx.connection) },
+        logError, openGlobalDb: () => { throw new Error('Device metadata must use the owning repository'); }
+      });
+      return service[`${operation}Async`](...args);
+    });
+  }
+
+  /** Operational settings use the financial writer plus attached authorization
+   * locks. The async service branch avoids reopening SQLite outside that owner. */
+  async function updateDeviceSettings(token, budgetId, updates) {
+    if (deviceMutationHook) await deviceMutationHook({ operation: "updateSettings", budgetId });
+    return devicePortability.within(token, budgetId, store => {
+      const facade = new Proxy(store, { get(target, prop) {
+        if (prop === 'backend') return 'postgres';
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+      return createCashflowSettingsService({ budgetStore: facade, normalizeLocale,
+        getGlobalOptions: getGlobalOptionsAsync, logServerEvent,
+        withProjectionStatus: (id, result) => withProjectionStatus(id, result, { store })
+      }).updateSettings(budgetId, updates);
+    }, CAPABILITIES.BUDGET_SETTINGS);
+  }
+
   function registerRoutes(app) {
     // Bind all HTTP routes to the functions assembled above.
     registerCashflowRoutes(app, {
+      deviceService,
+      deviceBudgetMutation,
+      updateDeviceSettings,
+      transferHost,
+      createSyncHost,
+      devicePortability,
+      getAppSnapshot: createAppSnapshotService({ allowStandaloneOrigins, budgetStore, afterRead: appSnapshotReadHook }),
       collectCurrenciesForFxSnapshot,
       collectCurrenciesForFxSnapshotAsync,
       acceptInvitation,
@@ -843,6 +987,8 @@ async function createCashflowModule({
       createGoal,
       createBudget,
       createBudgetAsync,
+      rollbackCreatedBudget,
+      rollbackCreatedBudgetAsync,
       completeInternalPasswordSetup,
       createInvitation,
       createInvitationAsync,
@@ -959,6 +1105,7 @@ async function createCashflowModule({
       importFullDataAsync,
       importOneOffCsv,
       importOneOffCsvAsync,
+      prepareOneOffCsvImportPlanAsync,
       importSampleData,
       importSampleDataAsync,
       safeGetCurrentFxSnapshot,
@@ -989,6 +1136,7 @@ async function createCashflowModule({
       updateGlobalOptionsAsync,
       validatePlanMutationInput,
       completeSetup,
+      validateSetupInput,
       setupRequired,
       setupRequiredAsync,
       translateLocale,
@@ -1012,11 +1160,13 @@ async function createCashflowModule({
 
     const globalReady = await globalStore.checkReadiness();
     result.globalSchemaVersion = globalReady.globalSchemaVersion;
-    await globalStore.withRepository(repo => {
-      if (!repo.globalOptions.get()) {
+    // Await both adapters before releasing the repository's pooled connection.
+    // Promise truthiness must never turn missing PostgreSQL rows into readiness.
+    await globalStore.withRepository(async repo => {
+      if (!await repo.globalOptions.get()) {
         throw new Error("global_options row is missing");
       }
-      if (!repo.authConfig.get()) {
+      if (!await repo.authConfig.get()) {
         throw new Error("auth_config row is missing");
       }
     });
@@ -1177,14 +1327,27 @@ async function createCashflowModule({
     if (!budgetId) {
       throw badRequest("Budget selection required");
     }
+    // In no-sign-in mode a header selects the compatibility user identified by
+    // storage_key. Never infer an actor from the budget's owner membership.
+    let selectedAccountId = "";
+    if (!tokenContext) {
+      selectedAccountId = await globalStore.withRepository(async repo => {
+        const config = await repo.authConfig.getActiveMode();
+        if ((config?.active_mode || "none") !== "none") return "";
+        const budget = await repo.budgets.get(budgetId);
+        return budget?.storage_key || budgetId;
+      });
+    }
     const selectedContext = tokenContext && budgetId !== tokenContext.budget?.id
       ? {
-          ...(await resolveBudgetContext(budgetId, {
+          // Header selection must use the backend-neutral resolver: PostgreSQL
+          // budgets have committed metadata/membership but no SQLite directory.
+          ...(await resolveBudgetContextAsync(budgetId, {
             accountId: tokenContext.account.id
           })),
           authSession: tokenContext.authSession
         }
-      : tokenContext || await resolveBudgetContext(budgetId);
+      : tokenContext || await resolveBudgetContextAsync(budgetId, { accountId: selectedAccountId });
     req.cashflowContext = {
       ...selectedContext,
       legacyBudgetHeader: hasLegacyHeader && !hasBudgetHeader
@@ -1194,6 +1357,25 @@ async function createCashflowModule({
 
   async function resolveRequestActor(req) {
     if (req.cashflowActorContext) return req.cashflowActorContext;
+    // A paired phone acts in one granted budget with the account's own role. The route
+    // middleware admits device tokens only on budget-scoped routes (DEVICE_BUDGET_ROUTES).
+    const device = /^Bearer (cfda1_[A-Za-z0-9_-]{43})$/.exec(String(req.headers.authorization || ""));
+    if (device) {
+      const budgetId = String(req.headers["x-cashflow-budget-id"] || "").trim();
+      if (!budgetId || req.headers.cookie || req.headers["x-cashflow-user-id"]) {
+        const error = new Error("Authentication required"); error.status = 401; throw error;
+      }
+      const write = !["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase());
+      const grant = await deviceService.authorizeBudgetAccess(device[1], budgetId, write);
+      const context = await resolveBudgetContextAsync(budgetId, { accountId: grant.accountId });
+      // The budget role only: a device never carries the account's server-admin powers.
+      const capabilities = capabilitiesFor({ budgetRole: context.budget.role });
+      req.cashflowActorContext = { ...context, capabilities, globalRoles: [],
+        session: { ...context.session, capabilities, globalRoles: [], permissions: [] },
+        // Not a sign-in: anything needing a recent browser sign-in fails for devices.
+        authSession: { id: `device:${grant.deviceId}`, device: true } };
+      return req.cashflowActorContext;
+    }
     const token = sessionTokenFromRequest(req);
     const tokenContext = token ? await resolveTokenContext(token) : null;
     if (token && !tokenContext) {
@@ -1213,7 +1395,7 @@ async function createCashflowModule({
   // Schedule recurring maintenance: midnight transitions, FX refresh, notifications, backups.
   const { startBackgroundJobs, stopBackgroundJobs } = createCashflowBackgroundJobs({
     budgetStore,
-    cleanupOperationalData: cleanupOperationalDataBestEffort,
+    cleanupOperationalData: cleanupOperationalDataBestEffortAsync,
     compactLedgerHistory,
     getSettings,
     getSettingsAsync,
@@ -1249,7 +1431,7 @@ async function createCashflowModule({
     close,
     globalStore,
     stopBackgroundJobs,
-    cleanupOperationalData,
+    cleanupOperationalData: budgetStore?.backend === "postgres" ? cleanupOperationalDataAsync : cleanupOperationalData,
     compactLedgerHistory,
     readinessCheck,
     registerRoutes,

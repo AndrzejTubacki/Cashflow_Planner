@@ -19,7 +19,7 @@ import {
 
 const SKIP_REASON = "set CASHFLOW_ENABLE_POSTGRES_TESTS=1 and CASHFLOW_DATABASE_URL to run disposable Postgres tests";
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const localeDir = path.join(repoRoot, "public", "app", "cashflow", "locales");
+const localeDir = path.join(repoRoot, "public-legacy", "app", "cashflow", "locales");
 
 function postgresDatabaseConfig() {
   return {
@@ -182,6 +182,15 @@ test(
           const after = await cashflow.readinessCheck({ checkDefaultBudget: true });
           assert.equal(after.defaultBudgetPresent, true);
           assert.equal(typeof after.defaultBudgetSchemaVersion, "number");
+          // Async repository Promises are truthy even when the actual row is missing.
+          // Exercise both branches; these assertions fail without awaiting the reads.
+          const corruption = await createPostgresGlobalDbService({ databaseUrl });
+          try {
+            await corruption.withClient(client => client.query("DELETE FROM auth_config WHERE id = 1"));
+            await assert.rejects(() => cashflow.readinessCheck(), /auth_config row is missing/);
+            await corruption.withClient(client => client.query("DELETE FROM global_options WHERE id = 1"));
+            await assert.rejects(() => cashflow.readinessCheck(), /global_options row is missing/);
+          } finally { await corruption.close(); }
         } finally {
           await cashflow.close();
         }

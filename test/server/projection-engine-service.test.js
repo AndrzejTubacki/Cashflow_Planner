@@ -17,6 +17,21 @@ import {
 } from "../../src/server/cashflow-projection-engine-service.js";
 import { makeOccurrenceKey } from "../../src/server/cashflow-occurrence-utils.js";
 
+test("projection readers never overlap queries on a transaction-bound connection", async () => {
+  let active = false;
+  const reader = { transactionBound: true,
+    async listPlanningRows(_id, table) {
+      assert.equal(active, false, `overlapping ${table} query`);
+      active = true;
+      await new Promise(resolve => setImmediate(resolve));
+      active = false;
+      return table === "settings" ? [{ ledger_currency: "PLN" }] : [];
+    }, async listConfirmedTransactions() { return []; } };
+  await loadProjectionInputRowsFromBudgetStore({ budgetId: "budget", budgetStore: reader });
+  await loadProjectionFundingStateFromBudgetStore({ budgetId: "budget", budgetStore: reader });
+  assert.equal(active, false);
+});
+
 test("projection input helper mirrors active planning joins and ordering", () => {
   const rows = buildProjectionInputRowsFromPlanningTables({
     settings: {
@@ -135,6 +150,7 @@ test("projection input loader reads needed planning tables through budget store"
   assert.equal(loaded.previousSnapshot.id, "snapshot");
   assert.deepEqual(calls.map(call => call.tableName).sort(), [
     "flex_transactions",
+    "future_transactions",
     "goals",
     "one_off_transactions",
     "pending_transactions",
@@ -1140,4 +1156,107 @@ test("computeReserveClaims never creates a second claim on an already-locked sou
   assert.deepEqual(claims, [
     { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200 }
   ]);
+});
+
+test("findLockedReserveClaims marks a pair as locked on both sides when both halves are committed and filters by ledgerCurrency", () => {
+  const locked = findLockedReserveClaims([
+    { occurrence_key: "reserve_transfer:2026-05:2026-06:out", amount: 180, ledger_currency: "PLN", type: "expense" },
+    { occurrence_key: "reserve_transfer:2026-05:2026-06:in", amount: 180, ledger_currency: "PLN", type: "income" },
+    { occurrence_key: "reserve_transfer:2026-06:2026-07:out", amount: 999, ledger_currency: "EUR", type: "expense" },
+    { occurrence_key: "reserve_transfer:bad:2026-06:out", amount: 100, ledger_currency: "PLN", type: "expense" },
+    { occurrence_key: "reserve_transfer:2026-06:2026-05:out", amount: 100, ledger_currency: "PLN", type: "expense" }
+  ], "PLN");
+
+  assert.deepEqual(locked, [
+    { sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 180, lockedSide: "both" }
+  ]);
+});
+
+test("reserve claim: confirming :out or :in on or before today keeps the counterpart locked and period balances accurate", () => {
+  const baseInputs = {
+    recurringIncomes: [{ id: "salary", name: "Salary", currency: "PLN", amount: 1000, anchor_day_of_month: 25, prediction_strategy: "fixed" }],
+    recurringExpenses: [{
+      id: "rent",
+      name: "Rent",
+      currency: "PLN",
+      amount: 700,
+      necessary: true,
+      anchor_type: "day_of_month",
+      anchor_day_of_month: 26,
+      priority: 1,
+      created_at: "2026-01-01"
+    }],
+    goals: [{ id: "goal-1", name: "Gadget", currency: "PLN", amount: 300, due_date: "2026-05-28", priority: 1, created_at: "2026-01-01" }],
+    goalTargetLedger: new Map([["goal-1", 300]]),
+    oneOffs: [{ id: "oneoff-1", name: "Insurance", type: "expense", currency: "PLN", amount: 500, date: "2026-06-27" }],
+    today: "2026-05-20"
+  };
+
+  // Case 1: ":out" confirmed early on today (2026-05-20) at custom amount 180.
+  // openingBalance reflects -180; predictionRows contains the confirmed :out row.
+  const confirmedOut = {
+    id: "confirmed-out",
+    occurrence_key: "reserve_transfer:2026-05:2026-06:out",
+    type: "expense",
+    currency: "PLN",
+    ledger_currency: "PLN",
+    amount: 180,
+    ledger_amount: 180,
+    date: "2026-05-20",
+    confirmed_date: "2026-05-20"
+  };
+  const outArgs = {
+    ...baseInputs,
+    openingBalance: -180,
+    predictionRows: [confirmedOut],
+    handledOccurrenceKeys: new Set([confirmedOut.occurrence_key])
+  };
+  const outDiscovery = computeProjectionPlan(basePlanArgs({ ...outArgs, discoveryOnly: true, periods: twoPeriods() }));
+  const outClaims = computeReserveClaims({
+    periods: twoPeriods(),
+    periodsAvailable: outDiscovery.periodsAvailable,
+    deficitsByPeriod: outDiscovery.deficitsByPeriod,
+    lockedClaims: findLockedReserveClaims([confirmedOut], "PLN")
+  });
+  const outPlan = computeProjectionPlan(basePlanArgs({ ...outArgs, periods: twoPeriods(), reserveClaims: outClaims }));
+  assert.deepEqual(outClaims, [{ sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 180 }]);
+  assert.equal(outPlan.futureRows.some(r => r.occurrence_key === "reserve_transfer:2026-05:2026-06:out"), false);
+  const lockedIn = outPlan.futureRows.find(r => r.occurrence_key === "reserve_transfer:2026-05:2026-06:in");
+  assert.ok(lockedIn);
+  assert.equal(lockedIn.ledger_amount, 180);
+
+  // Case 2: ":in" confirmed early on today (2026-05-20) at 200 before ":out".
+  // openingBalance reflects +200; computeProjectionPlan shifts +200 from May to June.
+  const confirmedIn = {
+    id: "confirmed-in",
+    occurrence_key: "reserve_transfer:2026-05:2026-06:in",
+    type: "income",
+    currency: "PLN",
+    ledger_currency: "PLN",
+    amount: 200,
+    ledger_amount: 200,
+    date: "2026-05-20",
+    confirmed_date: "2026-05-20"
+  };
+  const inArgs = {
+    ...baseInputs,
+    openingBalance: 200,
+    predictionRows: [confirmedIn],
+    handledOccurrenceKeys: new Set([confirmedIn.occurrence_key])
+  };
+  const inDiscovery = computeProjectionPlan(basePlanArgs({ ...inArgs, discoveryOnly: true, periods: twoPeriods() }));
+  const inClaims = computeReserveClaims({
+    periods: twoPeriods(),
+    periodsAvailable: inDiscovery.periodsAvailable,
+    deficitsByPeriod: inDiscovery.deficitsByPeriod,
+    lockedClaims: findLockedReserveClaims([confirmedIn], "PLN")
+  });
+  const inPlan = computeProjectionPlan(basePlanArgs({ ...inArgs, periods: twoPeriods(), reserveClaims: inClaims }));
+  assert.deepEqual(inClaims, [{ sourcePeriodKey: "2026-05", targetPeriodKey: "2026-06", amountLedger: 200 }]);
+  assert.equal(inPlan.futureRows.some(r => r.occurrence_key === "reserve_transfer:2026-05:2026-06:in"), false);
+  const lockedOut = inPlan.futureRows.find(r => r.occurrence_key === "reserve_transfer:2026-05:2026-06:out");
+  assert.ok(lockedOut);
+  assert.equal(lockedOut.ledger_amount, 200);
+  const goalAfterEarlyIn = inPlan.futureRows.find(r => r.source_goal_id === "goal-1");
+  assert.equal(goalAfterEarlyIn.funded_amount, 100);
 });

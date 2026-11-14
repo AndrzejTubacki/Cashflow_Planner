@@ -53,8 +53,10 @@ test("concurrent SQLite expense confirmations cannot spend the same remaining ba
       }
       const results = await Promise.all(["race-a", "race-b"].map(id =>
         harness.request(`/api/pending/${id}/confirm`, { method: "POST", body: {} })));
-      assert.deepEqual(results.map(result => result.response.status).sort(), [200, 400]);
-      assert.match(results.find(result => result.response.status === 400).body.error, /balance negative/);
+      assert.deepEqual(results.map(result => result.response.status).sort(), [200, 409]);
+      // The winner's projection changes the competing pending snapshot. The
+      // locked loser must request review instead of applying its pre-FX input.
+      assert.match(results.find(result => result.response.status === 409).body.error, /changed; retry confirmation/);
       const snapshot = await harness.api("/api");
       assert.equal(snapshot.confirmedTransactions.filter(row => row.id.startsWith("race-")).length, 2);
       assert.equal(arrivals, 2, "both calls must have reached the FX await before either balance check");
@@ -760,37 +762,27 @@ test("a second ledger currency switch is blocked until the pending conversion is
   }
 }));
 
-test("failed cross-database pending confirmation restores pending and ledger state", async () => {
-  let failConfirmation = false;
-  await withHarness(async harness => {
-    insertPending(harness, {
-      id: "rollback-confirmation",
-      name: "Rollback confirmation",
-      type: "income",
-      amount: 100,
-      date: "2026-05-20",
-      occurrenceKey: "rollback-confirmation"
-    });
-
-    failConfirmation = true;
-    const failed = await harness.request("/api/pending/rollback-confirmation/confirm", {
-      method: "POST",
-      body: { amount: 100, confirmed_date: "2026-05-20" }
-    });
-    assert.equal(failed.response.status, 500);
-
-    const snapshot = await harness.api("/api");
-    assert.equal(snapshot.pendingTransactions.some(row => row.id === "rollback-confirmation"), true);
-    assert.equal(snapshot.confirmedTransactions.some(row => row.id === "rollback-confirmation"), false);
-    assert.ok(harness.events.some(event =>
-      event.kind === "cashflow_recoverable_mutation_rolled_back"
-      && event.details.operation === "confirm_pending_transaction"
-    ));
-  }, {
-    recoverableMutationHook: ({ operation }) => {
-      if (failConfirmation && operation === "confirm_pending_transaction") {
-        throw new Error("forced confirmation failure");
-      }
-    }
-  });
-});
+test("late SQLite confirmation failure rolls back pending, ledger, audit and journal together", async () => withHarness(async harness => {
+  insertPending(harness, { id: "rollback-confirmation", name: "Rollback confirmation", type: "income", amount: 100,
+    date: "2026-05-20", occurrenceKey: "rollback-confirmation" });
+  const inject = harness.openPlanningDb();
+  try { inject.prepare('INSERT INTO cashflow_sync_heads (budget_id, epoch, revision) VALUES (?, ?, 0)')
+    .run(harness.userId, '11111111-1111-4111-8111-111111111111');
+    inject.exec(`CREATE TRIGGER fail_confirmation_revision BEFORE UPDATE ON cashflow_sync_heads
+    BEGIN SELECT RAISE(ABORT, 'forced late confirmation failure'); END`); } finally { inject.close(); }
+  const failed = await harness.request("/api/pending/rollback-confirmation/confirm", { method: "POST", body: {} });
+  assert.equal(failed.response.status, 500);
+  assert.match(failed.body.error, /forced late confirmation failure/);
+  const snapshot = await harness.api("/api");
+  assert.equal(snapshot.pendingTransactions.some(row => row.id === "rollback-confirmation"), true);
+  assert.equal(snapshot.confirmedTransactions.some(row => row.id === "rollback-confirmation"), false);
+  const check = harness.openPlanningDb();
+  try {
+    assert.equal(check.prepare('SELECT count(*) AS n FROM cashflow_ledger_originals').get().n, 0);
+    assert.equal(check.prepare('SELECT count(*) AS n FROM cashflow_ledger_audit_state').get().n, 0);
+    assert.equal(check.prepare('SELECT count(*) AS n FROM cashflow_sync_operations').get().n, 0);
+    check.exec('DROP TRIGGER fail_confirmation_revision');
+  } finally { check.close(); }
+  await harness.api("/api/pending/rollback-confirmation/confirm", { method: "POST", body: {} });
+  assert.equal((await harness.api("/api")).confirmedTransactions.some(row => row.id === "rollback-confirmation"), true);
+}));

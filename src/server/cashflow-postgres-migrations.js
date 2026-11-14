@@ -83,6 +83,28 @@ async function migrationAlreadyApplied(client, migration) {
       && await columnExists(client, "recurring_expenses", "end_month_year")
       && await columnExists(client, "recurring_incomes", "end_month_year");
   }
+  if (migration.name === "postgres-v1.2.0.sql") {
+    const state = await currentSchemaState(client);
+    if (!(state.globalVersion >= 8 && state.planningVersion >= 22)) return false;
+    for (const table of ["app_device_instance", "app_device_pairings", "app_devices", "app_device_tokens",
+      "cashflow_sync_heads", "cashflow_sync_operations", "cashflow_ledger_summary_cache",
+      "cashflow_ledger_audit_state", "cashflow_ledger_originals", "cashflow_ledger_corrections",
+      "cashflow_ledger_origins", "cashflow_standalone_transfers"]) {
+      if (!await tableExists(client, table)) return false;
+    }
+    for (const [table, column] of [["global_options", "backup_max_retention_count"],
+      ["global_options", "backup_max_age_days"], ["global_options", "device_access_minutes"],
+      ["global_options", "device_renewal_idle_days"], ["global_options", "device_absolute_days"],
+      ["cashflow_sync_heads", "retained_after"], ["cashflow_sync_operations", "payload_pruned"],
+      ["settings", "notification_channels"], ["notification_queue", "sent_channels"],
+      ["cashflow_ledger_audit_state", "origin_version"], ["budgets", "revision"]]) {
+      if (!await columnExists(client, table, column)) return false;
+    }
+    const constraints = await client.query(`SELECT count(*) AS n FROM pg_constraint
+      WHERE conrelid = 'cashflow_standalone_transfers'::regclass AND contype = 'c'
+        AND pg_get_constraintdef(oid) LIKE '%cancelled%'`);
+    return Number(constraints.rows[0].n) >= 2;
+  }
   return false;
 }
 

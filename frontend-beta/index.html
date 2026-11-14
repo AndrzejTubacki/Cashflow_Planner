@@ -3,10 +3,26 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cashflow (Beta)</title>
-<link rel="icon" type="image/png" href="/favicon.png">
-<link rel="stylesheet" href="/styles/base.css">
-<!-- Non-blocking font load, same reasoning as public/index.html. -->
+<title>Cashflow</title>
+<script>
+  // The legacy UI moved to /legacy/. Someone who chose it keeps landing there:
+  // ?ui=beta stays here for this visit, ?ui=legacy or the stored preference goes back.
+  (function () {
+    var preferred = null;
+    try {
+      preferred = localStorage.getItem("cashflow_preferred_ui");
+    } catch (err) {
+      // Storage can be unavailable in private contexts; stay on the default UI.
+    }
+    var override = new URLSearchParams(window.location.search).get("ui");
+    if (override === "beta" || (override !== "legacy" && preferred !== "legacy")) return;
+    // Keep the query and hash: provider sign-in returns with ?cashflow_auth=…#account.
+    window.location.replace("/legacy/" + window.location.search + window.location.hash);
+  })();
+</script>
+<link rel="icon" type="image/png" href="/legacy/favicon.png">
+<link rel="stylesheet" href="/legacy/styles/base.css">
+<!-- Non-blocking font load, same reasoning as public-legacy/index.html. -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Roboto:wght@500&display=swap">

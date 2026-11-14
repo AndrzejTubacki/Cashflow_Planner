@@ -84,7 +84,9 @@ export function createCashflowSessionService({
       Date.parse(row.idle_expires_at) <= current.getTime()
       || Date.parse(row.absolute_expires_at) <= current.getTime()
     ) {
-      await repo.sessions.revokeById(row.id, current.toISOString());
+      // Natural session expiry makes the browser session inactive without setting
+      // revoked_at, so devices approved by this session remain valid until an
+      // explicit logout, session revocation, or credential/account change.
       return null;
     }
 
@@ -107,11 +109,44 @@ export function createCashflowSessionService({
     return row;
   }
 
-  async function createSession({ accountId, budgetId, authMethod = "none" }) {
+  /** Hold the credential/account row locks through insertion. A password
+   * replacement either revokes this committed session or precedes its proof check. */
+  async function withIssuanceRepository(work) {
+    return withRepository(async (repo, connection) => {
+      const postgres = repo.backend === 'postgres';
+      if (postgres) await connection.query('BEGIN');
+      else connection.exec('BEGIN IMMEDIATE');
+      try {
+        const result = await work(repo, connection, postgres);
+        if (postgres) await connection.query('COMMIT');
+        else connection.exec('COMMIT');
+        return result;
+      } catch (error) {
+        if (postgres) await connection.query('ROLLBACK');
+        else connection.exec('ROLLBACK');
+        throw error;
+      }
+    });
+  }
+
+  async function createSession({ accountId, budgetId, authMethod = "none", credentialProof = null }) {
     const context = budgetId
       ? await resolveBudgetContext(budgetId, { accountId })
       : await resolveAccountContext(accountId);
-    return await withRepository(async repo => {
+    return await withIssuanceRepository(async (repo, connection, postgres) => {
+      if (postgres) {
+        await connection.query('SELECT id FROM accounts WHERE id = $1 FOR SHARE', [accountId]);
+        await connection.query('SELECT id FROM auth_config WHERE id = 1 FOR SHARE');
+        if (credentialProof !== null) await connection.query('SELECT account_id FROM password_credentials WHERE account_id = $1 FOR SHARE', [accountId]);
+      }
+      const account = await repo.accounts.getStatus(accountId);
+      if (!account || account.status !== 'active') throw unauthorized();
+      const mode = await repo.authConfig.getActiveMode();
+      if ((mode?.active_mode || 'none') !== authMethod) throw unauthorized();
+      if (credentialProof !== null) {
+        const credential = await repo.passwordCredentials.getForAccount(accountId);
+        if (!credential || !hashesMatch(credentialProof, tokenHash(credential.password_hash))) throw unauthorized('Invalid email or password');
+      }
       const config = await repo.authConfig.get() || {};
       const idleMinutes = Math.max(1, Number(config.session_idle_minutes) || 720);
       const absoluteMinutes = Math.max(idleMinutes, Number(config.session_absolute_minutes) || 10080);
@@ -156,7 +191,8 @@ export function createCashflowSessionService({
       if ((config?.active_mode || "none") !== "none") {
         throw forbidden("None-mode account selection is disabled");
       }
-      return requestedAccountId || await repo.memberships.activeOwnerAccountId(budgetId);
+      // Selection must name the actor; ownership is never an identity fallback.
+      return requestedAccountId;
     });
 
     if (!accountId) throw forbidden("Budget access denied");
@@ -181,7 +217,7 @@ export function createCashflowSessionService({
     });
   }
 
-  async function createInternalAccountSession(accountId) {
+  async function createInternalAccountSession(accountId, { credentialProof = null } = {}) {
     await withRepository(async repo => {
       const config = await repo.authConfig.getActiveMode();
       if ((config?.active_mode || "none") !== "internal") {
@@ -191,6 +227,7 @@ export function createCashflowSessionService({
     return await createSession({
       accountId,
       authMethod: "internal",
+      credentialProof,
       budgetId: null
     });
   }

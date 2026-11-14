@@ -1,4 +1,5 @@
 import { cashflowErrorMessage, cashflowErrorStack } from "./cashflow-error-utils.js";
+import { recordSqliteFinancialChange } from "./cashflow-financial-journal.js";
 import { DEFAULT_TIMEZONE } from "./cashflow-constants.js";
 import { todayInTimezone } from "./cashflow-date-utils.js";
 import { generateId } from "./cashflow-id-utils.js";
@@ -117,6 +118,30 @@ export function createCashflowProjectionCoordinatorService({
   // the sync branch would silently open SQLite from inside a Postgres
   // mutation, defeating the whole point of the isolated Postgres write path.
   function withProjectionStatus(userId, result, options = {}) {
+    // Atomic callers already hold the financial lock. Propagate failures rather
+    // than converting them to success-shaped metadata after committing sources.
+    if (options.store) {
+      return (async () => {
+        try {
+          if (!options.preservePending) await clearPendingIfItCausesNegativeOpeningBalanceAsync(userId, options.store);
+          await regenerateProjectionsAsync(userId, options.store, options);
+          return attachProjection(result, { projection_ok: true, projection_error: null });
+        } catch (error) {
+          logCashflowError("cashflow_atomic_projection_failed", error, { userId });
+          throw error;
+        }
+      })();
+    }
+    if (options.db) {
+      try {
+        if (!options.preservePending) clearPendingIfItCausesNegativeOpeningBalance(userId, options.db);
+        regenerateProjections(userId, options.db, options);
+        return attachProjection(result, { projection_ok: true, projection_error: null });
+      } catch (error) {
+        logCashflowError("cashflow_atomic_projection_failed", error, { userId });
+        throw error;
+      }
+    }
     if (canUseAsyncProjectionEngine()) {
       const projectionPromise = options.preservePending
         ? regenerateProjectionsPreservingPendingAfterMutationAsync(userId)
@@ -211,7 +236,10 @@ export function createCashflowProjectionCoordinatorService({
     });
   }
 
-  async function regenerateProjectionsAfterMutationAsync(userId) {
+  async function regenerateProjectionsAfterMutationAsync(userId, options = {}) {
+    // A caller holding a budget transaction must regenerate on that writer: a
+    // pooled connection would wait forever on the ledger lock it already holds.
+    if (options.store) return await withProjectionStatus(userId, null, options);
     return await projectionStatusForAsync(
       userId,
       () => runProjectionWithOptionalLock(userId, async () => {
@@ -321,13 +349,22 @@ export function createCashflowProjectionCoordinatorService({
     }
   }
 
-  function clearPendingIfItCausesNegativeOpeningBalance(userId) {
+  function clearPendingIfItCausesNegativeOpeningBalance(userId, transactionDb = null) {
     if (typeof latestConfirmedBalance !== "function" || typeof pendingNetBalance !== "function") {
       return null;
     }
 
-    const db = openPlanningDb(userId);
+    const db = transactionDb || openPlanningDb(userId);
     try {
+      // Standalone cleanup commits separately from regeneration. Own both the
+      // balance read/delete and its invalidation; composed callers own theirs.
+      if (!transactionDb) {
+        return db.transaction(() => {
+          const removed = clearPendingIfItCausesNegativeOpeningBalance(userId, db);
+          if (removed) recordSqliteFinancialChange(db, userId, "pending");
+          return removed;
+        }).immediate();
+      }
       const settings = db.prepare("SELECT timezone FROM settings WHERE id = 1").get() || {};
       const today = todayInTimezone(settings.timezone || DEFAULT_TIMEZONE);
       const confirmedBalance = roundMoneyAmount(typeof confirmedBalanceAsOf === "function"
@@ -370,11 +407,12 @@ export function createCashflowProjectionCoordinatorService({
 
       return null;
     } finally {
-      db.close();
+      if (!transactionDb) db.close();
     }
   }
 
-  async function clearPendingIfItCausesNegativeOpeningBalanceAsync(userId) {
+  // An injected writer must not acquire another connection or independent lock.
+  async function clearPendingIfItCausesNegativeOpeningBalanceAsync(userId, transactionStore = null) {
     if (
       !budgetStore ||
       typeof budgetStore.listPlanningRows !== "function" ||
@@ -431,8 +469,14 @@ export function createCashflowProjectionCoordinatorService({
       return null;
     };
 
+    if (transactionStore) return await work(transactionStore);
     if (typeof budgetStore.transaction === "function") {
-      return await budgetStore.transaction(work);
+      return await budgetStore.transaction(async writer => {
+        if (budgetStore.backend === "postgres") await writer.lockBudgetLedger(userId);
+        const removed = await work(writer);
+        if (removed && budgetStore.backend === "postgres") await writer.recordFinancialChange(userId, "pending");
+        return removed;
+      });
     }
 
     return await work(budgetStore);
@@ -467,6 +511,9 @@ export function createCashflowProjectionCoordinatorService({
         if (!ids.length) return 0;
 
         const result = await writer.deletePlanningRowsById(userId, "pending_transactions", ids);
+        // Clearing pending commits before the route's later regeneration. Fence
+        // that intermediate accepted state even if regeneration subsequently fails.
+        if (result?.deleted) await writer.recordFinancialChange(userId, "pending");
         return Number(result?.deleted || 0);
       });
     }
@@ -476,6 +523,7 @@ export function createCashflowProjectionCoordinatorService({
     try {
       return db.transaction(() => {
         const result = db.prepare("DELETE FROM pending_transactions").run();
+        if (result.changes) recordSqliteFinancialChange(db, userId, "pending");
         return result.changes || 0;
       })();
     } finally {

@@ -12,14 +12,24 @@ import {
   createPlanningRunningBalancePlan
 } from "./cashflow-planning-balance-plan.js";
 import { badRequest } from "./cashflow-user-utils.js";
+import { budgetLedgerOpeningBalance, sqliteLedgerOpeningBalance } from './cashflow-ledger-opening.js';
+import { createNodeLedgerAuditReplay } from './cashflow-ledger-audit-store.js';
+import { oneOffProgressWithOriginals } from '../engine/ledger-audit-progress.js';
+import { readSqliteFinancialExportAudit, validateFinancialExportAudit } from './cashflow-ledger-audit-export.js';
 
+/** Projection inputs retain audited installment reservations and the verified
+ * signed opening, including empty histories and dates before the first payment. */
 export function createCashflowProjectionStateService({
   budgetStore = null,
+  allowStandaloneOrigins = false,
   latestConfirmedBalance,
   listLedgerYears,
   loadAllConfirmedTransactions,
+  openPlanningDb = null,
   openLedgerDb
 }) {
+  const codec = createNodeLedgerAuditReplay({ allowStandaloneOrigins });
+
   function normalizePendingStatus(status) {
     return status === "partial" || status === "underfunded" ? status : "pending";
   }
@@ -96,55 +106,56 @@ export function createCashflowProjectionStateService({
     );
   }
 
-  async function confirmedOccurrenceKeysAsync(userId) {
-    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+  // Optional readers keep occurrence/history checks inside a composing transaction.
+  async function confirmedOccurrenceKeysAsync(userId, store = budgetStore) {
+    if (!store || typeof store.listConfirmedTransactions !== "function") {
       return confirmedOccurrenceKeys(userId);
     }
 
     return new Set(
-      (await confirmedRowsForBudgetStore(userId))
+      (await confirmedRowsForBudgetStore(userId, store))
         .map(row => row.occurrence_key || occurrenceKeyFromRow(row))
         .filter(Boolean)
     );
   }
 
-  function confirmedOneOffProgressFromRows(rows = []) {
-    // Track installments in original transaction units so projection can generate only the unconfirmed remainder.
-    const progress = new Map();
-
-    for (const row of rows) {
-      const sourceId = row.source_one_off_id;
-      if (!sourceId) continue;
-
-      const currency = String(row.currency || "").toUpperCase();
-      const type = String(row.type || "");
-      const key = `${sourceId}:${type}:${currency}`;
-      const current = progress.get(key) || {
-        sourceId,
-        type,
-        currency,
-        confirmedAmount: 0,
-        confirmedCount: 0
-      };
-
-      current.confirmedAmount = addMoneyAmounts(current.confirmedAmount, row.amount);
-      current.confirmedCount += 1;
-      progress.set(key, current);
+  /** Verify audit against the exact effective rows before using reservations. */
+  function confirmedOneOffProgressFromRows(rows = [], audit = null) {
+    if (audit !== null) {
+      const ledgers = {};
+      for (const row of rows) (ledgers[row.ledger_year] ||= []).push(row);
+      validateFinancialExportAudit(audit.budgetId, audit, ledgers, { allowStandaloneOrigins });
     }
-
-    return progress;
+    const originals = audit?.version === 2
+      ? [...codec.replayLedgerAuditSnapshot(audit, audit.budgetId).originals.values()]
+      : audit?.originals || [];
+    return oneOffProgressWithOriginals(rows, originals);
   }
 
+  /** Legacy synchronous projections read retained evidence from the same
+   * budget file and verify it against complete effective facts before use. */
   function confirmedOneOffProgress(userId) {
-    return confirmedOneOffProgressFromRows(loadAllConfirmedTransactions(userId));
+    const rows = loadAllConfirmedTransactions(userId);
+    let audit = null;
+    if (typeof openPlanningDb === 'function') {
+      const db = openPlanningDb(userId);
+      try { audit = readSqliteFinancialExportAudit(db, userId, { allowStandaloneOrigins }); } finally { db.close(); }
+    }
+    return confirmedOneOffProgressFromRows(rows, audit);
   }
 
-  async function confirmedOneOffProgressAsync(userId) {
-    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+  // Installment progress must see the same uncommitted ledger as projection inputs.
+  async function confirmedOneOffProgressAsync(userId, store = budgetStore) {
+    if (!store || typeof store.listConfirmedTransactions !== "function") {
       return confirmedOneOffProgress(userId);
     }
 
-    return confirmedOneOffProgressFromRows(await confirmedRowsForBudgetStore(userId));
+    const rows = await confirmedRowsForBudgetStore(userId, store);
+    // Bound readers share the owning projection/financial transaction; never
+    // substitute the root store, which cannot see uncommitted corrections.
+    const audit = typeof store.exportLedgerAuditSnapshot === 'function'
+      ? await store.exportLedgerAuditSnapshot(userId) : null;
+    return confirmedOneOffProgressFromRows(rows, audit);
   }
 
   function findConfirmedOccurrence(userId, occurrenceKey) {
@@ -272,19 +283,16 @@ export function createCashflowProjectionStateService({
     const rows = confirmedRowsForCurrentLedger(db, userId)
       .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
 
-    if (!rows.length) return 0;
-
+    const openingBalance = sqliteLedgerOpeningBalance(db, userId, currentLedgerCurrency(db), { allowStandaloneOrigins });
+    if (!rows.length) return roundMoneyAmount(openingBalance);
     const latest = rows.at(-1);
     if (latest.running_balance_pln !== null && latest.running_balance_pln !== undefined) {
       return roundMoneyAmount(latest.running_balance_pln);
     }
-
-    return roundMoneyAmount(rows.reduce((balance, row) => {
-      const amount = confirmedLedgerAmount(row);
-      return row.type === "income"
-        ? addMoneyAmounts(balance, amount)
-        : subtractMoneyAmounts(balance, amount);
-    }, 0));
+    // Preserve explicit amounts on old facts that lack reconstructible FX.
+    return roundMoneyAmount(rows.reduce((balance, row) => row.type === 'income'
+      ? addMoneyAmounts(balance, confirmedLedgerAmount(row))
+      : subtractMoneyAmounts(balance, confirmedLedgerAmount(row)), openingBalance));
   }
 
   function confirmedRowsAfterDate(db, userId, date) {
@@ -301,16 +309,22 @@ export function createCashflowProjectionStateService({
       const rows = loadAllConfirmedTransactions(userId)
         .filter(row => String(row.ledger_currency || "PLN") === (settings?.ledger_currency || "PLN"))
         .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
-      return latestBalanceFromConfirmedRows(rows, { openingBalance: 0 });
+      const db = openPlanningDb(userId);
+      try { return latestBalanceFromConfirmedRows(rows, { openingBalance:
+        sqliteLedgerOpeningBalance(db, userId, settings?.ledger_currency || "PLN", { allowStandaloneOrigins }) }); }
+      finally { db.close(); }
     }
 
-    const rows = (await confirmedRowsForCurrentLedgerAsync(userId, settings, store))
+    const effectiveSettings = settings || await settingsForBudgetStore(userId, store);
+    const rows = (await confirmedRowsForCurrentLedgerAsync(userId, effectiveSettings, store))
       .filter(row => !cutoffDate || String(row.date || "") <= cutoffDate);
-    return latestBalanceFromConfirmedRows(rows, { openingBalance: 0 });
+    return latestBalanceFromConfirmedRows(rows, { openingBalance:
+      await budgetLedgerOpeningBalance(store, userId, effectiveSettings.ledger_currency || "PLN") });
   }
 
-  async function confirmedRowsAfterDateAsync(userId, date, settings = null) {
-    if (!budgetStore || typeof budgetStore.listConfirmedTransactions !== "function") {
+  // Respect the transaction-bound reader instead of reopening the default store.
+  async function confirmedRowsAfterDateAsync(userId, date, settings = null, store = budgetStore) {
+    if (!store || typeof store.listConfirmedTransactions !== "function") {
       return loadAllConfirmedTransactions(userId)
         .filter(row => String(row.ledger_currency || "PLN") === (settings?.ledger_currency || "PLN"))
         .filter(row => String(row.date || "") > date)
@@ -320,7 +334,7 @@ export function createCashflowProjectionStateService({
         }));
     }
 
-    return (await confirmedRowsForCurrentLedgerAsync(userId, settings))
+    return (await confirmedRowsForCurrentLedgerAsync(userId, settings, store))
       .filter(row => String(row.date || "") > date)
       .map(row => ({
         ...row,
@@ -332,6 +346,7 @@ export function createCashflowProjectionStateService({
     const settings = db.prepare("SELECT ledger_currency, timezone FROM settings WHERE id = 1").get() || {};
     const plan = createPlanningRunningBalancePlan({
       confirmedRows: userId ? loadAllConfirmedTransactions(userId) : [],
+      openingBalance: userId ? sqliteLedgerOpeningBalance(db, userId, settings.ledger_currency || "PLN", { allowStandaloneOrigins }) : 0,
       futureRows: db.prepare("SELECT * FROM future_transactions").all(),
       pendingRows: db.prepare("SELECT * FROM pending_transactions").all(),
       settings
@@ -369,6 +384,7 @@ export function createCashflowProjectionStateService({
     const confirmedRows = await confirmedRowsForBudgetStore(userId, store);
     const plan = createPlanningRunningBalancePlan({
       confirmedRows,
+      openingBalance: await budgetLedgerOpeningBalance(store, userId, settingsRows?.[0]?.ledger_currency || "PLN"),
       futureRows,
       pendingRows,
       settings: settingsRows?.[0] || {}

@@ -223,7 +223,9 @@ function SecretStoreResult({ result }) {
   );
 }
 
-function ProviderForm({ kind, provider, storageTargets, onSaved, onCancel }) {
+export function ProviderForm({ kind: initialKind, provider, storageTargets, onSaved, onCancel }) {
+  // Existing kinds remain editable; keep their configuration visible for review.
+  const [kind, setKind] = useState(initialKind);
   const guide = IDENTITY_PROVIDER_GUIDES[kind] || IDENTITY_PROVIDER_GUIDES.oidc;
   const isExisting = Boolean(provider?.id);
   const config = provider?.config || {};
@@ -240,7 +242,7 @@ function ProviderForm({ kind, provider, storageTargets, onSaved, onCancel }) {
   const [authorizationEndpoint, setAuthorizationEndpoint] = useState(config.authorizationEndpoint || "");
   const [tokenEndpoint, setTokenEndpoint] = useState(config.tokenEndpoint || "");
   const [userInfoEndpoint, setUserInfoEndpoint] = useState(config.userInfoEndpoint || "");
-  const [enabled, setEnabled] = useState(isExisting ? Boolean(provider.enabled) : true);
+  const [enabled, setEnabled] = useState(isExisting ? Boolean(provider.enabled) : false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -268,10 +270,10 @@ function ProviderForm({ kind, provider, storageTargets, onSaved, onCancel }) {
         redirectUri: effectiveRedirect.trim(),
         scope: scope.trim()
       };
-      if (guide.needsIssuer) body.issuer = issuer.trim();
-      if (authorizationEndpoint.trim()) body.authorizationEndpoint = authorizationEndpoint.trim();
-      if (tokenEndpoint.trim()) body.tokenEndpoint = tokenEndpoint.trim();
-      if (userInfoEndpoint.trim()) body.userInfoEndpoint = userInfoEndpoint.trim();
+      if (guide.needsIssuer || isExisting) body.issuer = issuer.trim();
+      if (isExisting || authorizationEndpoint.trim()) body.authorizationEndpoint = authorizationEndpoint.trim();
+      if (isExisting || tokenEndpoint.trim()) body.tokenEndpoint = tokenEndpoint.trim();
+      if (isExisting || userInfoEndpoint.trim()) body.userInfoEndpoint = userInfoEndpoint.trim();
       if (effectiveSecret.trim()) {
         if (secretSource === "env") body.secretEnv = effectiveSecret.trim();
         else body.secretFile = effectiveSecret.trim();
@@ -305,6 +307,13 @@ function ProviderForm({ kind, provider, storageTargets, onSaved, onCancel }) {
       {saved ? <div className="beta-success" role="status">{t("Provider saved.")}</div> : null}
 
       <div className="beta-form-grid">
+        {isExisting ? <label className="beta-field">
+          <span>{t("Provider kind")}</span>
+          <select value={kind} onChange={e => setKind(e.target.value)}>
+            {Object.entries(IDENTITY_PROVIDER_GUIDES).map(([id, item]) => <option key={id} value={id}>{t(item.label)}</option>)}
+          </select>
+          <small className="beta-hint">{t("Changing kind may require updating issuer, credentials, scopes, and endpoint overrides. The server validates the resulting configuration.")}</small>
+        </label> : null}
         <label className="beta-field">
           <span>{t("Provider ID")}</span>
           <input
@@ -323,10 +332,10 @@ function ProviderForm({ kind, provider, storageTargets, onSaved, onCancel }) {
           <input value={displayName} required maxLength={120} placeholder={kind === "oidc" ? "e.g. Authentik" : ""} onChange={e => setDisplayName(e.target.value)} />
           <small className="beta-hint">{formatMessage("Shown as “Continue with {label}” on the sign-in page.", { label: displayName || "…" })}</small>
         </label>
-        {guide.needsIssuer ? (
+        {guide.needsIssuer || isExisting ? (
           <label className="beta-field">
             <span>{t("Issuer URL")}</span>
-            <input type="url" value={issuer} required placeholder="https://auth.example.com/application/o/cashflow/" onChange={e => setIssuer(e.target.value)} />
+            <input type="url" value={issuer} required={kind === "oidc" || kind === "google"} placeholder="https://auth.example.com/application/o/cashflow/" onChange={e => setIssuer(e.target.value)} />
             <small className="beta-hint">{formatParts("Examples: Keycloak {keycloakUrl}, Entra ID {entraUrl}.", {
               keycloakUrl: <code>{"https://host/realms/<realm>"}</code>,
               entraUrl: <code>{"https://login.microsoftonline.com/<tenant>/v2.0"}</code>

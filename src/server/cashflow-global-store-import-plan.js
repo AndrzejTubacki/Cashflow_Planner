@@ -14,6 +14,7 @@ export function createGlobalStoreImportPlan(payload) {
   const writeBatches = [];
 
   for (const tableName of POSTGRES_GLOBAL_TABLES) {
+    if (tableName.startsWith("app_device")) continue;
     const rows = normalized.tables[tableName] || [];
     if (!rows.length) continue;
     writeBatches.push({
@@ -59,6 +60,7 @@ function assertGlobalStoreReplacer(globalStore) {
 function tablesFromPlan(plan) {
   const tables = Object.fromEntries(POSTGRES_GLOBAL_TABLES.map(tableName => [tableName, []]));
   for (const batch of plan.writeBatches || []) {
+    if (String(batch.tableName).startsWith("app_device")) continue;
     if (!POSTGRES_GLOBAL_TABLES.includes(batch.tableName)) {
       throw new Error(`Unsupported global metadata table: ${batch.tableName}`);
     }
@@ -110,6 +112,7 @@ export async function applyGlobalStoreImportPlan({
   assertGlobalStoreAppender(globalStore);
   const appliedBatches = [];
   for (const batch of importPlan.writeBatches) {
+    if (String(batch.tableName).startsWith("app_device")) continue;
     await onBatch({
       rows: batch.rows.length,
       tableName: batch.tableName

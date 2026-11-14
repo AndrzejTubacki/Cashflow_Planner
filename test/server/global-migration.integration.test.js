@@ -14,7 +14,6 @@ import {
 } from "../../src/server/cashflow-schema.js";
 import {
   GLOBAL_SCHEMA_VERSION,
-  LEGACY_ADMIN_ACCOUNT_ID,
   applyGlobalMigrations
 } from "../../src/server/cashflow-global-schema.js";
 
@@ -68,7 +67,7 @@ test("global schema version 6 migrates ntfy private hosts in place without losin
       ) VALUES (1, 'EUR', 'pl', 'UTC', 'DE', 18, 'manual', 2.5, '2026-10-14');
     `);
     applyGlobalMigrations(db);
-    assert.equal(db.pragma("user_version", { simple: true }), 7);
+    assert.equal(db.pragma("user_version", { simple: true }), GLOBAL_SCHEMA_VERSION);
     assert.deepEqual(db.prepare(`
       SELECT ledger_currency, locale, timezone, holiday_country, future_periods,
         fx_provider, fx_buffer_percent, ntfy_allowed_private_hosts
@@ -82,6 +81,10 @@ test("global schema version 6 migrates ntfy private hosts in place without losin
       fx_provider: "manual",
       fx_buffer_percent: 2.5,
       ntfy_allowed_private_hosts: "[]"
+    });
+    assert.deepEqual(db.prepare(`SELECT device_access_minutes, device_renewal_idle_days,
+      device_absolute_days FROM global_options WHERE id = 1`).get(), {
+      device_access_minutes: 15, device_renewal_idle_days: 90, device_absolute_days: 365
     });
   } finally {
     db.close();
@@ -179,7 +182,7 @@ async function withRuntime(fn) {
   }
 }
 
-test("global migration snapshots version one and assigns existing profile storage to one legacy admin", async () => {
+test("global migration snapshots version one without creating accounts for discovered storage", async () => {
   await withRuntime(({ dataDir }) => {
     const profiles = ["household", "shared"];
     createVersionOneGlobalDb(dataDir, [
@@ -204,26 +207,19 @@ test("global migration snapshots version one and assigns existing profile storag
       assert.equal(db.pragma("user_version", { simple: true }), GLOBAL_SCHEMA_VERSION);
       assert.deepEqual(
         db.prepare("SELECT id, display_name FROM accounts ORDER BY id").all(),
-        [{ id: LEGACY_ADMIN_ACCOUNT_ID, display_name: "Legacy Administrator" }]
+        []
       );
       assert.deepEqual(
         db.prepare("SELECT account_id, role FROM account_global_roles").all(),
-        [{ account_id: LEGACY_ADMIN_ACCOUNT_ID, role: "system_admin" }]
+        []
       );
       assert.deepEqual(
         db.prepare("SELECT id, storage_key, display_name FROM budgets ORDER BY id").all(),
-        [
-          { id: "household", storage_key: "household", display_name: "Household Budget" },
-          { id: "shared", storage_key: "shared", display_name: "shared" }
-        ]
+        []
       );
       assert.deepEqual(
         db.prepare("SELECT budget_id, account_id, role FROM budget_memberships ORDER BY budget_id").all(),
-        profiles.map(budgetId => ({
-          budget_id: budgetId,
-          account_id: LEGACY_ADMIN_ACCOUNT_ID,
-          role: "owner"
-        }))
+        []
       );
       assert.equal(db.prepare("SELECT 1 FROM budgets WHERE id = 'metadata_only'").get(), undefined);
     } finally {
@@ -254,8 +250,8 @@ test("global migration snapshots version one and assigns existing profile storag
   });
 });
 
-test("initial global schema creation imports existing storage budgets before account bootstrap", async () => {
-  await withRuntime(({ dataDir }) => {
+test("initial global schema leaves unclaimed storage for explicit user creation", async () => {
+  await withRuntime(async ({ dataDir }) => {
     const storage = new Set(["household", "shared"]);
     for (const profile of storage) {
       createProfileStorage(dataDir, profile);
@@ -275,15 +271,15 @@ test("initial global schema creation imports existing storage budgets before acc
       assert.equal(db.pragma("user_version", { simple: true }), GLOBAL_SCHEMA_VERSION);
       assert.deepEqual(
         db.prepare("SELECT id FROM budgets ORDER BY id").all().map(row => row.id),
-        ["household", "shared"]
+        []
       );
       assert.deepEqual(
         db.prepare("SELECT account_id, role FROM account_global_roles ORDER BY account_id").all(),
-        [{ account_id: LEGACY_ADMIN_ACCOUNT_ID, role: "system_admin" }]
+        []
       );
       assert.deepEqual(
         db.prepare("SELECT DISTINCT account_id, role FROM budget_memberships ORDER BY account_id").all(),
-        [{ account_id: LEGACY_ADMIN_ACCOUNT_ID, role: "owner" }]
+        []
       );
     } finally {
       db.close();
@@ -293,12 +289,19 @@ test("initial global schema creation imports existing storage budgets before acc
       userId: "new_account",
       displayName: "New Account"
     });
+    // Explicit creation adopts an existing folder and owns it under that user ID.
+    service.createUser({ userId: "household", displayName: "Household" });
+    assert.equal(service.resolveBudgetContext("household", { accountId: "household" }).budget.role, "owner");
+    assert.throws(() => service.resolveBudgetContext("household"), /account is required/);
+    await assert.rejects(service.resolveBudgetContextAsync("household"), /account is required/);
+    assert.throws(() => service.resolveBudgetContext("household", { accountId: "new_account" }), /Budget access denied/);
+    await assert.rejects(service.resolveBudgetContextAsync("household", { accountId: "new_account" }), /Budget access denied/);
 
     db = new Database(path.join(dataDir, "cashflow-global.sqlite"));
     try {
       assert.deepEqual(
         db.prepare("SELECT account_id, role FROM account_global_roles ORDER BY account_id").all(),
-        [{ account_id: LEGACY_ADMIN_ACCOUNT_ID, role: "system_admin" }]
+        [{ account_id: "new_account", role: "system_admin" }]
       );
       assert.equal(
         db.prepare(`
@@ -356,7 +359,7 @@ test("failed global migration rolls back schema changes and reuses its recovery 
     db = new Database(path.join(dataDir, "cashflow-global.sqlite"));
     try {
       assert.equal(db.pragma("user_version", { simple: true }), GLOBAL_SCHEMA_VERSION);
-      assert.ok(db.prepare("SELECT 1 FROM budgets WHERE id = 'household'").get());
+      assert.equal(db.prepare("SELECT 1 FROM budgets WHERE id = 'household'").get(), undefined);
     } finally {
       db.close();
     }
@@ -458,4 +461,32 @@ test("new accounts own their budget without receiving legacy administrator owner
       db.close();
     }
   });
+});
+
+test('main SQLite global 7 upgrades in one step to 8, preserving options and accounts', async () => {
+  const { initializeMainGlobalSchema } = await import('../helpers/main-schema-fixtures.js');
+  const db = new Database(':memory:');
+  try {
+    initializeMainGlobalSchema(db);
+    db.exec(`INSERT INTO accounts (id,display_name,created_at,updated_at) VALUES ('kept','Kept','2026-01-01','2026-01-01');
+      UPDATE global_options SET ledger_currency = 'EUR', ntfy_allowed_private_hosts = '["ntfy.example"]' WHERE id = 1`);
+    const account = db.prepare('SELECT * FROM accounts').get();
+    const options = db.prepare('SELECT * FROM global_options').get();
+    const steps = [];
+    applyGlobalMigrations(db, { beforeStep(version, connection) {
+      steps.push([version, connection.pragma('user_version', { simple: true })]);
+      assert.equal(connection.prepare("SELECT 1 FROM sqlite_master WHERE name = 'app_devices'").get(), undefined);
+    } });
+    assert.deepEqual(steps, [[8, 7]]);
+    assert.equal(db.pragma('user_version', { simple: true }), 8);
+    assert.deepEqual(db.prepare('SELECT * FROM accounts').get(), account);
+    assert.deepEqual(db.prepare('SELECT * FROM global_options').get(), {
+      ...options, device_access_minutes: 15, device_renewal_idle_days: 90, device_absolute_days: 365
+    });
+    assert.equal(db.prepare('SELECT count(*) AS n FROM cashflow_standalone_transfers').get().n, 0);
+    assert.ok(db.prepare('PRAGMA table_info(budgets)').all().some(column => column.name === 'revision'));
+    const before = db.serialize();
+    applyGlobalMigrations(db, { beforeStep() { assert.fail('Current schema must not migrate'); } });
+    assert.deepEqual(db.serialize(), before);
+  } finally { db.close(); }
 });

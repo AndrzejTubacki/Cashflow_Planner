@@ -27,12 +27,13 @@ npm ci
 npm start
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:3000`. The legacy interface is also available at
+`/legacy/`.
 
 ### Docker
 
 Run the published image from GitHub Container Registry (`latest` or a pinned
-release tag such as `1.1.6`):
+release tag such as `1.2.0`):
 
 ```sh
 docker pull ghcr.io/andrzejtubacki/cashflow_planner:latest
@@ -45,7 +46,7 @@ docker run -d \
   ghcr.io/andrzejtubacki/cashflow_planner:latest
 ```
 
-### Docker Compose 
+### Docker Compose
 (builds from the local checkout and mounts persistent volumes):
 
 ```sh
@@ -112,7 +113,7 @@ The settings that matter for most self-hosted installs:
 | `CASHFLOW_MIRROR_LOGS_TO_STDOUT` | `0` | Also mirror log lines to stdout/stderr, useful for container/process-manager log collection |
 | `CASHFLOW_BACKUP_ALLOWED_ROOTS` | unset (`/app/backups` in Compose) | Absolute paths allowed as custom per-budget backup locations |
 | `CASHFLOW_PASSWORD_PEPPER` | unset | Optional secret mixed into internal-login password hashing. Keep it stable and backed up once set, or existing password hashes become unverifiable |
-| `CASHFLOW_K8S_SECRET_NAME` | `cashflow-secrets` | Kubernetes Secret that Admin > Sign-in providers saves client secrets into when Cashflow runs in a cluster and its service account may `get`/`patch` that Secret. Without that permission, the admin page shows the `kubectl` command and the Role to grant instead |
+| `CASHFLOW_K8S_SECRET_NAME` | `cashflow-secrets` | Kubernetes Secret that Settings → Admin → Sign-in providers saves client secrets into when Cashflow runs in a cluster and its service account may `get`/`patch` that Secret. Without that permission, the admin page shows the `kubectl` command and the Role to grant instead |
 | `CASHFLOW_EXTERNAL_AUTH_SECRET` | unset | Shared secret your reverse proxy sends when using trusted-header (external SSO) auth mode |
 | `CASHFLOW_TRUST_PROXY` | unset (no proxy trusted) | Opt in to Express's `trust proxy` setting when running behind a reverse proxy, so `req.ip` (and anything keyed on it, like login rate limiting) reflects the real client instead of the proxy. See [Exposing It Safely](#exposing-it-safely) |
 
@@ -168,14 +169,12 @@ To migrate explicitly, or when
 `CASHFLOW_DATABASE_URL` set. If migration fails, Cashflow keeps `/healthz`
 alive and serves an update-needed page plus 503 API responses until an operator
 updates the schema; it detects the fix without a restart.
-New Postgres backups store payloads in the shared database, and internal-login
+Postgres backups are stored in the shared database, and internal-login
 throttling is shared across replicas. Normal deployments use at most 20
 connections per replica; a distinct lock database adds 10. See
 [deployment requirements and remaining limits](docs/postgres-runtime.md).
-The runtime image now uses UID/GID 1000; bind-mounted data/log directories must
-be writable by that user. `npm run test:container` verifies first-run setup,
-health/readiness/API and graceful shutdown with a read-only root filesystem
-and only data/log volumes writable.
+The runtime image runs as UID/GID 1000; bind-mounted data/log directories must
+be writable by that user.
 
 Moving data between the two backends is a set of dedicated commands, not
 something to flip on a running install without a plan. See
@@ -187,8 +186,8 @@ including verification. Back up first, either way.
 Keep these outside published source archives and container images; they're
 private, per-deployment state:
 
-- `data/`: every budget's planning and ledger databases, plus global account
-  metadata (`cashflow-global.sqlite`)
+- `data/`: each budget's `planning.sqlite` stores both planning and confirmed
+  ledger history; global account metadata lives in `cashflow-global.sqlite`
 - `logs/`
 - `backups/` (only used for custom app-level backup locations)
 - `.env`
@@ -214,10 +213,16 @@ docker compose -f docker-compose.example.yml run --rm --no-deps \
 docker compose -f docker-compose.example.yml start cashflow
 ```
 
-Cashflow also has its own app-level backup feature (Settings → Backups, or
-`POST /api/backup`) that runs while the app stays up; see
-[Settings](docs/settings.md). It's a convenient second layer, not a
-replacement for an external backup of the whole data volume.
+Cashflow also has its own app-level backup feature in the React UI at
+**Settings → Budget → Backups** (budget owners only): automatic backup settings,
+**Back up now**, a backup list, and restore with confirmation and a safety backup.
+SQLite uses server folders with configurable location; PostgreSQL stores snapshots
+in the database. Both enforce the budget retention count and optional instance
+count/age limits set in **Settings → Admin → Global options**. Pruning runs after
+every successful backup and during background maintenance, always preserving the
+newest successful backup and artifacts in use by restore/import. The legacy UI has no backup controls. See
+[Settings](docs/settings.md). Keep an external backup of the whole data volume or
+PostgreSQL database as well.
 
 ## Exposing It Safely
 
@@ -234,8 +239,8 @@ reachable by anyone but you:
 Cashflow also supports admin-configured internal email/password login and
 trusted reverse-proxy SSO as an alternative to relying entirely on your proxy.
 To switch on internal login, first set your own email and password under
-Account settings (beta UI account menu), then activate internal login in the
-Admin authentication panel.
+Settings → Account (account menu → Settings), then activate internal login
+under Settings → Admin → Authentication.
 See [Security](docs/security.md) for the full threat model and working
 reverse-proxy examples (Caddy Basic Auth, Caddy/Nginx/Traefik forward-auth,
 oauth2-proxy, Authelia, Authentik).
@@ -260,13 +265,21 @@ rejected (logged as `cashflow_trust_proxy_invalid`) and trust stays off.
 - multiple accounts and budgets (household, personal, demo data, ...) in one
   install
 - configurable ledger currency with FX conversion (manual rates, or automatic
-  via NBP or Frankfurter)
+  via NBP or Frankfurter), with stale-rate warnings and manual refresh; planning
+  stays available while actual-money writes require a fresh cached rate
 - ntfy and Discord notifications for funding shortfalls, missing income,
-  goals, and daily summaries
+  goals, and daily summaries, with both channels usable at once
+- ledger corrections with retained original payments and audit history
+- device pairing and a versioned financial sync API
+- transfer of a standalone budget into a new server budget, preserving supported
+  ledger and correction history
 - full JSON export/import, one-off CSV import, confirmed-ledger CSV export,
   and a loadable anonymized sample dataset
 - first-run setup for currency, locale, timezone, opening balance, income,
   and how many periods ahead to project
+
+The companion Android app is not public yet. Device pairing, financial sync,
+and standalone-budget transfer are available on the server for that app.
 
 See [Features](docs/features.md) for the full data model and transaction
 lifecycle, and [Settings](docs/settings.md) for every configurable option

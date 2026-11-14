@@ -11,16 +11,8 @@ import {
   requireNumber,
   requireString
 } from "./cashflow-input-validation.js";
+import { PREDICTION_SUBSTITUTES } from "../engine/local-validation.js";
 
-const PREDICTION_SUBSTITUTES = [
-  "none",
-  "starting_value",
-  "average_extreme_starting_value",
-  "median_recorded",
-  "last_confirmed",
-  "previous_year_same_month",
-  "require_min_recorded_months"
-];
 
 function normalizeIfPresent(next, field, normalize) {
   if (hasOwn(next, field)) next[field] = normalize(next[field], field);
