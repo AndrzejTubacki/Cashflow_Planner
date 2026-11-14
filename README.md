@@ -33,7 +33,7 @@ Open `http://localhost:3000`. The legacy interface is also available at
 ### Docker
 
 Run the published image from GitHub Container Registry (`latest` or a pinned
-release tag such as `1.2.0`):
+release tag such as `1.2.1`):
 
 ```sh
 docker pull ghcr.io/andrzejtubacki/cashflow_planner:latest

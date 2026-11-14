@@ -66,7 +66,7 @@ For stricter change control and easier rollbacks, pin an immutable release tag
 instead of `latest`:
 
 ```yaml
-image: ghcr.io/andrzejtubacki/cashflow_planner:1.2.0
+image: ghcr.io/andrzejtubacki/cashflow_planner:1.2.1
 imagePullPolicy: IfNotPresent
 ```
 
@@ -75,8 +75,8 @@ imagePullPolicy: IfNotPresent
 If you build from source, either push to a registry your cluster can pull from:
 
 ```sh
-docker build -t registry.example.com/cashflow:1.2.0 .
-docker push registry.example.com/cashflow:1.2.0
+docker build -t registry.example.com/cashflow:1.2.1 .
+docker push registry.example.com/cashflow:1.2.1
 ```
 
 Or, on a single-node or air-gapped k3s host without a registry, import the
