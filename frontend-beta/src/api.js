@@ -120,7 +120,9 @@ export async function downloadFile(url, fallbackName) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(objectUrl);
+  // Browsers may start a blob download after click() returns; revoking the URL
+  // at once can silently cancel it on a slow machine.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
 }
 
 export async function fetchSession() {

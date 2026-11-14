@@ -586,11 +586,34 @@ async function uploadFile(page, selector, name, mimeType, content) {
   });
 }
 
+// When a download never starts, report the export response and browser console
+// so a CI failure says whether the request or the download itself failed.
+async function clickAndDownload(page, locator, pathname) {
+  const consoleLines = [];
+  const responses = [];
+  const onConsole = message => consoleLines.push(`${message.type()}: ${message.text()}`);
+  const onResponse = response => {
+    if (new URL(response.url()).pathname === pathname) responses.push(response.status());
+  };
+  page.on("console", onConsole);
+  page.on("response", onResponse);
+  try {
+    const downloadPromise = page.waitForEvent("download");
+    await locator.click();
+    return await downloadPromise;
+  } catch (error) {
+    error.message += `\n${pathname} responses: ${JSON.stringify(responses)}`
+      + `\nbrowser console:\n${consoleLines.slice(-20).join("\n") || "(empty)"}`;
+    throw error;
+  } finally {
+    page.off("console", onConsole);
+    page.off("response", onResponse);
+  }
+}
+
 async function assertDataPortability(page, baseUrl, userId, sessionAuth) {
   await openAllSettingsSections(page);
-  const downloadPromise = page.waitForEvent("download");
-  await page.locator("[data-cashflow-download-full-export]").click();
-  const download = await downloadPromise;
+  const download = await clickAndDownload(page, page.locator("[data-cashflow-download-full-export]"), "/api/export/full");
   const exportText = await fs.readFile(await download.path(), "utf8");
   const fullExport = JSON.parse(exportText);
   assert.equal(fullExport.format, "cashflow-full-export");

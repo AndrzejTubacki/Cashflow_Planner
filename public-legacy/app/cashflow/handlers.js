@@ -194,7 +194,9 @@ async function downloadCashflowFile(apiClient, url, fallbackName) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(objectUrl);
+  // Browsers may start a blob download after click() returns; revoking the URL
+  // at once can silently cancel it on a slow machine.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
 }
 
 async function withBusyButton(button, busyLabel, fn) {
